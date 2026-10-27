@@ -1,5 +1,7 @@
 # Calling mom
 
+![Calling mom banner](assets/calling-mom-banner.png)
+
 A [Hermes](https://hermes-agent.nousresearch.com) plugin that lets a **cheap local model run your Kanban board** and "calls mom" (a stronger model) only where the board shows it is needed.
 
 The local model never judges itself. A weak model does not know when it is out of its depth, so every trigger is a **durable fact from the board or the tool results**, not a self-assessment.
@@ -126,6 +128,18 @@ python -W error::ResourceWarning -m unittest test_signals test_calling_mom test_
 ```
 
 Tests write to a sandbox, never to your real log.
+
+## Assets
+
+`assets/` holds the plugin visuals: the banner, the 512 px icon (rounded tile with the SlyBase fox badge) and the fox mark itself. Form language is Hermes printmaking (engraved radials, thin frame, chiaroscuro) on the SlyBase product palette.
+
+The SVGs are generated from one script:
+
+```bash
+python3 tools/make_assets.py       # rewrites assets/*.svg, Python 3 only
+```
+
+Rendering the PNGs needs the Inter and Playfair Display fonts (Google Fonts) and any SVG renderer, e.g. `resvg -w 3200 assets/calling-mom-banner.svg -o assets/calling-mom-banner.png`.
 
 ## License
 
