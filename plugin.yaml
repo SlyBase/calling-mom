@@ -1,0 +1,19 @@
+name: calling-mom
+label: Calling mom
+kind: standalone
+version: 1.0.0
+manifest_version: 2
+description: >
+  Routes Kanban cards to a stronger model without asking the local model to
+  judge itself. A worker that blocks with kind "capability" (or untyped) is
+  pinned to the strong model and returned to ready once; cards whose title or
+  body carries the [crit] marker are pinned to the strong model at claim time.
+provides_tools:
+  - second_opinion
+provides_hooks:
+  - kanban_task_claimed
+  - kanban_task_blocked
+  - transform_tool_result
+  - on_kanban_dispatch_tick
+  - pre_tool_call
+author: SlyBase
