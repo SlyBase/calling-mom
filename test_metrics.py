@@ -80,6 +80,12 @@ class RenderTest(unittest.TestCase):
         self.assertIn("calling_mom_review_redirects_total 1", out)
         self.assertIn('calling_mom_ladder_total{rung="effort"} 1', out)
 
+    def test_escalation_series_exists_even_without_escalations(self):
+        """Without a zero-initialised series an `increase()` alert can never fire."""
+        out = lines(self.render(rows=[]))
+        for reason in ("crit", "blocked", "breaker"):
+            self.assertIn('calling_mom_escalations_total{reason="%s"} 0' % reason, out)
+
     def test_escalations_are_counted_per_reason(self):
         rows = list(ROWS) + [
             {"kind": "escalated", "reason": "breaker"},

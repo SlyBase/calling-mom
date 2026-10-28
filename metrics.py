@@ -14,6 +14,7 @@ from collections import Counter
 _CATEGORIES = ("error", "loop", "validation", "architecture")
 _SIGNALS = ("same_error", "loop", "malformed", "steps")
 _RUNGS = ("effort",)
+_ESCALATION_REASONS = ("crit", "blocked", "breaker")
 
 _FAMILIES = {  # name -> (type, help)
     "calling_mom_events_total": ("counter", "Plugin log rows by kind."),
@@ -61,7 +62,10 @@ def render(rows, spend, caps, boards, now) -> str:
     ignored = Counter(r.get("why") or "unknown" for r in rows if r.get("kind") == "verify_ignored")
     rungs = Counter({k: 0 for k in _RUNGS})
     rungs.update(r.get("rung") or "unknown" for r in rows if r.get("kind") == "ladder")
-    escalations = Counter(r.get("reason") or "other" for r in rows if r.get("kind") == "escalated")
+    # initialised, not just counted: the series must exist from the first push, otherwise
+    # `increase()` stays empty and the "parked but not escalated" alert can never fire
+    escalations = Counter({r: 0 for r in _ESCALATION_REASONS})
+    escalations.update(r.get("reason") or "other" for r in rows if r.get("kind") == "escalated")
 
     samples = {name: [] for name in _FAMILIES}
     for kind, n in sorted(kinds.items()):

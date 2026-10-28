@@ -3,6 +3,13 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.1.1] - 2026-10-28
+
+### Fixed
+- `calling_mom_escalations_total` is exported with all three reasons at `0` from the first
+  push. Without an existing series `increase()` stays empty, so the
+  `CallingMomParkNotEscalated` alert could never fire in the case it exists for.
+
 ## [1.1.0] - 2026-10-28
 
 ### Added
