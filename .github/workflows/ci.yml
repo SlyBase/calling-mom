@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    # The full gate (184 tests, 100 % coverage, copy drift) needs a Hermes venv and is run
+    # by `check.py` on the host -- see README "Release gate". CI covers what a bare runner can.
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: compile every module
+        run: python -m py_compile __init__.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py linecov.py check.py
+
+      - name: plugin manifest is valid YAML with the required keys
+        run: |
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import sys, yaml
+          m = yaml.safe_load(open("plugin.yaml"))
+          required = {"name", "label", "kind", "version", "manifest_version", "description"}
+          missing = required - set(m)
+          assert not missing, f"plugin.yaml missing: {sorted(missing)}"
+          assert m["name"] == "calling-mom", m["name"]
+          assert isinstance(m.get("provides_hooks"), list) and m["provides_hooks"], "provides_hooks empty"
+          assert {"kanban_task_claimed", "kanban_task_blocked", "on_kanban_worker_exited"} <= set(m["provides_hooks"])
+          print("plugin.yaml ok, version", m["version"])
+          PY
+
+      - name: declared hooks match the register() calls
+        run: |
+          python - <<'PY'
+          import re, sys, yaml
+          declared = set(yaml.safe_load(open("plugin.yaml"))["provides_hooks"])
+          src = open("__init__.py").read()
+          registered = set(re.findall(r'ctx\.register_hook\("([^"]+)"', src))
+          assert declared == registered, f"manifest/register mismatch: {declared ^ registered}"
+          print("hooks match:", sorted(declared))
+          PY
+
+      - name: CHANGELOG has an entry for the manifest version
+        run: |
+          python - <<'PY'
+          import re, yaml
+          version = yaml.safe_load(open("plugin.yaml"))["version"]
+          text = open("CHANGELOG.md").read()
+          assert re.search(rf"^## \[{re.escape(version)}\]", text, re.M), f"no CHANGELOG section for {version}"
+          print("changelog ok for", version)
+          PY

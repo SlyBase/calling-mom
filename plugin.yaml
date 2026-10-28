@@ -1,7 +1,7 @@
 name: calling-mom
 label: Calling mom
 kind: standalone
-version: 1.0.0
+version: 1.1.0
 manifest_version: 2
 description: >
   Routes Kanban cards to a stronger model without asking the local model to
@@ -13,6 +13,7 @@ provides_tools:
 provides_hooks:
   - kanban_task_claimed
   - kanban_task_blocked
+  - on_kanban_worker_exited
   - transform_tool_result
   - on_kanban_dispatch_tick
   - pre_tool_call

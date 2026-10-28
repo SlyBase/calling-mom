@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: tag matches plugin.yaml version
+        run: |
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import os, yaml
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          version = yaml.safe_load(open("plugin.yaml"))["version"]
+          assert tag == version, f"tag {tag} != plugin.yaml {version} -- bump the manifest first"
+          print("version", version)
+          PY
+
+      - name: build the installable archive
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          git archive --format=zip --prefix="calling-mom/" --output="dist/calling-mom-${VER}.zip" HEAD \
+            __init__.py metrics.py signals.py plugin.yaml README.md LICENSE CHANGELOG.md assets scripts
+          unzip -l "dist/calling-mom-${VER}.zip"
+
+      - name: release notes from CHANGELOG
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v v="## [$VER]" 'index($0, v) {flag=1} flag && /^## \[/ && !index($0, v) {exit} flag' CHANGELOG.md > notes.md
+          test -s notes.md || echo "Release $VER" > notes.md
+          cat notes.md
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          gh release create "v$VER" "dist/calling-mom-$VER.zip" \
+            --title "calling-mom $VER" --notes-file notes.md

@@ -80,6 +80,24 @@ class RenderTest(unittest.TestCase):
         self.assertIn("calling_mom_review_redirects_total 1", out)
         self.assertIn('calling_mom_ladder_total{rung="effort"} 1', out)
 
+    def test_escalations_are_counted_per_reason(self):
+        rows = list(ROWS) + [
+            {"kind": "escalated", "reason": "breaker"},
+            {"kind": "escalated", "reason": "breaker"},
+            {"kind": "escalated", "reason": "blocked"},
+        ]
+        out = lines(self.render(rows=rows))
+        self.assertIn('calling_mom_escalations_total{reason="breaker"} 2', out)
+        self.assertIn('calling_mom_escalations_total{reason="blocked"} 1', out)
+
+    def test_gave_up_age_is_a_per_board_gauge(self):
+        boards = [{"board": "coding", "escalated": 1, "parked": 0, "gave_up_age": 42},
+                  {"board": "default", "escalated": 0, "parked": 0, "gave_up_age": None}]
+        out = lines(self.render(boards=boards))
+        self.assertIn('calling_mom_gave_up_age_seconds{board="coding"} 42', out)
+        self.assertFalse([x for x in out if 'board="default"' in x and "gave_up_age" in x],
+                         "a board that never parked must not export the gauge")
+
     def test_spend_gauges_and_caps(self):
         out = lines(self.render())
         self.assertIn("calling_mom_spend_today_usd 0.5", out)
@@ -132,7 +150,29 @@ class BoardCountsTest(unittest.TestCase):
             kb.block_task(c, p, reason="stuck", kind="capability")
             kb.create_task(c, title="plain", assignee="d")
         got = metrics.board_counts({"b1": str(path)})
-        self.assertEqual(got, [{"board": "b1", "escalated": 1, "parked": 1}])
+        self.assertEqual(got[0]["escalated"], 1)
+        self.assertEqual(got[0]["parked"], 1)
+
+    def test_gave_up_age_comes_from_the_newest_breaker_park(self):
+        import os
+        path = Path(tempfile.mkdtemp()) / "kanban.db"
+        os.environ.setdefault("HERMES_KANBAN_DB", str(path))
+        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
+        from hermes_cli import kanban_db_dispatch as kd
+        import time as _t
+
+        kbc.init_db(path)
+        with kbc.connect_closing(db_path=path) as c:
+            tid = kb.create_task(c, title="parked twice", assignee="d")
+            kd._record_task_failure(c, tid, "boom", outcome="crashed", failure_limit=1)
+        got = metrics.board_counts({"b1": str(path)}, now=_t.time())
+        self.assertIsNotNone(got[0]["gave_up_age"])
+        self.assertLess(got[0]["gave_up_age"], 120)
+        # a board without any park exports no age at all
+        empty = Path(tempfile.mkdtemp()) / "empty.db"
+        kbc.init_db(empty)
+        self.assertIsNone(metrics.board_counts({"b0": str(empty)})[0]["gave_up_age"])
 
     def test_unreadable_board_is_skipped(self):
         self.assertEqual(metrics.board_counts({"gone": "/nonexistent/kanban.db"}), [])

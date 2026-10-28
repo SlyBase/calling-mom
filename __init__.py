@@ -34,6 +34,9 @@ import time
 from collections import deque
 from pathlib import Path
 
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_boards as kbb
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -148,12 +151,15 @@ class _connect:
         return self._stack.__exit__(*exc)
 
 
-def _pin_strong(conn, task, why: str) -> None:
+def _pin_strong(conn, task, why: str, reason: str = "other") -> None:
+    """Pin the card to the strong model. ``reason`` feeds the escalation metric:
+    ``crit`` (marker at claim), ``blocked`` (worker gave up), ``breaker`` (crash park)."""
     from hermes_cli import kanban_db as kb
 
     cfg = settings()
     kb.set_model_override(conn, task.id, cfg["model"], provider=cfg["provider"])
     kb.add_comment(conn, task.id, AUTHOR, f"Escalated to {cfg['model']} — {why}.")
+    _trace_row("escalated", task=task.id, reason=reason)
     logger.info("calling-mom: %s -> %s (%s)", task.id, cfg["model"], why)
 
 
@@ -171,7 +177,7 @@ def on_claimed(task_id=None, board=None, **_):
             marker = settings()["marker"].lower()
             text = f"{task.title or ''}\n{task.body or ''}".lower()
             if marker and marker in text:
-                _pin_strong(conn, task, "critical card")
+                _pin_strong(conn, task, "critical card", reason="crit")
     except Exception as exc:  # pragma: no cover - never break dispatch
         logger.warning("calling-mom: claim hook failed for %s: %s", task_id, exc)
 
@@ -214,7 +220,7 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
                 with kb.write_txn(conn):
                     conn.execute("UPDATE tasks SET block_recurrences = 0 WHERE id = ?", (task_id,))
             else:
-                _pin_strong(conn, task, why)
+                _pin_strong(conn, task, why, reason="blocked")
             kb.unblock_task(conn, task_id)
     except Exception as exc:  # pragma: no cover - never break the board
         logger.warning("calling-mom: block hook failed for %s: %s", task_id, exc)
@@ -223,11 +229,20 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
 _last_trace: dict = {}
 
 
+_LOG_MAX_BYTES = 5_000_000  # ponytail: tail-trim at 5 MB; rotate properly if a month ever exceeds it
+
+
 def _trace_row(kind, **fields):
     """Append one JSON row to the observe log (best effort, no content)."""
     try:
         path = _log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size > _LOG_MAX_BYTES:
+                tail = path.read_text().splitlines()[-1000:]
+                path.write_text("\n".join(tail) + "\n")
+        except OSError:
+            pass
         with path.open("a") as fh:
             fh.write(json.dumps({"ts": int(time.time()), "kind": kind, "pid": os.getpid(), **fields}) + "\n")
     except Exception:  # pragma: no cover
@@ -289,7 +304,7 @@ def sweep(board=None) -> list:
                     or signals.is_infra(payload.get("error") or task.last_failure_error)
                 ):
                     continue
-                _pin_strong(conn, task, f"circuit breaker ({str(payload.get('error') or '')[:150]})")
+                _pin_strong(conn, task, f"circuit breaker ({str(payload.get('error') or '')[:150]})", reason="breaker")
                 kb.unblock_task(conn, task.id)
                 done.append(task.id)
             marks[key] = last
@@ -308,6 +323,56 @@ def sweep_all() -> list:
     for meta in kbb.list_boards(include_archived=False):
         escalated += sweep(meta["slug"])
     return escalated
+
+
+def _resolve_task(task_id, board=None):
+    """Resolve one task row on ``board`` (``None`` = the active board)."""
+    with _connect(board) as conn:
+        task = kb.get_task(conn, task_id)
+    return task, board
+
+
+def _escalate_parked_task(task, payload, board) -> bool:
+    """Pin a breaker-parked card to the strong model once; returns True when escalated."""
+    if (
+        payload.get("sticky")
+        or payload.get("terminal_provider")
+        or task is None
+        or task.status != "blocked"
+        or _is_local_only(task)
+        or task.block_kind not in ESCALATABLE_KINDS
+        or task.model_override == settings()["model"]
+        or signals.is_infra(payload.get("error") or task.last_failure_error)
+    ):
+        return False
+    with _connect(board) as conn:
+        fresh = kb.get_task(conn, task.id)
+        if fresh is None or fresh.status != "blocked":
+            return False
+        _pin_strong(conn, fresh, "circuit breaker (%s)" % (str(payload.get("error") or "")[:150]), reason="breaker")
+        kb.unblock_task(conn, fresh.id)
+    return True
+
+
+def on_parked(task_id=None, board=None, payload=None, **_):
+    """Escalate a crash-breaker parked card reactively; never break the caller."""
+    if not _enabled() or not task_id:
+        return
+    try:
+        task, board = _resolve_task(task_id, board)
+        if task is None:
+            return
+        _escalate_parked_task(task, payload or {}, board)
+    except Exception as exc:  # pragma: no cover - hook must stay fail-open
+        logger.warning("calling-mom: parked hook failed for %s: %s", task_id, exc)
+
+
+def on_worker_exited(task_id=None, board=None, outcome=None, **_):
+    """``on_kanban_worker_exited``: the dispatcher fires this after breaker accounting has
+    committed, so a crash-parked card can be escalated without polling."""
+    if outcome == "completed":
+        return
+    on_parked(task_id=task_id, board=board, payload={"error": None})
 
 
 def on_dispatch_tick(board=None, **_):
@@ -616,12 +681,15 @@ _SECOND_OPINION = {
 
 
 def _log_path() -> Path:
+    """Shared by every profile on purpose: the gateway escalates, the cron sweeps, both must land
+    in ONE log or the metrics only see half the story. ``get_default_hermes_root`` is the shared
+    root (a profile's own home would fork the file per profile)."""
     override = os.environ.get("CALLING_MOM_LOG")
     if override:
         return Path(override)
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_default_hermes_root
 
-    return Path(get_hermes_home()) / "logs" / "calling-mom.jsonl"
+    return Path(get_default_hermes_root()) / "logs" / "calling-mom.jsonl"
 
 
 def _worker_key():
@@ -695,6 +763,7 @@ def register(ctx) -> None:
                       handler=handle_second_opinion, check_fn=lambda: bool(os.environ.get("HERMES_KANBAN_TASK")),
                       emoji="\U0001f9d0")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
+    ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
     cfg = settings()
     logger.info(
         "calling-mom installed: block -> %s via %s; marker %s",

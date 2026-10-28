@@ -7,6 +7,7 @@ restart of any process never resets them. The cron sweep pushes the text every m
 import contextlib
 import json
 import sqlite3
+import time
 import urllib.request
 from collections import Counter
 
@@ -24,6 +25,8 @@ _FAMILIES = {  # name -> (type, help)
     "calling_mom_verify_ignored_total": ("counter", "verify: lines that were not run, by reason."),
     "calling_mom_review_redirects_total": ("counter", "Completions handed to the reviewer profile."),
     "calling_mom_ladder_total": ("counter", "Free-rung retries (more reasoning effort) by rung."),
+    "calling_mom_escalations_total": ("counter", "Cards pinned to the strong model, by reason (crit|blocked|breaker)."),
+    "calling_mom_gave_up_age_seconds": ("gauge", "Age of the newest gave_up event per board (breaker park), seconds."),
     "calling_mom_spend_today_usd": ("gauge", "Advisor spend today (UTC), USD."),
     "calling_mom_spend_today_tokens": ("gauge", "Advisor tokens today (UTC)."),
     "calling_mom_spend_cap_usd": ("gauge", "Configured daily advisor cap, USD."),
@@ -58,6 +61,7 @@ def render(rows, spend, caps, boards, now) -> str:
     ignored = Counter(r.get("why") or "unknown" for r in rows if r.get("kind") == "verify_ignored")
     rungs = Counter({k: 0 for k in _RUNGS})
     rungs.update(r.get("rung") or "unknown" for r in rows if r.get("kind") == "ladder")
+    escalations = Counter(r.get("reason") or "other" for r in rows if r.get("kind") == "escalated")
 
     samples = {name: [] for name in _FAMILIES}
     for kind, n in sorted(kinds.items()):
@@ -83,6 +87,9 @@ def render(rows, spend, caps, boards, now) -> str:
         _sample("calling_mom_review_redirects_total", kinds.get("review_redirect", 0)))
     for rung in sorted(rungs):
         samples["calling_mom_ladder_total"].append(_sample("calling_mom_ladder_total", rungs[rung], rung=rung))
+    for reason, n in sorted(escalations.items()):
+        samples["calling_mom_escalations_total"].append(
+            _sample("calling_mom_escalations_total", n, reason=reason))
     samples["calling_mom_spend_today_usd"].append(_sample("calling_mom_spend_today_usd", spend.get("usd", 0.0)))
     samples["calling_mom_spend_today_tokens"].append(_sample("calling_mom_spend_today_tokens", spend.get("tokens", 0)))
     samples["calling_mom_spend_cap_usd"].append(_sample("calling_mom_spend_cap_usd", caps["usd"]))
@@ -90,6 +97,9 @@ def render(rows, spend, caps, boards, now) -> str:
     for b in boards:
         for state in ("escalated", "parked"):
             samples["calling_mom_cards"].append(_sample("calling_mom_cards", b[state], board=b["board"], state=state))
+        if b.get("gave_up_age") is not None:
+            samples["calling_mom_gave_up_age_seconds"].append(
+                _sample("calling_mom_gave_up_age_seconds", b["gave_up_age"], board=b["board"]))
     samples["calling_mom_last_push_timestamp_seconds"].append(
         _sample("calling_mom_last_push_timestamp_seconds", int(now)))
 
@@ -116,9 +126,14 @@ def read_rows(path) -> list:
     return rows
 
 
-def board_counts(db_paths) -> list:
-    """``[{"board", "escalated", "parked"}]`` from read-only board DBs; unreadable boards are skipped."""
+def board_counts(db_paths, now=None) -> list:
+    """``[{"board", "escalated", "parked", "gave_up_age"}]`` from read-only board DBs.
+
+    ``gave_up_age`` is the age in seconds of the newest breaker park on that board (None when the
+    board never parked). It is what lets an alert say "a card parked, but nothing escalated it".
+    Unreadable boards are skipped."""
     out = []
+    now = time.time() if now is None else now
     for slug, path in db_paths.items():
         try:
             with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
@@ -126,7 +141,10 @@ def board_counts(db_paths) -> list:
                     "SELECT COUNT(DISTINCT task_id) FROM task_comments WHERE author = 'escalation'").fetchone()[0]
                 parked = db.execute(
                     "SELECT COUNT(*) FROM tasks WHERE status IN ('blocked', 'triage') AND model_override IS NOT NULL").fetchone()[0]
-            out.append({"board": slug, "escalated": escalated, "parked": parked})
+                newest = db.execute(
+                    "SELECT MAX(created_at) FROM task_events WHERE kind = 'gave_up'").fetchone()[0]
+            out.append({"board": slug, "escalated": escalated, "parked": parked,
+                        "gave_up_age": int(now - newest) if newest else None})
         except sqlite3.Error:
             continue
     return out

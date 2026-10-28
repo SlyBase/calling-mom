@@ -237,6 +237,104 @@ def self_task(task_id):
     return with_conn(lambda c: kb.get_task(c, task_id))
 
 
+class ParkedHookTest(unittest.TestCase):
+    """Reactive path: a core hook that already exists (no core patch) escalates a parked card."""
+
+    def setUp(self):
+        os.environ["CALLING_MOM"] = "on"
+        os.environ["CALLING_MOM_STATE"] = str(Path(tempfile.mkdtemp()) / "state.json")
+
+    def parked(self, title, error="worker exited with code 1", **kw):
+        from hermes_cli import kanban_db_dispatch as kd
+        tid = with_conn(lambda c: kb.create_task(c, title=title, assignee="worker"))
+        with_conn(lambda c: kd._record_task_failure(c, tid, error, outcome="crashed", failure_limit=1, **kw))
+        self.assertEqual(self_task(tid).status, "blocked")
+        return tid
+
+    def test_parked_hook_escalates_the_card(self):
+        tid = self.parked("crashy hook")
+        plugin.on_parked(task_id=tid, board=None, payload={"error": "worker exited with code 1"})
+        after = self_task(tid)
+        self.assertEqual((after.model_override, after.status), (STRONG, "ready"))
+
+    def test_escalation_hands_an_entered_connection_to_the_write(self):
+        """Regression: the connection must be entered, never passed as context manager or closed."""
+        task = type("T", (), {"id": "t1", "status": "blocked", "block_kind": None,
+                              "model_override": None, "last_failure_error": "boom",
+                              "title": "x", "body": ""})()
+        seen = {}
+
+        class Ctx:
+            def __enter__(self):
+                return "CONN"
+
+            def __exit__(self, *exc):
+                return False
+
+        orig = (plugin._connect, plugin._pin_strong, plugin.kb)
+        plugin._connect = lambda board=None: Ctx()
+        plugin._pin_strong = lambda conn, t, why, **kw: seen.update(pin=conn, reason=kw.get("reason"))
+        plugin.kb = type("KB", (), {
+            "get_task": staticmethod(lambda c, i: task),
+            "unblock_task": staticmethod(lambda c, i: seen.update(unblock=c)),
+        })()
+        try:
+            self.assertTrue(plugin._escalate_parked_task(task, {"error": "boom"}, "default"))
+        finally:
+            plugin._connect, plugin._pin_strong, plugin.kb = orig
+        self.assertEqual(seen["pin"], "CONN")
+        self.assertEqual(seen["unblock"], "CONN")
+        self.assertEqual(seen["reason"], "breaker")
+
+    def test_worker_exited_hook_reuses_the_parked_path(self):
+        tid = self.parked("crashy exit")
+        plugin.on_worker_exited(
+            task_id=tid, board=None, outcome="crashed", retry_status="ready", exit_code=1,
+        )
+        after = self_task(tid)
+        self.assertEqual((after.model_override, after.status), (STRONG, "ready"))
+
+    def test_second_park_after_escalation_is_not_escalated_again(self):
+        tid = self.parked("twice")
+        plugin.on_parked(task_id=tid, payload={"error": "boom"})
+        from hermes_cli import kanban_db_dispatch as kd
+        with_conn(lambda c: kd._record_task_failure(c, tid, "again", outcome="crashed", failure_limit=1))
+        plugin.on_parked(task_id=tid, payload={"error": "again"})
+        self.assertEqual(self_task(tid).status, "blocked")
+
+    def test_infrastructure_error_is_left_alone(self):
+        tid = self.parked("net down", error="Connection refused by 10.0.0.5:8000")
+        plugin.on_parked(task_id=tid, payload={"error": "Connection refused by 10.0.0.5:8000"})
+        self.assertIsNone(self_task(tid).model_override)
+
+    def test_sticky_trip_is_left_for_a_human(self):
+        tid = self.parked("sticky", force_trip=True)
+        plugin.on_parked(task_id=tid, payload={"error": "boom", "sticky": True})
+        self.assertIsNone(self_task(tid).model_override)
+
+    def test_unknown_task_and_missing_id_are_no_ops(self):
+        plugin.on_parked(task_id="no-such-task", payload={"error": "boom"})
+        plugin.on_parked(task_id=None, payload={"error": "boom"})
+
+    def test_kill_switch(self):
+        tid = self.parked("off")
+        os.environ["CALLING_MOM"] = "off"
+        try:
+            plugin.on_parked(task_id=tid, payload={"error": "boom"})
+        finally:
+            os.environ["CALLING_MOM"] = "on"
+        self.assertIsNone(self_task(tid).model_override)
+
+    def test_register_subscribes_both_parked_paths(self):
+        from types import SimpleNamespace as NS
+        seen = []
+        plugin.register(NS(register_hook=lambda n, f: seen.append((n, f.__name__)),
+                           register_tool=lambda **kw: None))
+        names = dict(seen)
+        self.assertIn("on_kanban_worker_exited", names)
+        self.assertEqual(names["on_kanban_worker_exited"], "on_worker_exited")
+
+
 class CreateHookTest(unittest.TestCase):
     """[crit] cards get the strong model when they are created (pre_tool_call -> modify)."""
 
