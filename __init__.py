@@ -471,11 +471,20 @@ _PROMPTS = {
 }
 
 
-def _build_messages(task, signal, steps, note, limit) -> list:
+def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_runs=None) -> list:
     from agent.redact import redact_for_egress
 
     lines = [f"- {s['tool']}({s['args']}) -> {'ok' if s['ok'] else 'ERROR'}: {s['text']}" for s in steps or ()]
-    user = f"Task: {task.title}\n{(task.body or '')[:1500]}\n\nStuck signal: {signal}\nLast steps:\n" + "\n".join(lines)
+    user = f"Task: {task.title}\n{(task.body or '')[:1500]}\n"
+    # Add current subtask (latest operator comment)
+    if latest_comment:
+        user += f"\nCurrent subtask (latest operator note):\n{latest_comment[:800]}\n"
+    # Add previous run results (context for what was already done)
+    if prev_runs:
+        user += "\nPrevious run results:\n"
+        for run in prev_runs:
+            user += f"- {run[:300]}\n"
+    user += f"\nStuck signal: {signal}\nLast steps:\n" + "\n".join(lines)
     if note:
         user += f"\n\nDetails:\n{note}"
     user = redact_for_egress(user)
@@ -502,6 +511,20 @@ def _advise(key, category, signal, note="") -> "str | None":
             task = kb.get_task(conn, key[0])
             if task is None or not _advisor_opted_in(task):
                 return None
+            # Get the latest operator comment (current subtask)
+            latest_comment = conn.execute(
+                "SELECT body FROM task_comments WHERE task_id = ? AND author != ? ORDER BY created_at DESC LIMIT 1",
+                (task.id, ADVISOR),
+            ).fetchone()
+            latest_comment = latest_comment[0] if latest_comment else None
+            # Get the previous run results (context for what was already done)
+            prev_runs = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT summary FROM task_runs WHERE task_id = ? AND summary IS NOT NULL ORDER BY started_at DESC LIMIT 3",
+                    (task.id,),
+                ).fetchall()
+            ]
             used = conn.execute(  # budgets live in the board: durable, visible, restart-proof
                 "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body "
                 + ("LIKE" if arch else "NOT LIKE") + " '[architecture/%'", (task.id, ADVISOR),
@@ -512,7 +535,7 @@ def _advise(key, category, signal, note="") -> "str | None":
         if spent["usd"] >= adv["daily_usd_cap"] or spent["tokens"] >= adv["daily_token_cap"]:
             return None
         res = _ctx.llm.complete(
-            _build_messages(task, signal, _history.get(key), note, adv["context_chars"]),
+            _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs),
             provider=route["provider"], model=route["model"], max_tokens=adv["max_output_tokens"],
             timeout=adv["timeout_s"], purpose="kanban-advisor",
         )
@@ -728,9 +751,10 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
                     return f"{result}\n\n{advice}"
         if question is None and event["signals"] and cfg["advisor"]["enabled"] and isinstance(result, str):
             signal = event["signals"][0]
-            advice = _advise(key, _CATEGORY[signal], signal)
-            if advice:
-                return f"{result}\n\n{advice}"
+            if signal in _CATEGORY:  # flux_stall is monitoring-only, no escalation
+                advice = _advise(key, _CATEGORY[signal], signal)
+                if advice:
+                    return f"{result}\n\n{advice}"
         if question is None and cfg["advisor"]["enabled"] and isinstance(result, str) and status != "error":
             note = _architecture_hit(key, tool_name, args)
             advice = _advise(key, "architecture", "critical_change", note=note) if note else None

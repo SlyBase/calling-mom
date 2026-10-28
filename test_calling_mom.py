@@ -908,6 +908,18 @@ class ReviewRedirectTest(unittest.TestCase):
         self.card()
         self.assertIsNone(plugin.on_pre_tool(tool_name="kanban_request_review", args={"summary": "s"}))
 
+    def test_review_handoff_refused_returns_none(self):
+        """When kb.request_review returns ok=False, the function logs a warning and returns None."""
+        tid = self.card()
+        # Mock kb.request_review to return ok=False
+        original = kb.request_review
+        kb.request_review = lambda *a, **k: (False, "reviewer profile not found")
+        try:
+            out = self.complete()
+            self.assertIsNone(out)
+        finally:
+            kb.request_review = original
+
     def test_failing_verification_still_wins_over_the_redirect(self):
         tid = self.card(body='verify: python3 -c "raise SystemExit(1)"')
         os.environ["HERMES_KANBAN_WORKSPACE"] = tempfile.mkdtemp()
@@ -925,6 +937,32 @@ class ReviewRedirectTest(unittest.TestCase):
         plugin.DEFAULTS["review"]["reviewer"] = ""
         self.card()
         self.assertIsNone(self.complete())
+
+
+class AdvisorContextTest(unittest.TestCase):
+    """Test that the advisor context includes the current subtask and previous run results."""
+
+    def test_build_messages_includes_latest_comment_and_prev_runs(self):
+        import types
+        task = types.SimpleNamespace(title="test task", body="test body")
+        steps = [{"tool": "terminal", "args": {"command": "x"}, "ok": True, "text": "ok"}]
+        # Without context
+        msgs = plugin._build_messages(task, "steps", steps, "", 6000)
+        user_content = msgs[1]["content"]
+        self.assertNotIn("Current subtask", user_content)
+        self.assertNotIn("Previous run results", user_content)
+        # With context
+        msgs = plugin._build_messages(
+            task, "steps", steps, "", 6000,
+            latest_comment="bereinige noch die alten php s3 sachen",
+            prev_runs=["Run 52: Garage repair + HTML-TTFB fixed", "Run 51: Garage Web + Pangolin implemented"],
+        )
+        user_content = msgs[1]["content"]
+        self.assertIn("Current subtask", user_content)
+        self.assertIn("bereinige noch die alten php s3 sachen", user_content)
+        self.assertIn("Previous run results", user_content)
+        self.assertIn("Garage repair + HTML-TTFB fixed", user_content)
+        self.assertIn("Garage Web + Pangolin implemented", user_content)
 
 
 if __name__ == "__main__":

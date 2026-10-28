@@ -105,6 +105,18 @@ class TrackerTest(unittest.TestCase):
         s = feed(self.tr, ok=False, text="boom", args={"command": "c3"})["signals"]
         self.assertNotIn("same_error", s)
 
+    def test_flux_stall_fires_on_flux_dependency_not_ready(self):
+        out = feed(self.tr, ok=True, text="dependency 'flux-system/monitoring-prometheus' is not ready")["signals"]
+        self.assertIn("flux_stall", out)
+
+    def test_flux_stall_fires_on_applied_revision_sha(self):
+        out = feed(self.tr, ok=True, text="Applied revision: refs/heads/main@sha1:468443ea01c5a2b93b7e4835fbccb6963422abba")["signals"]
+        self.assertIn("flux_stall", out)
+
+    def test_flux_stall_does_not_fire_on_normal_output(self):
+        out = feed(self.tr, ok=True, text="all good")["signals"]
+        self.assertNotIn("flux_stall", out)
+
 
 if __name__ == "__main__":
     unittest.main()

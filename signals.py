@@ -1,12 +1,13 @@
 """Measurable "the worker is stuck" signals. Pure logic: no Hermes imports.
 
-Four signals, all from tool results (the model never judges itself):
+Four escalation signals + one monitoring signal, all from tool results (the model never judges itself):
 
 * same_error  - the same normalized failure N times in a row (red TDD tests with
                 changing messages do not count; infrastructure errors never count)
 * loop        - the identical tool call N times within the last 10 calls
 * malformed   - N invalid tool calls in a row (typical for weak models)
 * steps       - N tool calls without a kanban_heartbeat
+* flux_stall  - Flux chain stuck on old SHA (monitoring only, no escalation)
 """
 
 import hashlib
@@ -31,6 +32,11 @@ _INFRA = re.compile(
 )
 _MALFORMED = re.compile(
     r"invalid_arg|invalid arguments?|unknown[ _]tool|missing required|malformed|schema validation|json(?:decode)? error",
+    re.I,
+)
+# Flux stall: the chain is stuck on an old SHA (self-heals on the 10-minute interval)
+_FLUX_STALL = re.compile(
+    r"dependency .* is not ready|Applied revision: refs/heads/main@sha1:[0-9a-f]{40}",
     re.I,
 )
 _LOOP_WINDOW = 10
@@ -76,6 +82,9 @@ class Tracker:
         if self.steps >= self.limits["steps"]:
             fired.append("steps")
             self.steps = 0
+        # Flux stall: monitoring signal (no escalation)
+        if _FLUX_STALL.search(text):
+            fired.append("flux_stall")
 
         if ok:
             self.last_sig, self.streak, self.bad_calls = None, 0, 0
