@@ -30,6 +30,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -72,11 +73,17 @@ DEFAULTS = {
     # categories: error (same_error, malformed) | loop (loop, steps) | validation (failed verify:) | architecture
     "categories": {
         "error": {}, "loop": {}, "validation": {},
+        # completion: once per run, card vs. completion summary before kanban_complete; own budget
+        "completion": {"max": 1},
         # architecture: soft review of critical changes (+ the second_opinion tool); own small budget
         "architecture": {
             "max": 2,
             "patterns": [r"\.tf$", r"migrations?/", r"(^|/)Dockerfile$", r"docker-compose", r"\.github/workflows/"],
-            "commands": [r"terraform (apply|destroy)", r"kubectl (apply|delete)", r"\bDROP\s+(TABLE|DATABASE)\b", r"ansible-playbook"],
+            "commands": [r"terraform (apply|destroy)", r"kubectl (apply|delete)", r"\bDROP\s+(TABLE|DATABASE)\b", r"ansible-playbook",
+                         # public or irreversible: merge, release, tag, push to main/force, public comments, host shells
+                         r"\bgh (pr merge|release create)\b", r"\bgh api\b.*/(merge|releases|comments)\b", r"\bgit tag\b",
+                         r"\bgit push\b.*(--force|\s-f\b|\b(main|master)\b)", r"\bgh (issue|pr) comment\b",
+                         r"\b(ssh|pct|qm)\s"],
         },
     },
 }
@@ -90,6 +97,11 @@ _verify_fails: dict = {}  # (task, run) -> failed verifications so far
 _history: dict = {}  # (task, run) -> last tool steps (advisor context)
 _arch_seen: set = set()  # (task, run, path-or-command) already reviewed
 _redirected: set = set()  # (task, run) whose completion was already handed to the reviewer
+_completion_checked: set = set()  # (task, run) whose completion summary was already checked
+_awaiting_reply: set = set()  # (task, run) that got advice; the next worker reply says if it helped
+_REFUTED = re.compile(
+    r"disprov|refut|ruled out|widerleg|not the (cause|issue|problem)|already (resolved|fixed|verified|done)|"
+    r"does(n't| not) apply|is (wrong|incorrect)", re.I)
 _HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"
@@ -392,7 +404,7 @@ def on_pre_tool(tool_name="", args=None, **_):
             blocked = _verify_gate(key) if key else None
             if blocked or not key or tool_name != "kanban_complete":
                 return blocked
-            return _review_redirect(key, args or {})
+            return _review_redirect(key, args or {}) or _completion_check(key, args or {})
         except Exception as exc:  # pragma: no cover - a broken check must not trap the worker
             logger.warning("calling-mom: verify/review gate failed: %s", exc)
             return None
@@ -461,11 +473,18 @@ def _remember(key, tool, args, ok, text) -> None:
 
 
 _PROMPTS = {
-    "stuck": "You advise a weaker coding agent that is stuck. Answer in at most 100 words: "
-             "the most likely root cause, then the next 1-3 concrete steps. Do not restate the task.",
+    "stuck": "You advise a weaker coding agent that may be stuck. The card text can hold the author's guess "
+             "about the cause: trust the last steps over that guess and never repeat a hypothesis the steps "
+             "already refute. If the steps show progress and no clear problem, answer exactly NO_ACTION. "
+             "Otherwise answer in at most 100 words: the most likely root cause, then the next 1-3 concrete "
+             "steps. Do not restate the task.",
     "critical_change": "You review a critical change made by a weaker coding agent. Answer in at most 100 words: "
                        "the biggest risk or irreversible aspect and what to double-check before going on. "
                        "If it is fine, say so in one line. Do not restate the task.",
+    "completion": "You check whether a weaker coding agent delivered what its card asks. Compare the card "
+                  "with the agent's completion summary. A requested deliverable (PR, merge, release, fix, report) "
+                  "that is missing is a gap unless the summary proves it is not needed; a claim like 'not our bug' "
+                  "needs evidence. Answer exactly DONE, or 'GAP: ' plus what is missing in at most 60 words.",
     "second_opinion": "You answer a design question from a coding agent. Answer in at most 120 words: "
                       "recommend one option, give the deciding reason and name one risk.",
 }
@@ -504,8 +523,14 @@ def _advise(key, category, signal, note="") -> "str | None":
     from hermes_cli import kanban_db as kb
 
     route = {"model": cfg["model"], "provider": cfg["provider"], **(cfg["categories"].get(category) or {})}
-    arch = category == "architecture"
-    limit = route.get("max", 2) if arch else adv["max_consults_per_card"]
+    # categories with an own budget; every other category shares max_consults_per_card
+    own = {"architecture": 2, "completion": 1} | {
+        c: v["max"] for c, v in cfg["categories"].items() if isinstance(v, dict) and "max" in v}
+    if category in own:
+        limit, where, params = own[category], "body LIKE ?", [f"[{category}/%"]
+    else:
+        limit, params = adv["max_consults_per_card"], [f"[{c}/%" for c in own]
+        where = " AND ".join(["body NOT LIKE ?"] * len(params))
     try:
         with _connect() as conn:
             task = kb.get_task(conn, key[0])
@@ -526,8 +551,8 @@ def _advise(key, category, signal, note="") -> "str | None":
                 ).fetchall()
             ]
             used = conn.execute(  # budgets live in the board: durable, visible, restart-proof
-                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body "
-                + ("LIKE" if arch else "NOT LIKE") + " '[architecture/%'", (task.id, ADVISOR),
+                f"SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND {where}",
+                (task.id, ADVISOR, *params),
             ).fetchone()[0]
             if used >= limit:
                 return None
@@ -544,17 +569,39 @@ def _advise(key, category, signal, note="") -> "str | None":
             return None
         cost = res.usage.cost_usd or 0.0
         _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
+        if text.upper().startswith("NO_ACTION"):  # nothing to say: no comment, no interruption
+            _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
+                       tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
+            return None
+        price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
         with _connect() as conn:
-            kb.add_comment(
+            cid = kb.add_comment(
                 conn, task.id, ADVISOR,
-                f"[{category}/{signal}] {res.model}: {res.usage.input_tokens} in / {res.usage.output_tokens} out, ${cost:.4f}\n{text}",
+                f"[{category}/{signal}] run {key[1] or '?'} · {res.model}: "
+                f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}",
             )
+            _skip_relay(conn, task.id, cid)
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
+        _awaiting_reply.add(key)
         return f"[ADVISOR {res.model}] {text}"
     except Exception as exc:
         logger.warning("calling-mom: advisor failed (%s): %s", signal, exc)
         return None
+
+
+def _skip_relay(conn, task_id, comment_id) -> None:
+    """The worker's comment bridge would re-send this comment as an 'operator' note, although the
+    advice is already in the tool result. Move its watermark past it, unless an unread note waits."""
+    # ponytail: private watermark of tools.kanban_tools; if it moves, advice is delivered twice again
+    bridge = sys.modules.get("tools.kanban_tools")
+    marks = getattr(bridge, "_comment_watermark", None)
+    if not isinstance(marks, dict) or task_id not in marks:
+        return  # not seeded yet: the first poll takes everything up to here as already known
+    unread = conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND id > ? AND id < ?",
+                          (task_id, marks[task_id], comment_id)).fetchone()
+    if not unread:
+        marks[task_id] = comment_id
 
 
 _VERIFY_LINE = re.compile(r"(?im)^\s*verify:\s*(.+?)\s*$")
@@ -656,6 +703,25 @@ def _review_redirect(key, args):
     }
 
 
+def _completion_check(key, args):
+    """Once per run: does the completion summary deliver what the card asks? A gap blocks the
+    first ``kanban_complete`` only, so a wrong verdict costs one turn, never the card."""
+    if key in _completion_checked:
+        return None
+    _completion_checked.add(key)
+    summary = str(args.get("summary") or "")[:1500]
+    advice = _advise(key, "completion", "completion", note=f"Completion summary of the agent:\n{summary}")
+    verdict = (advice or "").split("] ", 1)[-1].strip()
+    if not verdict.upper().startswith("GAP"):
+        return None
+    return {
+        "action": "block",
+        "message": f"A reviewer compared your summary with the card and found a gap:\n{verdict}\n\n"
+                   "Do the missing part, then complete again. If you skip it on purpose, complete again and give "
+                   "the evidence in the summary, or call kanban_block(kind='needs_input') when a human must decide.",
+    }
+
+
 def _architecture_hit(key, tool_name, args):
     """Note for the reviewer when this call touches something critical (once per path/command), else None."""
     cfg = settings()["categories"].get("architecture") or {}
@@ -664,8 +730,8 @@ def _architecture_hit(key, tool_name, args):
         target = str(args.get("path") or "")
         rules, body = cfg.get("patterns") or [], str(args.get("content") or args.get("new_string") or "")[:800]
         note = f"File: {target}\n{body}"
-    elif tool_name == "terminal":
-        target = str(args.get("command") or "")
+    elif tool_name in ("terminal", "execute_code"):  # execute_code runs shell commands too
+        target = str(args.get("command") or args.get("code") or "")
         rules, note = cfg.get("commands") or [], f"Command: {target[:400]}"
     else:
         return None
@@ -765,6 +831,17 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
     return None
 
 
+def on_api_response(assistant_message=None, **_):
+    """post_api_request: the first worker text after advice tells whether it was followed or refuted."""
+    key = _worker_key()
+    content = str(getattr(assistant_message, "content", "") or "").strip()
+    if key not in _awaiting_reply or not content:
+        return
+    _awaiting_reply.discard(key)
+    # ponytail: keyword heuristic; a wrong label only skews the ratio, it never changes the run
+    _trace_row("advice_feedback", task=key[0], verdict="rejected" if _REFUTED.search(content[:2000]) else "followed")
+
+
 def register(ctx) -> None:
     global _ctx
     _ctx = ctx
@@ -772,6 +849,7 @@ def register(ctx) -> None:
     ctx.register_hook("kanban_task_blocked", on_blocked)
     ctx.register_hook("transform_tool_result", on_tool_result)
     ctx.register_hook("pre_tool_call", on_pre_tool)
+    ctx.register_hook("post_api_request", on_api_response)
     # Own toolset: "kanban" is a fixed list, so a tool registered there never reaches the model.
     _prompt = getattr(ctx, "register_system_prompt_section", None)
     if _prompt is not None:

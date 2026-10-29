@@ -56,6 +56,12 @@ class RenderTest(unittest.TestCase):
             self.assertIn(f"# TYPE {n} ", text, n)
             self.assertIn(f"# HELP {n} ", text, n)
 
+    def test_advice_feedback_counts_followed_and_rejected_from_the_first_push(self):
+        out = lines(self.render())
+        self.assertIn('calling_mom_advice_feedback_total{verdict="followed"} 0', out)
+        rows = ROWS + [{"kind": "advice_feedback", "verdict": "rejected"}]
+        self.assertIn('calling_mom_advice_feedback_total{verdict="rejected"} 1', lines(self.render(rows=rows)))
+
     def test_advisor_counters(self):
         out = lines(self.render())
         self.assertIn('calling_mom_advisor_calls_total{category="error"} 1', out)

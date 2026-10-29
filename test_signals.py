@@ -99,6 +99,14 @@ class TrackerTest(unittest.TestCase):
         feed(tr, tool="kanban_heartbeat", args={"note": "alive"})
         self.assertNotIn("steps", feed(tr, args={"i": 3})["signals"])
 
+    def test_steps_stay_silent_while_the_worker_edits_files(self):
+        # audit: 4 of 6 advisor calls were `steps` on cards that made progress
+        tr = signals.Tracker(steps=3)
+        feed(tr, args={"i": 1}); feed(tr, tool="patch", args={"path": "a.py"})
+        self.assertNotIn("steps", feed(tr, args={"i": 2})["signals"])
+        out = [feed(tr, args={"i": i})["signals"] for i in range(3, 5)]
+        self.assertIn("steps", out[1])  # third call since the edit: fires again
+
     def test_signal_resets_after_firing_so_advice_is_not_spammed(self):
         for i in range(3):
             feed(self.tr, ok=False, text="boom", args={"command": f"c{i}"})

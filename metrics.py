@@ -11,7 +11,8 @@ import time
 import urllib.request
 from collections import Counter
 
-_CATEGORIES = ("error", "loop", "validation", "architecture")
+_CATEGORIES = ("error", "loop", "validation", "architecture", "completion")
+_VERDICTS = ("followed", "rejected")
 _SIGNALS = ("same_error", "loop", "malformed", "steps")
 _RUNGS = ("effort",)
 _ESCALATION_REASONS = ("crit", "blocked", "breaker")
@@ -21,6 +22,7 @@ _FAMILIES = {  # name -> (type, help)
     "calling_mom_advisor_calls_total": ("counter", "Advisor questions to the strong model by category."),
     "calling_mom_advisor_tokens_total": ("counter", "Advisor tokens by direction."),
     "calling_mom_advisor_cost_usd_total": ("counter", "Advisor cost as reported by the provider (0 if it reports none)."),
+    "calling_mom_advice_feedback_total": ("counter", "First worker reply after advice: followed or rejected (keyword heuristic)."),
     "calling_mom_stuck_signals_total": ("counter", "Stuck signals fired by worker tool results."),
     "calling_mom_verify_total": ("counter", "verify: gate runs by result."),
     "calling_mom_verify_ignored_total": ("counter", "verify: lines that were not run, by reason."),
@@ -78,6 +80,11 @@ def render(rows, spend, caps, boards, now) -> str:
             _sample("calling_mom_advisor_tokens_total", sum(int(r.get(key) or 0) for r in advisor), direction=direction))
     samples["calling_mom_advisor_cost_usd_total"].append(
         _sample("calling_mom_advisor_cost_usd_total", sum(float(r.get("usd") or 0) for r in advisor)))
+    verdicts = Counter({v: 0 for v in _VERDICTS})
+    verdicts.update(r.get("verdict") or "unknown" for r in rows if r.get("kind") == "advice_feedback")
+    for verdict in sorted(verdicts):
+        samples["calling_mom_advice_feedback_total"].append(
+            _sample("calling_mom_advice_feedback_total", verdicts[verdict], verdict=verdict))
     for sig in sorted(signals):
         samples["calling_mom_stuck_signals_total"].append(
             _sample("calling_mom_stuck_signals_total", signals[sig], signal=sig))
