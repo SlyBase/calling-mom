@@ -3,6 +3,32 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.2.0] - 2026-10-29
+
+Fixes from an audit of four real cards (two advisor answers wrong, one redundant, one wrong
+card result closed unchecked).
+
+### Added
+- **Completion check** on `kanban_complete` for advisor cards: the strong model compares the
+  card with the completion summary once per run. `GAP: ...` blocks the first attempt; the
+  second always passes. Own budget (`categories.completion.max`, default 1).
+- Critical commands now cover public or irreversible actions: `gh pr merge`,
+  `gh release create`, `gh api .../merge|releases|comments`, `git tag`, `git push` to
+  `main`/`master` or with `--force`, `gh issue|pr comment`, `ssh`/`pct`/`qm`.
+  `execute_code` is checked like `terminal`.
+- `calling_mom_advice_feedback_total{verdict}`: the first worker reply after advice is
+  counted as `followed` or `rejected` (keyword heuristic, `post_api_request` hook).
+
+### Changed
+- `steps` resets on every file edit: it fires only for runs that call tools without
+  changing anything.
+- The stuck prompt says the card text can hold a wrong guess and allows `NO_ACTION`;
+  such answers post no comment and do not interrupt the worker.
+- Advice is delivered once: the worker's comment bridge no longer relays the advisor
+  comment as an "operator" note (unless an unread human note is waiting).
+- Advisor comments name the run (`run 59`) and omit `$0.0000` when the provider reports
+  no cost.
+
 ## [1.1.1] - 2026-10-28
 
 ### Fixed

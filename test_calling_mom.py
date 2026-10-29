@@ -645,6 +645,137 @@ class ArchitectureTest(AdvisorTest):
         self.assertIn("question", seen["second_opinion"]["schema"]["parameters"]["required"])
 
 
+class CriticalDefaultsTest(AdvisorTest):
+    """Audit: merges, releases, pushes to main, public comments and host shells went unreviewed."""
+
+    def run_cmd(self, command, tool="terminal"):
+        self.tid = with_conn(lambda c: kb.create_task(c, title="c", assignee="worker"))
+        os.environ["HERMES_KANBAN_TASK"] = self.tid
+        args = {"code": f"subprocess.run({command!r}, shell=True)"} if tool == "execute_code" else {"command": command}
+        return plugin.on_tool_result(tool_name=tool, args=args, result="ok", status="ok")
+
+    def test_irreversible_or_public_commands_are_reviewed(self):
+        for cmd in ("gh pr merge 135 --squash", "gh release create v2.9.2", "git push origin main",
+                    "git push --force origin feat/x", "git tag v1.2.0", "gh issue comment 133 --body x",
+                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- id"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("[ADVISOR", self.run_cmd(cmd) or "")
+
+    def test_routine_commands_are_not_reviewed(self):
+        for cmd in ("git push origin feat/x", "gh pr view 1", "git status", "pytest -q"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.run_cmd(cmd))
+
+    def test_execute_code_is_checked_like_terminal(self):
+        self.assertIn("[ADVISOR", self.run_cmd("gh pr merge 1", tool="execute_code") or "")
+
+
+class CompletionCheckTest(AdvisorTest):
+    """Audit: a card that asked for PR + merge + release was closed as 'no bug, no PR' unchecked."""
+
+    def complete(self, summary="Triage done: no bug, no PR."):
+        return plugin.on_pre_tool(tool_name="kanban_complete", args={"summary": summary})
+
+    def test_gap_blocks_the_first_completion_once(self):
+        self.llm._res.text = "GAP: the card asks for a PR, a merge and a release; none was made."
+        first = self.complete()
+        self.assertEqual(first["action"], "block")
+        self.assertIn("none was made", first["message"])
+        self.assertIn("needs_input", first["message"])
+        self.assertIn("no bug, no PR", self.llm.calls[0]["messages"][1]["content"])
+        self.assertIsNone(self.complete())  # never traps the worker: the 2nd attempt passes
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_done_lets_the_completion_through(self):
+        self.llm._res.text = "DONE"
+        self.assertIsNone(self.complete())
+
+    def test_completion_check_has_its_own_budget(self):
+        for _ in range(3):
+            plugin._trackers.clear()
+            self.stuck(3)
+        self.llm._res.text = "GAP: x"
+        self.assertEqual(self.complete()["action"], "block")
+        self.assertEqual(len(self.llm.calls), 4)
+
+
+class NoActionTest(AdvisorTest):
+    """Audit: the advisor invented a problem the worker had already solved, and echoed the card's guess."""
+
+    def test_no_action_answer_is_dropped_silently(self):
+        self.llm._res.text = "NO_ACTION"
+        self.assertIsNone(self.stuck(3))
+        comments = with_conn(lambda c: kb.list_comments(c, self.tid))
+        self.assertFalse([x for x in comments if x.author == "advisor"])
+        rows = [json.loads(x) for x in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
+        self.assertTrue([r for r in rows if r.get("kind") == "advisor" and r.get("noop")])
+
+    def test_stuck_prompt_allows_no_action_and_distrusts_the_card_guess(self):
+        self.stuck(3)
+        system = self.llm.calls[0]["messages"][0]["content"]
+        self.assertIn("NO_ACTION", system)
+        self.assertIn("guess", system)
+
+
+class DeliveryTest(AdvisorTest):
+    """Audit: advice arrived twice (tool result + relayed as an 'operator' note) and outlived its run."""
+
+    def setUp(self):
+        super().setUp()
+        from tools import kanban_tools
+        self.wm = kanban_tools._comment_watermark
+        self.wm.clear()
+
+    def last_comment_id(self):
+        return with_conn(lambda c: c.execute("SELECT MAX(id) FROM task_comments WHERE task_id=?", (self.tid,)).fetchone()[0])
+
+    def test_advice_is_not_relayed_again_as_an_operator_note(self):
+        self.wm[self.tid] = 0  # the worker's comment bridge has seeded its watermark
+        self.stuck(3)
+        self.assertEqual(self.wm[self.tid], self.last_comment_id())
+
+    def test_an_unread_operator_note_still_reaches_the_worker(self):
+        self.wm[self.tid] = 0
+        with_conn(lambda c: kb.add_comment(c, self.tid, "user", "please also bump the version"))
+        self.stuck(3)
+        self.assertEqual(self.wm[self.tid], 0)
+
+    def test_comment_names_the_run_and_hides_a_zero_cost(self):
+        self.llm._res.usage.cost_usd = 0.0
+        self.stuck(3)
+        body = with_conn(lambda c: kb.list_comments(c, self.tid))[-1].body
+        self.assertIn("run 1", body)
+        self.assertNotIn("$0.0000", body)
+
+
+class FeedbackTest(AdvisorTest):
+    """Audit: twice the worker refuted the advice in plain words, and nothing counted it."""
+
+    def reply(self, content):
+        from types import SimpleNamespace as NS
+        plugin.on_api_response(assistant_message=NS(content=content))
+
+    def feedback(self):
+        rows = [json.loads(x) for x in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
+        return [r["verdict"] for r in rows if r.get("kind") == "advice_feedback"]
+
+    def test_refuted_advice_is_counted_as_rejected(self):
+        self.stuck(3)
+        self.reply("")  # a tool-call-only reply says nothing yet
+        self.reply("The advisor's hypothesis is disproven: the secret matches.")
+        self.reply("ruled out again")  # only the first reply after the advice counts
+        self.assertEqual(self.feedback(), ["rejected"])
+
+    def test_other_replies_count_as_followed(self):
+        self.stuck(3)
+        self.reply("Good point, running the tests in the foreground now.")
+        self.assertEqual(self.feedback(), ["followed"])
+
+    def test_no_advice_no_feedback(self):
+        self.reply("disproven")
+        self.assertFalse(Path(os.environ["CALLING_MOM_LOG"]).exists() and self.feedback())
+
+
 class PromptTest(AdvisorTest):
     """Each kind of question gets its own system prompt; board chatter stays out of the context."""
 

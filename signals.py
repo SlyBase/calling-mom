@@ -6,7 +6,7 @@ Four escalation signals + one monitoring signal, all from tool results (the mode
                 changing messages do not count; infrastructure errors never count)
 * loop        - the identical tool call N times within the last 10 calls
 * malformed   - N invalid tool calls in a row (typical for weak models)
-* steps       - N tool calls without a kanban_heartbeat
+* steps       - N tool calls without a kanban_heartbeat and without a file edit
 * flux_stall  - Flux chain stuck on old SHA (monitoring only, no escalation)
 """
 
@@ -77,8 +77,9 @@ class Tracker:
             return event
 
         self.steps += 1
-        if tool in _EDIT_TOOLS:
+        if tool in _EDIT_TOOLS:  # progress: neither a loop nor a stalled run
             self.window.clear()
+            self.steps = 0
         if self.steps >= self.limits["steps"]:
             fired.append("steps")
             self.steps = 0
