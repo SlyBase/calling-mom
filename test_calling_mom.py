@@ -748,6 +748,16 @@ class DeliveryTest(AdvisorTest):
         self.assertNotIn("$0.0000", body)
 
 
+class LogPathTest(unittest.TestCase):
+    def test_default_log_lives_under_the_shared_root(self):
+        from hermes_constants import get_default_hermes_root
+        saved = os.environ.pop("CALLING_MOM_LOG")
+        try:  # path only, never touch the live file
+            self.assertEqual(plugin._log_path(), Path(get_default_hermes_root()) / "logs" / "calling-mom.jsonl")
+        finally:
+            os.environ["CALLING_MOM_LOG"] = saved
+
+
 class FeedbackTest(AdvisorTest):
     """Audit: twice the worker refuted the advice in plain words, and nothing counted it."""
 
