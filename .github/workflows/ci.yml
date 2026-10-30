@@ -60,11 +60,10 @@ jobs:
           PY
 
   full-suite:
-    # The real gate: the plugin against Hermes main. Not blocking yet: it proves compatibility, a red run
-    # means "Hermes moved" (fix the plugin or raise the minimum version) rather than "the PR is wrong".
+    # The real gate: the plugin against Hermes main. A red run
+    # after a green history usually means "Hermes moved": fix the plugin or raise the minimum version.
     name: full suite against Hermes main
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
         with:
