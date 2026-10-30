@@ -38,6 +38,9 @@ versioning: [SemVer](https://semver.org/).
 - **The completion check runs once per run, not once per card.** A later, bigger run is checked again.
 
 ### Changed
+- New banner and icon in the Hermes official-plugin style (Thetis answers Achilles, Mount Olympus small and far
+  above, reached by a dashed line; tags `STUCK -> MOM .. OLYMP`), shown at the top of the README. Sources and build
+  scripts in `assets/banner-src/`; the old SVG generator `tools/make_assets.py` and its assets are removed.
 - The `steps` pace signal is logged but no longer calls the advisor.
 - `kubectl -n prod delete ...` (flags before the verb) is now a critical command.
 - URL credentials (`scheme://user:pass@host`) are scrubbed before anything is sent to a remote model.
