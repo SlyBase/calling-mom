@@ -73,13 +73,12 @@ jobs:
         with:
           repository: NousResearch/hermes-agent
           path: hermes
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: install Hermes
-        run: pip install --quiet ./hermes
+      - uses: astral-sh/setup-uv@v6
+      - name: install Hermes (its own lockfile and Python)
+        working-directory: hermes
+        run: uv sync --quiet
       - name: run the gate
         working-directory: plugin
         env:
           HERMES_HOME: ${{ runner.temp }}/hermes-home
-        run: python check.py
+        run: ../hermes/.venv/bin/python check.py
