@@ -71,7 +71,9 @@ DEFAULTS = {
     },
     # "mom" tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
     # every category then uses the "sibling" (top-level model/provider). A per-category entry below still wins.
-    "mom": {"model": "", "provider": "", "categories": ["architecture"]},
+    # The sibling answers first and says ESCALATE only for a rare high-stakes case; then (and only then) mom is asked.
+    # Mom runs on a subscription: no USD/token cap, but a hard call limit per card and per day.
+    "mom": {"model": "", "provider": "", "categories": ["architecture"], "max_per_card": 1, "max_per_day": 6},
     # per category {model, provider}; missing keys fall back to the top-level model/provider.
     # categories: error (same_error, malformed) | loop (loop) | validation (failed verify:) | architecture
     "categories": {
@@ -82,7 +84,7 @@ DEFAULTS = {
         "architecture": {
             "max": 2,
             "patterns": [r"\.tf$", r"migrations?/", r"(^|/)Dockerfile$", r"docker-compose", r"\.github/workflows/"],
-            "commands": [r"terraform (apply|destroy)", r"kubectl (apply|delete)", r"\bDROP\s+(TABLE|DATABASE)\b", r"ansible-playbook",
+            "commands": [r"terraform (apply|destroy)", r"kubectl\b.*\b(apply|delete)\b", r"\bDROP\s+(TABLE|DATABASE)\b", r"ansible-playbook",
                          # public or irreversible: merge, release, tag, push to main/force, public comments, host shells
                          r"\bgh (pr merge|release create)\b", r"\bgh api\b.*/(merge|releases|comments)\b", r"\bgit tag\b",
                          r"\bgit push\b.*(--force|\s-f\b|\b(main|master)\b)", r"\bgh (issue|pr) comment\b",
@@ -449,23 +451,25 @@ def _spend_path() -> Path:
 
 
 def _spent_today() -> dict:
-    """``{"usd", "tokens"}`` spent on advice today (UTC). Tokens cap what USD cannot: some models report no cost."""
+    """``{"usd", "tokens", "mom"}`` spent on advice today (UTC). Tokens cap what USD cannot: some models
+    report no cost. ``mom`` counts calls to the mom model (a subscription: calls, not dollars)."""
+    zero = {"usd": 0.0, "tokens": 0, "mom": 0}
     try:
         data = json.loads(_spend_path().read_text())
     except (OSError, ValueError):
-        return {"usd": 0.0, "tokens": 0}
+        return zero
     if data.get("date") != time.strftime("%Y-%m-%d", time.gmtime()):
-        return {"usd": 0.0, "tokens": 0}
-    return {"usd": float(data.get("usd", 0.0)), "tokens": int(data.get("tokens", 0))}
+        return zero
+    return {"usd": float(data.get("usd", 0.0)), "tokens": int(data.get("tokens", 0)), "mom": int(data.get("mom", 0))}
 
 
-def _add_spend(usd: float, tokens: int) -> None:
+def _add_spend(usd: float, tokens: int, mom: int = 0) -> None:
     path = _spend_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     now = _spent_today()
     path.write_text(json.dumps({
         "date": time.strftime("%Y-%m-%d", time.gmtime()),
-        "usd": now["usd"] + usd, "tokens": now["tokens"] + tokens,
+        "usd": now["usd"] + usd, "tokens": now["tokens"] + tokens, "mom": now["mom"] + mom,
     }))
 
 
@@ -493,6 +497,12 @@ _PROMPTS = {
     "second_opinion": "You answer a design question from a coding agent. Answer in at most 120 words: "
                       "recommend one option, give the deciding reason and name one risk.",
 }
+
+
+_GATE = ("\n\nYou are the FIRST reviewer; a far more expensive reviewer exists. Give your normal answer. "
+         "Only for a rare high-stakes case that you cannot judge as safe from this context (irreversible "
+         "production or public action without a fallback) answer exactly 'ESCALATE: ' plus a one-line reason. "
+         "Routine or reversible changes: never escalate.")
 
 
 def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_runs=None) -> list:
@@ -527,9 +537,17 @@ def _advise(key, category, signal, note="") -> "str | None":
         return None
     from hermes_cli import kanban_db as kb
 
-    exp = cfg["mom"]
-    tier = {"model": exp["model"], "provider": exp["provider"]} if exp["model"] and category in exp["categories"] else {}
-    route = {"model": cfg["model"], "provider": cfg["provider"], **tier, **(cfg["categories"].get(category) or {})}
+    # model and provider only travel as a PAIR: a half pair would send one provider's model id to another
+    ov = {k: v for k, v in (cfg["categories"].get(category) or {}).items() if k in ("model", "provider") and v}
+    if len(ov) == 1:
+        logger.warning("calling-mom: categories.%s needs model AND provider; ignored", category)
+        ov = {}
+    mom = cfg["mom"]
+    mom_pair = bool(mom["model"] and mom["provider"])
+    if mom["model"] and not mom_pair:
+        logger.warning("calling-mom: mom needs model AND provider; mom is off")
+    route = {"model": cfg["model"], "provider": cfg["provider"], **ov}
+    gate = mom_pair and not ov and category in mom["categories"]
     # categories with an own budget; every other category shares max_consults_per_card
     own = {"architecture": 2, "completion": 1} | {
         c: v["max"] for c, v in cfg["categories"].items() if isinstance(v, dict) and "max" in v}
@@ -563,32 +581,55 @@ def _advise(key, category, signal, note="") -> "str | None":
             ).fetchone()[0]
             if used >= limit:
                 return None
+            mom_used = conn.execute(
+                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE '%, mom)%'",
+                (task.id, ADVISOR),
+            ).fetchone()[0]
         spent = _spent_today()
         if spent["usd"] >= adv["daily_usd_cap"] or spent["tokens"] >= adv["daily_token_cap"]:
             return None
-        res = _ctx.llm.complete(
-            _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs),
-            provider=route["provider"], model=route["model"], max_tokens=adv["max_output_tokens"],
-            timeout=adv["timeout_s"], purpose="kanban-advisor",
-        )
+        gate = gate and mom_used < mom["max_per_card"] and spent["mom"] < mom["max_per_day"]
+
+        def ask(r, msgs):
+            return _ctx.llm.complete(msgs, provider=r["provider"], model=r["model"],
+                                     max_tokens=adv["max_output_tokens"], timeout=adv["timeout_s"],
+                                     purpose="kanban-advisor")
+
+        msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
+        is_mom = False
+        if gate:  # sibling first, with the escalation instruction
+            first = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
+            if (first.text or "").strip().upper().startswith("ESCALATE"):
+                _add_spend(first.usage.cost_usd or 0.0, (first.usage.input_tokens or 0) + (first.usage.output_tokens or 0))
+                route, is_mom = {"model": mom["model"], "provider": mom["provider"]}, True
+                res = ask(route, msgs)
+            else:
+                res = first
+        else:
+            res = ask(route, msgs)
         text = (res.text or "").strip()
         if not text:
             return None
         cost = res.usage.cost_usd or 0.0
-        _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
+        if is_mom:  # subscription: counted in calls, never in dollars or tokens
+            _add_spend(0.0, 0, mom=1)
+        else:
+            _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
         if text.upper().startswith("NO_ACTION"):  # nothing to say: no comment, no interruption
             _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
+                       provider=route["provider"], mom=is_mom,
                        tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
         with _connect() as conn:
             cid = kb.add_comment(
                 conn, task.id, ADVISOR,
-                f"[{category}/{signal}] run {key[1] or '?'} · {res.model}: "
+                f"[{category}/{signal}] run {key[1] or '?'} · {res.model} ({route['provider']}{', mom' if is_mom else ''}): "
                 f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}",
             )
             _skip_relay(conn, task.id, cid)
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
+                   provider=route["provider"], mom=is_mom,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
         _awaiting_reply.add(key)
         return f"[ADVISOR {res.model}] {text}"

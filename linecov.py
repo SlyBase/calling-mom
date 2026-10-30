@@ -5,6 +5,7 @@ executable lines were never reached. No third-party dependency.
 
     /opt/hermes/.venv/bin/python linecov.py [test modules ...]
 """
+import ast
 import dis
 import io
 import os
@@ -31,6 +32,10 @@ def executable_lines(path):
         for const in c.co_consts:
             if hasattr(const, "co_code"):
                 stack.append(const)
+    # `except ...:  # pragma: no cover` marks a defensive handler; drop the whole handler
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ExceptHandler) and "pragma: no cover" in src.splitlines()[node.lineno - 1]:
+            lines -= set(range(node.lineno, node.end_lineno + 1))
     return lines
 
 
@@ -39,8 +44,10 @@ NAMES = {p.name: p for p in targets}
 
 def tracer(frame, event, arg):
     if event == "line":
-        t = NAMES.get(os.path.basename(frame.f_code.co_filename))
-        if t is not None:
+        fn = frame.f_code.co_filename
+        t = NAMES.get(os.path.basename(fn))
+        # same basename in another package (hermes_cli/__init__.py) must not count as ours
+        if t is not None and os.path.dirname(os.path.realpath(fn)) == str(PLUGIN):
             hit[t].add(frame.f_lineno)
     return tracer
 

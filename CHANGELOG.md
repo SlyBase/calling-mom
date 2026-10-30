@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 ## [1.3.0] - 2026-10-30
 
 ### Added
+- **Mom is a gate, not a default**: the sibling answers first and only a rare `ESCALATE:` reaches mom. Mom is limited per card (1) and per day (6), exempt from USD/token caps. Comments and trace rows now name the provider (`model (provider, mom)`).
+- `kubectl -n prod delete ...` (flags before the verb) is now a critical command.
 - **Two-tier advisor**: `mom.model`/`mom.provider` (empty = off) name the "mom", a very strong model
   that is asked only for `mom.categories` (default `architecture`: critical files and
   commands, `SECOND-OPINION`). Stuck, validation and completion questions stay on the sibling (`model`/`provider`).

@@ -657,7 +657,8 @@ class CriticalDefaultsTest(AdvisorTest):
     def test_irreversible_or_public_commands_are_reviewed(self):
         for cmd in ("gh pr merge 135 --squash", "gh release create v2.9.2", "git push origin main",
                     "git push --force origin feat/x", "git tag v1.2.0", "gh issue comment 133 --body x",
-                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- id"):
+                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- id",
+                    "kubectl -n prod delete pvc pgdata", "kubectl --context p apply -f x.yaml"):
             with self.subTest(cmd=cmd):
                 self.assertIn("[ADVISOR", self.run_cmd(cmd) or "")
 
@@ -881,37 +882,132 @@ class OptInTest(AdvisorTest):
         self.assertIsNone(self.stuck(3))
 
 
+class SeqLlm(FakeLlm):
+    """Answers from a list, one per call, and reports the model it was asked for."""
+
+    def __init__(self, texts):
+        super().__init__()
+        self.texts = list(texts)
+
+    def complete(self, messages, **kw):
+        from types import SimpleNamespace as NS
+        self.calls.append({"messages": messages, **kw})
+        text = self.texts.pop(0) if self.texts else "ok"
+        return NS(text=text, model=kw["model"], provider=kw["provider"],
+                  usage=NS(input_tokens=500, output_tokens=50, cost_usd=0.01))
+
+
 class TwoTierTest(AdvisorTest):
-    """Cheap model for routine stuck signals, mom model only for critical categories."""
+    """Sibling answers first; the mom model is asked only when the sibling says ESCALATE."""
 
-    def critical(self):
-        return plugin.on_tool_result(tool_name="terminal", args={"command": "terraform apply"},
-                                     result="r", status="ok")
-
-    def test_critical_change_goes_to_mom_when_configured(self):
+    def setUp(self):
+        super().setUp()
         plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
-        self.assertIn("[ADVISOR", self.critical())
-        self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), ("m/mom", "p/mom"))
+        plugin.DEFAULTS["categories"] = {"architecture": {"max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+        plugin._arch_seen.clear()
+        self.models = lambda: [c["model"] for c in self.llm.calls]
 
-    def test_routine_stuck_signal_stays_on_the_cheap_model(self):
-        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
-        self.stuck(3)
-        self.assertEqual(self.llm.calls[0]["model"], STRONG)
+    def seq(self, *texts):
+        self.llm = SeqLlm(texts)
+        plugin._ctx.llm = self.llm
 
-    def test_mom_is_off_without_a_model(self):
+    def critical(self, cmd="terraform apply"):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": cmd}, result="r", status="ok")
+
+    def comments(self):
+        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
+
+    def test_routine_critical_change_is_answered_by_the_sibling_alone(self):
+        self.seq("Fine, nothing irreversible.")
+        out = self.critical()
+        self.assertEqual(self.models(), [STRONG])
+        self.assertIn("Fine", out)
+
+    def test_sibling_escalates_a_real_edge_case_to_mom(self):
+        self.seq("ESCALATE: prod deploy without rollback", "Mom says: keep the cron as fallback.")
+        out = self.critical()
+        self.assertEqual(self.models(), [STRONG, "m/mom"])
+        self.assertEqual(self.llm.calls[1]["provider"], "p/mom")
+        self.assertIn("Mom says", out)
+        self.assertNotIn("ESCALATE", out)
+
+    def test_gate_instruction_goes_only_to_the_sibling(self):
+        self.seq("ESCALATE: x", "ok")
         self.critical()
-        self.assertEqual(self.llm.calls[0]["model"], STRONG)
+        self.assertIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+        self.assertNotIn("ESCALATE", self.llm.calls[1]["messages"][0]["content"])
 
-    def test_mom_categories_are_configurable(self):
-        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom", categories=["error"])
+    def test_routine_stuck_signal_never_reaches_mom(self):
+        self.seq("ESCALATE: x")
         self.stuck(3)
-        self.assertEqual(self.llm.calls[0]["model"], "m/mom")
+        self.assertEqual(self.models(), [STRONG])
+        self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
 
-    def test_category_override_beats_mom(self):
-        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
-        plugin.DEFAULTS["categories"] = {"architecture": {"model": "m/arch", "max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+    def test_mom_is_off_without_a_complete_pair(self):
+        plugin.DEFAULTS["mom"]["provider"] = ""
+        self.seq("ESCALATE: x")
         self.critical()
-        self.assertEqual(self.llm.calls[0]["model"], "m/arch")
+        self.assertEqual(self.models(), [STRONG])
+        self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+
+    def test_mom_is_asked_once_per_card(self):
+        self.seq("ESCALATE: a", "mom a", "ESCALATE: b", "must not be asked")
+        self.critical("terraform apply -a")
+        self.critical("terraform apply -b")
+        self.assertEqual(self.models(), [STRONG, "m/mom", STRONG])
+
+    def test_mom_has_a_daily_call_limit(self):
+        plugin.DEFAULTS["mom"].update(max_per_card=9, max_per_day=1)
+        self.seq("ESCALATE: a", "mom a", "ESCALATE: b")
+        self.critical("terraform apply -a")
+        self.critical("terraform apply -b")
+        self.assertEqual(self.models(), [STRONG, "m/mom", STRONG])
+
+    def test_mom_calls_do_not_count_against_the_dollar_cap(self):
+        self.seq("ESCALATE: a", "mom a")
+        self.critical()
+        self.assertEqual(plugin._spent_today()["usd"], 0.01)   # sibling only
+        self.assertEqual(plugin._spent_today()["mom"], 1)
+
+    def test_comment_names_model_and_provider_and_the_mom_tier(self):
+        self.seq("ESCALATE: a", "mom a")
+        self.critical()
+        self.assertIn("m/mom (p/mom, mom)", self.comments()[0])
+
+    def test_sibling_comment_names_the_provider_without_mom_tag(self):
+        self.seq("fine")
+        self.critical()
+        self.assertIn(f"{STRONG} ({PROVIDER})", self.comments()[0])
+        self.assertNotIn("mom)", self.comments()[0])
+
+    def test_trace_row_carries_the_provider(self):
+        self.seq("fine")
+        self.critical()
+        rows = [json.loads(l) for l in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
+        self.assertEqual([r["provider"] for r in rows if r.get("kind") == "advisor"], [PROVIDER])
+
+    def test_half_pair_in_a_category_is_ignored(self):
+        plugin.DEFAULTS["categories"]["architecture"]["model"] = "m/only-model"
+        self.seq("fine")
+        self.critical()
+        self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), (STRONG, PROVIDER))
+
+    def test_full_pair_in_a_category_beats_mom(self):
+        plugin.DEFAULTS["categories"]["architecture"].update(model="m/arch", provider="p/arch")
+        self.seq("ESCALATE: x")
+        self.critical()
+        self.assertEqual(self.models(), ["m/arch"])
+        self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+
+    def test_mom_failure_is_fail_open(self):
+        class Boom(SeqLlm):
+            def complete(self, messages, **kw):
+                if kw["model"] == "m/mom":
+                    raise RuntimeError("down")
+                return super().complete(messages, **kw)
+        self.llm = Boom(["ESCALATE: x"])
+        plugin._ctx.llm = self.llm
+        self.assertIsNone(self.critical())
 
 
 class LocalContractTest(AdvisorTest):
@@ -930,6 +1026,59 @@ class StepsSignalTest(AdvisorTest):
             out = plugin.on_tool_result(tool_name="read_file", args={"path": f"/f{i}"}, result="r", status="ok")
         self.assertIsNone(out)
         self.assertEqual(self.llm.calls, [])
+
+
+class DefensivePathsTest(AdvisorTest):
+    """Paths the old basename-based coverage counted by accident (any package's __init__.py matched)."""
+
+    def test_merge_keeps_the_default_for_a_wrong_type(self):
+        self.assertEqual(plugin._merge({"a": 1}, "x"), {"a": 1})
+        self.assertEqual(plugin._merge(1.5, "x"), 1.5)
+        self.assertEqual(plugin._merge(None, 5), 5)
+        self.assertIsNone(plugin._merge(None, None))
+
+    def test_profile_runs_strong_is_false_when_the_config_breaks(self):
+        orig = _hermes_config.load_config
+        _hermes_config.load_config = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+        try:
+            self.assertFalse(plugin._profile_runs_strong())
+        finally:
+            _hermes_config.load_config = orig
+
+    def test_a_card_that_vanished_is_not_escalated(self):
+        task = type("T", (), {"id": "t1", "status": "blocked", "block_kind": None, "model_override": None,
+                              "last_failure_error": "boom", "title": "x", "body": ""})()
+
+        class Ctx:
+            def __enter__(self):
+                return "CONN"
+
+            def __exit__(self, *exc):
+                return False
+
+        orig = (plugin._connect, plugin.kb)
+        plugin._connect = lambda board=None: Ctx()
+        plugin.kb = type("KB", (), {"get_task": staticmethod(lambda c, i: None)})()
+        try:
+            self.assertFalse(plugin._escalate_parked_task(task, {"error": "boom"}, "default"))
+        finally:
+            plugin._connect, plugin.kb = orig
+
+    def test_dispatch_tick_sweeps_without_error(self):
+        plugin.on_dispatch_tick(board=None)
+
+    def test_yesterdays_spend_does_not_count(self):
+        plugin._spend_path().write_text(json.dumps({"date": "2000-01-01", "usd": 9.0, "tokens": 9, "mom": 9}))
+        self.assertEqual(plugin._spent_today(), {"usd": 0.0, "tokens": 0, "mom": 0})
+
+    def test_earlier_run_summaries_reach_the_advisor_prompt(self):
+        def add_run(c):
+            c.execute("INSERT INTO task_runs (task_id, status, started_at, summary) VALUES (?, 'done', 1, 'earlier result')",
+                      (self.tid,))
+            c.commit()
+        with_conn(add_run)
+        self.stuck(3)
+        self.assertIn("earlier result", self.llm.calls[0]["messages"][1]["content"])
 
 
 class VerifySecurityTest(unittest.TestCase):

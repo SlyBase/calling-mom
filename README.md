@@ -78,8 +78,9 @@ All keys live under `calling_mom:` in `config.yaml`. Defaults are in `__init__.p
 
 | Key | Default | Meaning |
 |---|---|---|
+| `mom.max_per_card`, `mom.max_per_day` | `1` / `6` | Hard call limits for the mom model. It is asked only when the sibling answers `ESCALATE: <reason>` first, and its calls count in calls, not in USD or tokens (subscription). |
 | `model`, `provider` | DeepSeek Flash / openrouter | The **sibling** (cheap tier): pinned on escalation, asked by the advisor. |
-| `mom.model`, `mom.provider`, `mom.categories` | off / `[architecture]` | The **mom** (expensive tier). Set `model` and the advisor asks it for the listed categories only (critical changes, `SECOND-OPINION`); every other signal stays on the cheap tier. Own spend is bounded by the per-card budget and the daily caps. A `categories.<name>` entry still wins. |
+| `mom.model`, `mom.provider`, `mom.categories` | off / `[architecture]` | The **mom** (expensive tier). Set `model` AND `provider` (a half pair turns mom off, and a half pair in `categories.<name>` is ignored). For the listed categories the sibling answers first and writes `ESCALATE: <reason>` only for a rare high-stakes case; then, and only then, mom is asked. Every other signal stays on the sibling. Own spend is bounded by the per-card budget and the daily caps. A `categories.<name>` entry still wins. |
 | `marker` | `[crit]` | Pin the card to the strong model. |
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
