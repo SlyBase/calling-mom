@@ -24,7 +24,7 @@ hermes calling-mom doctor       # one real call to each model, tells you what is
 
 `setup` lists the providers and models Hermes already knows, asks which board may use the advisor, grants both models in the plugin allowlist (existing grants stay), and offers the 1-minute sweep cron job. It shows what it will write and asks before writing. No questions: `hermes calling-mom setup --preset subscription` (or `openrouter`).
 
-`hermes calling-mom status` shows the effective setup, today's mom calls against the limit, and spend. A dead key or missing login is **not silent**: the card gets one `[advisor unavailable]` comment and `doctor` names the cause.
+`hermes calling-mom status` shows the effective setup, today's mom calls against the limit, spend and today's advisor failures. `setup` never creates a second sweep cron job (it looks in every Hermes home). A dead key or missing login is **not silent**: the card gets one `[advisor unavailable]` comment and `doctor` names the cause.
 
 ## What it does
 
@@ -84,6 +84,8 @@ plugins:
 | `metrics.pushgateways` | `[]` | Pushgateway URLs, tried in order. |
 
 Kill switch: `CALLING_MOM=off` in the environment.
+
+**Run `hermes calling-mom doctor` with the environment your workers have.** Workers can run with another `HOME` than your shell; a provider that logs in per `HOME` (e.g. a Claude subscription login) then looks fine in your shell and is "logged out" in the worker. Point the provider at the login explicitly (Claude subscription plugin: `plugins.entries.claude-subscription-directsdk-experimental.settings.claude_config_dir`).
 
 ### Reviewer profile (for `[review]` cards)
 
