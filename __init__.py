@@ -69,8 +69,11 @@ DEFAULTS = {
         "max_consults_per_card": 3, "max_output_tokens": 700,
         "context_chars": 6000, "daily_usd_cap": 2.0, "daily_token_cap": 200000, "timeout_s": 40,
     },
+    # second tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
+    # every category then uses the cheap top-level model/provider. A per-category entry below still wins.
+    "expert": {"model": "", "provider": "", "categories": ["architecture"]},
     # per category {model, provider}; missing keys fall back to the top-level model/provider.
-    # categories: error (same_error, malformed) | loop (loop, steps) | validation (failed verify:) | architecture
+    # categories: error (same_error, malformed) | loop (loop) | validation (failed verify:) | architecture
     "categories": {
         "error": {}, "loop": {}, "validation": {},
         # completion: once per run, card vs. completion summary before kanban_complete; own budget
@@ -105,7 +108,8 @@ _REFUTED = re.compile(
 _HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"
-_CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop", "steps": "loop"}
+# `steps` is a pace signal (logged, never a question): it cost one advisor call and returned NO_ACTION
+_CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop"}
 
 
 def _merge(default, override):
@@ -434,6 +438,7 @@ def _advisor_opted_in(task) -> bool:
 
 
 def _is_local_only(task) -> bool:
+    # not `completion_contract`: "local-only" there is the board DEFAULT (no PR/CI acceptance), not a privacy flag
     marker = settings()["local_only_marker"].lower()
     return bool(marker) and marker in f"{task.title or ''}\n{task.body or ''}".lower()
 
@@ -522,7 +527,9 @@ def _advise(key, category, signal, note="") -> "str | None":
         return None
     from hermes_cli import kanban_db as kb
 
-    route = {"model": cfg["model"], "provider": cfg["provider"], **(cfg["categories"].get(category) or {})}
+    exp = cfg["expert"]
+    tier = {"model": exp["model"], "provider": exp["provider"]} if exp["model"] and category in exp["categories"] else {}
+    route = {"model": cfg["model"], "provider": cfg["provider"], **tier, **(cfg["categories"].get(category) or {})}
     # categories with an own budget; every other category shares max_consults_per_card
     own = {"architecture": 2, "completion": 1} | {
         c: v["max"] for c, v in cfg["categories"].items() if isinstance(v, dict) and "max" in v}

@@ -3,6 +3,17 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.3.0] - 2026-10-30
+
+### Added
+- **Two-tier advisor**: `expert.model`/`expert.provider` (empty = off) name a very strong model
+  that is asked only for `expert.categories` (default `architecture`: critical files and
+  commands, `SECOND-OPINION`). Stuck, validation and completion questions stay on the cheap model.
+
+### Changed
+- The `steps` pace signal is logged but no longer calls the advisor (it produced a call that
+  answered `NO_ACTION`).
+
 ## [1.2.0] - 2026-10-29
 
 Fixes from an audit of four real cards (two advisor answers wrong, one redundant, one wrong

@@ -881,6 +881,57 @@ class OptInTest(AdvisorTest):
         self.assertIsNone(self.stuck(3))
 
 
+class TwoTierTest(AdvisorTest):
+    """Cheap model for routine stuck signals, expert model only for critical categories."""
+
+    def critical(self):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": "terraform apply"},
+                                     result="r", status="ok")
+
+    def test_critical_change_goes_to_the_expert_when_configured(self):
+        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert")
+        self.assertIn("[ADVISOR", self.critical())
+        self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), ("m/expert", "p/expert"))
+
+    def test_routine_stuck_signal_stays_on_the_cheap_model(self):
+        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert")
+        self.stuck(3)
+        self.assertEqual(self.llm.calls[0]["model"], STRONG)
+
+    def test_expert_is_off_without_a_model(self):
+        self.critical()
+        self.assertEqual(self.llm.calls[0]["model"], STRONG)
+
+    def test_expert_categories_are_configurable(self):
+        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert", categories=["error"])
+        self.stuck(3)
+        self.assertEqual(self.llm.calls[0]["model"], "m/expert")
+
+    def test_category_override_beats_the_expert(self):
+        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert")
+        plugin.DEFAULTS["categories"] = {"architecture": {"model": "m/arch", "max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+        self.critical()
+        self.assertEqual(self.llm.calls[0]["model"], "m/arch")
+
+
+class LocalContractTest(AdvisorTest):
+    """completion_contract=local-only is the board default (no PR/CI gate), not a privacy flag."""
+
+    def test_default_contract_does_not_block_the_advisor(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="infra change", assignee="worker",
+                                                 completion_contract="local-only"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        self.assertIn("[ADVISOR", self.stuck(3))
+
+
+class StepsSignalTest(AdvisorTest):
+    def test_steps_alone_does_not_call_the_advisor(self):
+        for i in range(plugin.DEFAULTS["limits"]["steps"]):
+            out = plugin.on_tool_result(tool_name="read_file", args={"path": f"/f{i}"}, result="r", status="ok")
+        self.assertIsNone(out)
+        self.assertEqual(self.llm.calls, [])
+
+
 class VerifySecurityTest(unittest.TestCase):
     """Step A: `verify:` is card text. It must not become a shell for whoever wrote the card."""
 

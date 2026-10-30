@@ -13,7 +13,7 @@ The local model never judges itself. A weak model does not know when it is out o
 | Worker blocks a card with kind `capability` (or untyped) | Pin the card to the strong model, return it to `ready`, once. A second block parks it for a human. | one strong run |
 | The crash circuit breaker parks a card (`gave_up`) | Same, reactively on `on_kanban_worker_exited` (fired by the dispatcher after the breaker accounting). The cron sweep stays as the idempotent fallback for timeout-parked cards and for setups without the hook. Infrastructure failures are skipped. | one strong run |
 | `[crit]` in title/body | Pin to the strong model at claim time. | one strong run |
-| Stuck signal in a worker run (same error x3, identical call x3, malformed call x3, 40+ steps without a heartbeat or a file edit) | **Advisor**: one short question to the strong model with a redacted tail of the run. The answer is appended to the tool result (once: the board does not relay it again as an operator note). `NO_ACTION` answers are dropped. The worker keeps going. | ~300 output tokens |
+| Stuck signal in a worker run (same error x3, identical call x3, malformed call x3) | **Advisor**: one short question to the strong model with a redacted tail of the run. The answer is appended to the tool result (once: the board does not relay it again as an operator note). `NO_ACTION` answers are dropped. The worker keeps going. | ~300 output tokens |
 | Edit of a risky file / risky command (`*.tf`, `migrations/`, `terraform apply`, `gh pr merge`, `gh release create`, `git push … main`, `git tag`, public comments, `ssh`/`pct`/`qm`; `terminal` and `execute_code`) | Same advisor call, category `architecture`. Also reachable as the `second_opinion` tool and as a `SECOND-OPINION:` comment. | ~300 tokens |
 | `verify: <cmd>` line on a card | Gates `kanban_complete`: the command must pass. Failures go back to the worker. After `max_fix` failures the advisor looks at it. | free |
 | `kanban_complete` on an advisor card | **Completion check**, once per run: card vs. completion summary. `GAP: …` blocks the first attempt with the missing parts; the second attempt always passes. Own budget (1 per card). | ~1 advisor call |
@@ -78,7 +78,8 @@ All keys live under `calling_mom:` in `config.yaml`. Defaults are in `__init__.p
 
 | Key | Default | Meaning |
 |---|---|---|
-| `model`, `provider` | DeepSeek Flash / openrouter | The strong model. |
+| `model`, `provider` | DeepSeek Flash / openrouter | The cheap tier: pinned on escalation, asked by the advisor. |
+| `expert.model`, `expert.provider`, `expert.categories` | off / `[architecture]` | The expensive tier. Set `model` and the advisor asks it for the listed categories only (critical changes, `SECOND-OPINION`); every other signal stays on the cheap tier. Own spend is bounded by the per-card budget and the daily caps. A `categories.<name>` entry still wins. |
 | `marker` | `[crit]` | Pin the card to the strong model. |
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
