@@ -1,5 +1,9 @@
 # Calling mom
 
+![Calling mom: Thetis rises from the sea to answer Achilles](assets/calling-mom-banner.jpg)
+
+<sub>*Homer, Iliad I: the hero Achilles is stuck and calls his mother, the sea goddess Thetis, who rises from the sea to help. This plugin does the same: when the cheap worker model is stuck, it "calls mom", a stronger model that answers only that one question.*</sub>
+
 A [Hermes](https://hermes-agent.nousresearch.com) plugin that lets a **cheap local model run your Kanban board** and "calls mom" (a stronger model) only where the board shows it is needed.
 
 The local model never judges itself. A weak model does not know when it is out of its depth, so every trigger is a **durable fact from the board or the tool results**, not a self-assessment.

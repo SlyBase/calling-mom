@@ -2,7 +2,7 @@
 
 Same language as banner v6: distressed black paper, ivory engraving of
 Thetis reaching out, red disc behind her head, SlyBase-orange HUD lines and
-one glitch band, thin ivory frame, grain and soft focus. Art: art_v4.png.
+one glitch band, thin ivory frame, grain and soft focus. Art: art.png.
 """
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
@@ -15,7 +15,7 @@ ORANGE = (237, 128, 36)
 GLITCH = [(237, 128, 36), (237, 128, 36), (194, 97, 30), (246, 184, 83)]
 IVORY = np.array([232, 221, 196], np.float32)
 INK = np.array([13, 12, 11], np.float32)
-CROP = (850, 10, 1490, 650)          # art_v4.png coords: Thetis head + hand
+CROP = (850, 10, 1490, 650)          # art.png coords: Thetis head + hand
 HEAD = (1060, 236)
 
 
@@ -56,7 +56,7 @@ disc = np.hypot(xx - hx, yy - hy) < r
 bg[disc] *= (0.78 + 0.3 * noise(5)[disc])[:, None]
 
 # --- engraving ------------------------------------------------------------
-art = Image.open("art_v4.png").convert("L").crop(CROP).resize((N, N), Image.BICUBIC)
+art = Image.open("art.png").convert("L").crop(CROP).resize((N, N), Image.BICUBIC)
 lum = np.asarray(art, np.float32) / 255
 mask = np.clip((blur(lum, 6 * S) - 0.24) / 0.1, 0, 1)
 mask = blur(mask, 2 * S)[..., None]
@@ -95,6 +95,5 @@ ImageDraw.Draw(alpha).rounded_rectangle([0, 0, N - 1, N - 1], radius=228 * S, fi
 alpha = alpha.resize((1024, 1024), Image.LANCZOS)
 icon = Image.fromarray(np.clip(o, 0, 255).astype(np.uint8)).convert("RGBA")
 icon.putalpha(alpha)
-icon.save("calling-mom-icon-v2.png", optimize=True)
-icon.resize((128, 128), Image.LANCZOS).save("icon-preview-128.png")
+icon.save("../calling-mom-icon.png", optimize=True)
 print("ok")

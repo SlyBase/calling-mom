@@ -1,6 +1,6 @@
 """Re-compose gen2b.png: Thetis larger, Achilles smaller, deeper shadows.
 
-Output art_v4.png (2x of gen2b, 2048x1152, grayscale, no frame lines; the
+Output art.png (2x of gen2b, 2048x1152, grayscale, no frame lines; the
 banner script draws its own frame).
 """
 import numpy as np
@@ -61,5 +61,5 @@ light = np.exp(-((xx - tx) ** 2 + ((yy - ty) * 1.2) ** 2) / (2 * 330.0 ** 2))
 out *= 0.5 + 0.6 * light                                   # far side falls dark
 out *= 1 - 0.3 * np.clip((yy - 380) / 196, 0, 1)           # ground shadow
 out[544 * Z:] = 0                                          # bottom frame rest
-Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8)).save("art_v4.png")
+Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8)).save("art.png")
 print("ok")

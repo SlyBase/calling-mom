@@ -2,9 +2,10 @@
 
 Reference: hermes-official-plugins/assets/*.jpg (1200x600): distressed black
 paper with folds and worn edges, ivory engraving, red disc behind the head,
-blue/yellow pixel glitch bars, thin blue HUD lines, heavy yellow uppercase
-headline, grain and soft focus. Artwork gen1.png: own AI-generated engraving
-(Thetis answers Achilles, Iliad I).
+pixel glitch bars, thin HUD lines, heavy yellow uppercase headline, grain and
+soft focus. Brand variant: glitch and lines in the SlyBase product oranges
+instead of Hermes blue/yellow. Artwork art.png (compose_art.py from
+gen2b.png): own AI-generated engraving (Thetis answers Achilles, Iliad I).
 """
 import math
 
@@ -15,7 +16,7 @@ S = 2
 W, H = 1200 * S, 600 * S
 rng = np.random.default_rng(11)
 YELLOW = (246, 199, 32)
-BLUE = (38, 72, 255)
+LINE = (237, 128, 36)       # SlyBase product orange for HUD and connector lines
 RED = (205, 52, 34)
 IVORY = np.array([232, 221, 196], np.float32)
 INK = np.array([13, 12, 11], np.float32)
@@ -40,9 +41,9 @@ bg += ((noise(120) - 0.5) * 14 + (noise(18) - 0.5) * 8)[..., None]
 ground = Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8))
 d = ImageDraw.Draw(ground)
 for x in range(0, W, 46 * S):                                   # faint blue grid
-    d.line([(x, 0), (x, H)], fill=(20, 26, 60), width=1)
+    d.line([(x, 0), (x, H)], fill=(34, 23, 14), width=1)
 for y in range(0, H, 46 * S):
-    d.line([(0, y), (W, y)], fill=(20, 26, 60), width=1)
+    d.line([(0, y), (W, y)], fill=(34, 23, 14), width=1)
 for x in (W // 3, 2 * W // 3):                                  # paper folds
     d.line([(x, 0), (x, H)], fill=(44, 42, 39), width=S)
     d.line([(x + S, 0), (x + S, H)], fill=(6, 6, 6), width=S)
@@ -60,35 +61,39 @@ torn = edge < (3 * S + noise(40) * 7 * S)
 bg[torn] = 4
 
 # --- 2. Red disc and blue HUD (behind the figures) -------------------------
-CROP = (370, 0, 1024, 576)
-k = H / 576
+ART, CROP = "art.png", (720, 0, 2048, 1152)   # 2x source
+k = H / 1152
 ax = W - int((CROP[2] - CROP[0]) * k)                         # art x offset
 P = lambda x, y: (ax + (x - CROP[0]) * k, y * k)              # gen1 -> banner
-tx, ty = P(582, 150)                                          # Thetis head
-hx, hy = P(831, 254)                                          # Achilles head
+tx, ty = P(1060, 236)                                         # Thetis head                                          # Thetis head
+hx, hy = P(1450, 436)                                         # Achilles head                                          # Achilles head
 
 ground = Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8))
 d = ImageDraw.Draw(ground)
-r = 112 * S
+r = 114 * S
 d.ellipse([tx - r, ty - r, tx + r, ty + r], fill=RED)
-d.arc([-330 * S, H / 2 - 330 * S, 330 * S - 200 * S, H / 2 + 330 * S], 0, 360, fill=BLUE, width=S)
-d.arc([W - 130 * S, H / 2 - 300 * S, W + 470 * S, H / 2 + 300 * S], 0, 360, fill=BLUE, width=S)
+d.arc([-330 * S, H / 2 - 330 * S, 330 * S - 200 * S, H / 2 + 330 * S], 0, 360, fill=LINE, width=S)
+d.arc([W - 130 * S, H / 2 - 300 * S, W + 470 * S, H / 2 + 300 * S], 0, 360, fill=LINE, width=S)
 for cx, cy in [(70, 110), (520, 95), (1120, 90), (1135, 520), (610, 545), (95, 520)]:
     cx, cy = cx * S, cy * S
-    d.line([(cx - 14 * S, cy), (cx + 14 * S, cy)], fill=BLUE, width=S)
-    d.line([(cx, cy - 14 * S), (cx, cy + 14 * S)], fill=BLUE, width=S)
+    d.line([(cx - 14 * S, cy), (cx + 14 * S, cy)], fill=LINE, width=S)
+    d.line([(cx, cy - 14 * S), (cx, cy + 14 * S)], fill=LINE, width=S)
+fx0, fy0 = P(760, 120)                                        # own thin double frame
+fx1, fy1 = P(1990, 1080)
+for g in (0, 5 * S):
+    d.rectangle([fx0 + g, fy0 + g, fx1 - g, fy1 - g], outline=(190, 182, 164), width=S)
 for i in range(7):                                            # the call: rings from Achilles
     rr = (60 + i * 26) * S
-    d.arc([hx - rr, hy - rr, hx + rr, hy + rr], 175, 265, fill=BLUE, width=S)
+    d.arc([hx - rr, hy - rr, hx + rr, hy + rr], 175, 265, fill=LINE, width=S)
 bg = np.asarray(ground, np.float32).copy()
 disc = np.hypot(xx - tx, yy - ty) < r                         # disc texture
 bg[disc] *= (0.78 + 0.3 * noise(4)[disc])[:, None]
 
 # --- 3. Engraving: ivory figures, opaque where hatching is dense ----------
-art = Image.open("gen1.png").convert("L").crop(CROP)
+art = Image.open(ART).convert("L").crop(CROP)
 art = art.resize((W - ax, H), Image.BICUBIC)
 lum = np.asarray(art, np.float32) / 255
-mask = np.asarray(art.filter(ImageFilter.GaussianBlur(6 * S)), np.float32) / 255
+mask = np.asarray(art.filter(ImageFilter.GaussianBlur(5 * S)), np.float32) / 255
 mask = np.clip((mask - 0.24) / 0.1, 0, 1)
 mask = np.asarray(Image.fromarray((mask * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(2 * S)), np.float32) / 255
 fade = np.clip(np.arange(W - ax, dtype=np.float32) / (110 * S), 0, 1)[None, :] ** 1.4
@@ -102,23 +107,25 @@ bg[:, ax:] = np.maximum(reg, fig) * (1 - m) + fig * m
 
 # --- 4. Pixel glitch: shifted slices and blue/yellow block bars -----------
 img = np.clip(bg, 0, 255)
-for y0, h, dx in [(230, 10, 26), (300, 6, -18), (350, 14, 34), (420, 8, -22)]:
+for y0, h, dx in [(318, 6, -16), (452, 8, 20)]:
     ys, ye = int(y0 * S), int((y0 + h) * S)
     img[ys:ye, ax:] = np.roll(img[ys:ye, ax:], int(dx * S), axis=1)
 blk = 11 * S
-for y0, rows, x0, x1 in [(205, 3, 600, 820), (288, 4, 520, 880), (378, 3, 640, 960),
-                         (446, 2, 820, 1010)]:
+# SlyBase product oranges (orange, rust, a little amber), not Hermes blue/yellow
+GLITCH = [(237, 128, 36), (237, 128, 36), (194, 97, 30), (246, 184, 83)]
+# fewer, lighter bands, kept off the faces
+for y0, rows, x0, x1 in [(300, 3, 500, 700), (440, 2, 780, 990)]:
     for j in range(rows):                                     # pixel block bands
         y = int(y0 * S) + j * blk
         for x in range(int(x0 * S), int(x1 * S), blk):
-            if rng.random() < 0.5 - 0.08 * j:
-                col = BLUE if rng.random() < 0.55 else YELLOW
+            if rng.random() < 0.42 - 0.08 * j:
+                col = GLITCH[rng.integers(0, len(GLITCH))]
                 img[y:y + blk, x:x + blk * rng.integers(1, 4)] = np.array(col) * (0.8 + 0.2 * rng.random())
-    for _ in range(5):                                        # smeared streaks
+    for _ in range(2):                                        # smeared streaks
         y = int((y0 + rng.random() * rows * 11) * S)
         x = int((x0 + rng.random() * (x1 - x0) * 0.7) * S)
         ln, hh = int(rng.integers(50, 170) * S), int(rng.integers(2, 6) * S)
-        col = BLUE if rng.random() < 0.5 else YELLOW
+        col = GLITCH[rng.integers(0, len(GLITCH))]
         img[y:y + hh, x:x + ln] = img[y:y + hh, x:x + ln] * 0.3 + np.array(col) * 0.7
 
 # --- 5. Typography: heavy uppercase, rough and soft -----------------------
@@ -135,11 +142,13 @@ def tracked(x, y, s, f, fill, track):
 
 
 tracked(L + 4 * S, 150 * S, "HERMES PLUGIN", font("ArchivoBlack.ttf", 21), (238, 232, 220), 6 * S)
+head = Image.new("RGBA", (W, H), (0, 0, 0, 0))               # headline: own layer
+hd = ImageDraw.Draw(head)
 big = font("Anton.ttf", 132)
 for i, line in enumerate(["CALLING", "MOM"]):
     y = 178 * S + i * 138 * S
-    d.text((L + 5 * S, y + 5 * S), line, font=big, fill=(120, 28, 18))   # misprint shadow
-    d.text((L, y), line, font=big, fill=YELLOW)
+    hd.text((L + 5 * S, y + 5 * S), line, font=big, fill=(120, 28, 18))  # misprint shadow
+    hd.text((L, y), line, font=big, fill=YELLOW)
 
 # flow: stuck -> second opinion -> stronger model
 tag = font("ArchivoBlack.ttf", 15)
@@ -153,28 +162,31 @@ for word in ["STUCK", "SECOND-OPINION", "STRONGER MODEL"]:
 glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 g = ImageDraw.Draw(glow)
 for (a0, a1), (b0, _) in zip(boxes, boxes[1:]):
-    g.line([(a1, y + 14 * S), (b0, y + 14 * S)], fill=BLUE + (255,), width=5 * S)
+    g.line([(a1, y + 14 * S), (b0, y + 14 * S)], fill=LINE + (255,), width=5 * S)
 glow = glow.filter(ImageFilter.GaussianBlur(5 * S))
 txt = Image.alpha_composite(glow, txt)
 d = ImageDraw.Draw(txt)
 for (a0, a1), (b0, _) in zip(boxes, boxes[1:]):
-    d.line([(a1, y + 14 * S), (b0, y + 14 * S)], fill=(150, 175, 255), width=2 * S)
+    d.line([(a1, y + 14 * S), (b0, y + 14 * S)], fill=(255, 196, 140), width=2 * S)
     for px in (a1 + 6 * S, b0 - 6 * S):
-        d.rectangle([px - 4 * S, y + 10 * S, px + 4 * S, y + 18 * S], fill=(235, 240, 255))
+        d.rectangle([px - 4 * S, y + 10 * S, px + 4 * S, y + 18 * S], fill=(255, 242, 228))
 for (a0, a1), word in zip(boxes, ["STUCK", "SECOND-OPINION", "STRONGER MODEL"]):
     d.rectangle([a0, y, a1, y + 29 * S], fill=YELLOW)
     d.text((a0 + 11 * S, y + 5 * S), word, font=tag, fill=(14, 13, 12))
 
-# ink wear on the type, then soft focus
-a = np.asarray(txt, np.float32)
+# headline: ink wear and slight soft focus (goes through the global blur too)
+a = np.asarray(head, np.float32)
 holes = (noise(2) > 0.9) | (noise(6) > 0.92)
 a[..., 3] *= np.where(holes, 0.6, 1.0)
-txt = Image.fromarray(a.astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.9 * S))
+head = Image.fromarray(a.astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.4 * S))
 base = Image.fromarray(img.astype(np.uint8)).convert("RGBA")
-out = Image.alpha_composite(base, txt).convert("RGB")
+out = Image.alpha_composite(base, head).convert("RGB")
 
 # --- 6. Imperfection pass at final size ----------------------------------
 out = out.resize((W // S, H // S), Image.LANCZOS).filter(ImageFilter.GaussianBlur(0.55))
+# small type (label, tags) skips the blur: crisp, only grain + misregistration
+small = txt.resize((W // S, H // S), Image.LANCZOS)
+out = Image.alpha_composite(out.convert("RGBA"), small).convert("RGB")
 o = np.asarray(out, np.float32).copy()
 h, w = o.shape[:2]
 o[..., 0] = np.roll(o[..., 0], 1, axis=1)                    # chromatic misregistration
@@ -187,5 +199,5 @@ o += rng.normal(0, 9, (h, w, 1)) + rng.normal(0, 3, (h, w, 3))  # film grain
 vy, vx = np.mgrid[0:h, 0:w].astype(np.float32)
 o *= (1 - 0.28 * (np.hypot((vx - w / 2) / w, (vy - h / 2) / h) * 1.6) ** 2)[..., None]
 o = np.round(o / 5) * 5                                       # tonal banding
-Image.fromarray(np.clip(o, 0, 255).astype(np.uint8)).save("calling-mom-banner-v2.jpg", quality=84)
+Image.fromarray(np.clip(o, 0, 255).astype(np.uint8)).save("../calling-mom-banner.jpg", quality=84)
 print("ok")
