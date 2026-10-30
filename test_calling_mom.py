@@ -882,33 +882,33 @@ class OptInTest(AdvisorTest):
 
 
 class TwoTierTest(AdvisorTest):
-    """Cheap model for routine stuck signals, expert model only for critical categories."""
+    """Cheap model for routine stuck signals, mom model only for critical categories."""
 
     def critical(self):
         return plugin.on_tool_result(tool_name="terminal", args={"command": "terraform apply"},
                                      result="r", status="ok")
 
-    def test_critical_change_goes_to_the_expert_when_configured(self):
-        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert")
+    def test_critical_change_goes_to_mom_when_configured(self):
+        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
         self.assertIn("[ADVISOR", self.critical())
-        self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), ("m/expert", "p/expert"))
+        self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), ("m/mom", "p/mom"))
 
     def test_routine_stuck_signal_stays_on_the_cheap_model(self):
-        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert")
+        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
         self.stuck(3)
         self.assertEqual(self.llm.calls[0]["model"], STRONG)
 
-    def test_expert_is_off_without_a_model(self):
+    def test_mom_is_off_without_a_model(self):
         self.critical()
         self.assertEqual(self.llm.calls[0]["model"], STRONG)
 
-    def test_expert_categories_are_configurable(self):
-        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert", categories=["error"])
+    def test_mom_categories_are_configurable(self):
+        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom", categories=["error"])
         self.stuck(3)
-        self.assertEqual(self.llm.calls[0]["model"], "m/expert")
+        self.assertEqual(self.llm.calls[0]["model"], "m/mom")
 
-    def test_category_override_beats_the_expert(self):
-        plugin.DEFAULTS["expert"].update(model="m/expert", provider="p/expert")
+    def test_category_override_beats_mom(self):
+        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
         plugin.DEFAULTS["categories"] = {"architecture": {"model": "m/arch", "max": 2, "patterns": [], "commands": [r"terraform apply"]}}
         self.critical()
         self.assertEqual(self.llm.calls[0]["model"], "m/arch")

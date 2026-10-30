@@ -78,8 +78,8 @@ All keys live under `calling_mom:` in `config.yaml`. Defaults are in `__init__.p
 
 | Key | Default | Meaning |
 |---|---|---|
-| `model`, `provider` | DeepSeek Flash / openrouter | The cheap tier: pinned on escalation, asked by the advisor. |
-| `expert.model`, `expert.provider`, `expert.categories` | off / `[architecture]` | The expensive tier. Set `model` and the advisor asks it for the listed categories only (critical changes, `SECOND-OPINION`); every other signal stays on the cheap tier. Own spend is bounded by the per-card budget and the daily caps. A `categories.<name>` entry still wins. |
+| `model`, `provider` | DeepSeek Flash / openrouter | The **sibling** (cheap tier): pinned on escalation, asked by the advisor. |
+| `mom.model`, `mom.provider`, `mom.categories` | off / `[architecture]` | The **mom** (expensive tier). Set `model` and the advisor asks it for the listed categories only (critical changes, `SECOND-OPINION`); every other signal stays on the cheap tier. Own spend is bounded by the per-card budget and the daily caps. A `categories.<name>` entry still wins. |
 | `marker` | `[crit]` | Pin the card to the strong model. |
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
