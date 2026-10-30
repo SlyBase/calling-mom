@@ -3,6 +3,13 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- New banner and icon in the Hermes official-plugin style (Thetis answers Achilles),
+  shown at the top of the README. Sources and build scripts in `assets/banner-src/`;
+  the old SVG generator `tools/make_assets.py` and its assets are removed.
+
 ## [1.2.0] - 2026-10-29
 
 Fixes from an audit of four real cards (two advisor answers wrong, one redundant, one wrong
