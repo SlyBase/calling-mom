@@ -12,7 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
-PLUGIN = Path("/opt/data/profiles/daidalos/plugins/calling-mom")
+PLUGIN = Path(__file__).resolve().parent  # measure the copy this file lives in
 
 targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "__init__.py"}
 hit = {p: set() for p in targets}
