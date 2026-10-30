@@ -34,7 +34,8 @@ hermes calling-mom doctor       # one real call to each model, tells you what is
 | The crash circuit breaker parks a card (`gave_up`) | Same. Infrastructure failures are skipped. | one sibling run |
 | `[crit]` in title/body | Pin to the sibling model at claim time. | one sibling run |
 | Stuck signal (same error x3, identical call x3, malformed call x3) | **Advisor**: one short question to the sibling with a redacted tail of the run. The answer is appended to the tool result. | ~300 output tokens |
-| Risky file or command (`*.tf`, `migrations/`, `terraform apply`, `kubectl ... apply/delete`, `gh pr merge`, `git push ... main`, `git tag`, `ssh`, ...) | Advisor, category `architecture`: the sibling answers first. **Only if it writes `ESCALATE: <reason>` is mom asked.** Also reachable as `second_opinion` tool and `SECOND-OPINION:` comment. | sibling call, rarely a mom call |
+| Risky file or command: the list in `rules.py` (download-and-execute, force push, destructive git, `gh`/`curl` writes to GitHub such as merge and release, `terraform`/`kubectl`/`helm` changes, `DROP TABLE`, `rm -rf` of broad targets, secret and IAM writes, `--insecure`, tunnels, ...) | Advisor, category `architecture`: the sibling answers first. **Only if it writes `ESCALATE: <reason>` is mom asked.** Also reachable as `second_opinion` tool and `SECOND-OPINION:` comment. | sibling call, rarely a mom call |
+| `ssh`, `scp`, `pct`, `qm` (privileged access to another machine) | **One** short look per card (`watch`), sibling only, own budget: it can never use up the budget of the critical list. A critical command inside `ssh ...` counts as critical. | one short sibling call |
 | `verify: <cmd>` line on a card | Gates `kanban_complete`: the command must pass. | free |
 | `kanban_complete` on an advisor card | **Completion check** once per run: card vs. summary; `GAP: ...` blocks the first attempt. | ~1 sibling call |
 | `[review]` in title/body | A separate reviewer profile reads the result on completion. | one short review run |
@@ -73,6 +74,7 @@ plugins:
 | `sibling.model`, `sibling.provider` | DeepSeek Flash / openrouter | The cheap tier. The older top-level `model`/`provider` pair still works; `sibling` wins. |
 | `mom.model`, `mom.provider`, `mom.categories` | off / `[architecture]` | The expensive tier. A half pair turns mom off; a half pair in `categories.<name>` is ignored. |
 | `mom.max_per_card`, `mom.max_per_day` | `1` / `6` | Hard call limits for mom. |
+| `categories.architecture.max`, `.commands_extra`, `categories.watch.max` | `4`, `[]`, `1` | Critical reviews per card; your own risky-command regexes (added to the defaults, nothing to replace); watch reviews per card. |
 | `marker` | `[crit]` | Pin the card to the sibling model. |
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. (The dashboard field `completion_contract: local-only` is a different thing: the board default.) |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
@@ -96,6 +98,10 @@ hermes -p reviewer config set model.provider <provider> --force
 # remove inherited local endpoint settings: model.base_url, model.api_key, model.api_mode
 hermes -p reviewer plugins disable calling-mom
 ```
+
+## Where the risk list comes from
+
+`rules.py` is built from what existing agents already decided, not invented: the **Claude Code** auto-mode classifier publishes its "blocked by default" list (production deploys, force push, destructive git, `terraform destroy`, secret-manager writes, IAM grants, merging unapproved PRs, bot commands in comments, `--insecure`, tunnels, the cloud metadata endpoint); **OpenAI Codex** flags forced `rm` and looks through `sudo`/`env`/`bash -c`; Claude's docs warn that prefix rules miss `/usr/bin/curl` and `git -C . push`, so we match a regex anywhere in the command. The **DeepSeek Harness** relies on a sandbox and approval policy, not on a command list. `test_rules.py` is the table (critical / watch / routine, including false-positive guards such as `git push origin feat/x` or `rm -f one-file`).
 
 ## Compatibility
 

@@ -16,7 +16,7 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$SRC/scripts/.deploy.env" ]; then set -a; . "$SRC/scripts/.deploy.env"; set +a; fi
 : "${CALLING_MOM_TARGETS:?set CALLING_MOM_TARGETS (see the header of this script)}"
 PY="${CALLING_MOM_PYTHON:-python3}"
-FILES="__init__.py cli.py metrics.py signals.py plugin.yaml README.md CHANGELOG.md LICENSE test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py linecov.py check.py"
+FILES="__init__.py cli.py rules.py test_rules.py metrics.py signals.py plugin.yaml README.md CHANGELOG.md LICENSE test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py linecov.py check.py"
 
 first=""
 for dst in $CALLING_MOM_TARGETS; do

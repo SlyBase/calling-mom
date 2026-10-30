@@ -48,6 +48,13 @@ except ImportError:  # loaded by path (tests, plugin doctor): no package context
     _spec.loader.exec_module(signals)
 
 try:
+    from . import rules
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _rules_spec = importlib.util.spec_from_file_location("calling_mom_rules", Path(__file__).with_name("rules.py"))
+    rules = importlib.util.module_from_spec(_rules_spec)
+    _rules_spec.loader.exec_module(rules)
+
+try:
     from . import cli
 except ImportError:  # loaded by path (tests, plugin doctor)
     _cli_spec = importlib.util.spec_from_file_location("calling_mom_cli", Path(__file__).with_name("cli.py"))
@@ -85,17 +92,15 @@ DEFAULTS = {
     # categories: error (same_error, malformed) | loop (loop) | validation (failed verify:) | architecture
     "categories": {
         "error": {}, "loop": {}, "validation": {},
-        # completion: once per run, card vs. completion summary before kanban_complete; own budget
+        # completion: once per run, card vs. completion summary before kanban_complete
         "completion": {"max": 1},
-        # architecture: soft review of critical changes (+ the second_opinion tool); own small budget
+        # watch: privileged access to another machine (ssh, pct, ...): ONE look per card, own budget, sibling only
+        "watch": {"max": 1},
+        # architecture: review of critical changes (+ the second_opinion tool). The lists live in rules.py;
+        # `commands_extra` adds your own regexes without replacing them.
         "architecture": {
-            "max": 2,
-            "patterns": [r"\.tf$", r"migrations?/", r"(^|/)Dockerfile$", r"docker-compose", r"\.github/workflows/"],
-            "commands": [r"terraform (apply|destroy)", r"kubectl\b.*\b(apply|delete)\b", r"\bDROP\s+(TABLE|DATABASE)\b", r"ansible-playbook",
-                         # public or irreversible: merge, release, tag, push to main/force, public comments, host shells
-                         r"\bgh (pr merge|release create)\b", r"\bgh api\b.*/(merge|releases|comments)\b", r"\bgit tag\b",
-                         r"\bgit push\b.*(--force|\s-f\b|\b(main|master)\b)", r"\bgh (issue|pr) comment\b",
-                         r"\b(ssh|pct|qm)\s"],
+            "max": 4, "patterns": rules.CRITICAL_FILES, "commands": rules.CRITICAL_COMMANDS,
+            "commands_extra": [], "watch": rules.WATCH_COMMANDS,
         },
     },
 }
@@ -107,6 +112,7 @@ AUTHOR = "escalation"
 _trackers: dict = {}  # (task, run) -> signals.Tracker, one per worker run
 _verify_fails: dict = {}  # (task, run) -> failed verifications so far
 _history: dict = {}  # (task, run) -> last tool steps (advisor context)
+_watch_used: dict = {}  # (task, run) -> `watch` reviews so far (a NO_ACTION answer writes no comment to count)
 _arch_seen: set = set()  # (task, run, path-or-command) already reviewed
 _redirected: set = set()  # (task, run) whose completion was already handed to the reviewer
 _completion_checked: set = set()  # (task, run) whose completion summary was already checked
@@ -513,6 +519,9 @@ _PROMPTS = {
                   "with the agent's completion summary. A requested deliverable (PR, merge, release, fix, report) "
                   "that is missing is a gap unless the summary proves it is not needed; a claim like 'not our bug' "
                   "needs evidence. Answer exactly DONE, or 'GAP: ' plus what is missing in at most 60 words.",
+    "watch_change": "You review a command a weaker coding agent ran on another machine (ssh, pct, qm, scp). "
+                    "Answer in at most 80 words: only if it changes state or exposes data, name the risk and what to "
+                    "double-check. A plain read-only command: answer exactly NO_ACTION. Do not restate the task.",
     "second_opinion": "You answer a design question from a coding agent. Answer in at most 120 words: "
                       "recommend one option, give the deciding reason and name one risk.",
 }
@@ -569,9 +578,11 @@ def _advise(key, category, signal, note="") -> "str | None":
     route = {"model": cfg["model"], "provider": cfg["provider"], **ov}
     gate = mom_pair and not ov and category in mom["categories"]
     # categories with an own budget; every other category shares max_consults_per_card
-    own = {"architecture": 2, "completion": 1} | {
+    own = {"architecture": 4, "completion": 1, "watch": 1} | {
         c: v["max"] for c, v in cfg["categories"].items() if isinstance(v, dict) and "max" in v}
-    if category in own:
+    if category == "completion":  # one check per RUN: a later, bigger run must not inherit an earlier run's check
+        limit, where, params = own[category], "body LIKE ?", [f"[completion/%] run {key[1] or '?'} %"]
+    elif category in own:
         limit, where, params = own[category], "body LIKE ?", [f"[{category}/%"]
     else:
         limit, params = adv["max_consults_per_card"], [f"[{c}/%" for c in own] + [_UNAVAILABLE + "%"]
@@ -825,22 +836,29 @@ def _completion_check(key, args):
 
 
 def _architecture_hit(key, tool_name, args):
-    """Note for the reviewer when this call touches something critical (once per path/command), else None."""
+    """``(category, signal, note)`` when this call touches something risky (once per path/command), else None.
+    Critical things and `watch` things (ssh, pct, ...) have separate budgets, see rules.py."""
     cfg = settings()["categories"].get("architecture") or {}
     args = args or {}
     if tool_name in ("write_file", "patch"):
         target = str(args.get("path") or "")
-        rules, body = cfg.get("patterns") or [], str(args.get("content") or args.get("new_string") or "")[:800]
-        note = f"File: {target}\n{body}"
+        body = str(args.get("content") or args.get("new_string") or "")[:800]
+        tier, note = ("critical" if rules.is_critical_file(target, cfg.get("patterns") or []) else None), f"File: {target}\n{body}"
     elif tool_name in ("terminal", "execute_code"):  # execute_code runs shell commands too
         target = str(args.get("command") or args.get("code") or "")
-        rules, note = cfg.get("commands") or [], f"Command: {target[:400]}"
+        tier = rules.classify(target, extra=cfg.get("commands_extra") or [], critical=cfg.get("commands") or [],
+                              watch=cfg.get("watch") or [])
+        note = f"Command: {target[:400]}"
     else:
         return None
-    if not target or not any(re.search(r, target, re.I) for r in rules) or (*key, target) in _arch_seen:
+    if not target or tier is None or (*key, target) in _arch_seen:
         return None
+    if tier == "watch":
+        if _watch_used.get(key, 0) >= (settings()["categories"].get("watch") or {}).get("max", 1):
+            return None
+        _watch_used[key] = _watch_used.get(key, 0) + 1
     _arch_seen.add((*key, target))
-    return note
+    return ("watch", "watch_change", note) if tier == "watch" else ("architecture", "critical_change", note)
 
 
 def handle_second_opinion(args, **_):
@@ -924,8 +942,8 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
                 if advice:
                     return f"{result}\n\n{advice}"
         if question is None and cfg["advisor"]["enabled"] and isinstance(result, str) and status != "error":
-            note = _architecture_hit(key, tool_name, args)
-            advice = _advise(key, "architecture", "critical_change", note=note) if note else None
+            hit = _architecture_hit(key, tool_name, args)
+            advice = _advise(key, hit[0], hit[1], note=hit[2]) if hit else None
             if advice:
                 return f"{result}\n\n{advice}"
     except Exception as exc:  # pragma: no cover - observing must never break a worker

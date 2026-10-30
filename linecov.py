@@ -15,7 +15,7 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent  # measure the copy this file lives in
 
-targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "__init__.py"}
+targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "rules.py", PLUGIN / "__init__.py"}
 hit = {p: set() for p in targets}
 
 
@@ -86,4 +86,4 @@ def main(mods):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix"]))
+    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules"]))

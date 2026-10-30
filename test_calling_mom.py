@@ -1177,6 +1177,80 @@ class CliRegistrationTest(unittest.TestCase):
         plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: None, llm=None))
 
 
+class RiskTiersTest(AdvisorTest):
+    """Critical commands and `watch` commands (ssh, pct, ...) have separate budgets; the list comes from rules.py."""
+
+    def setUp(self):
+        super().setUp()
+        plugin._arch_seen.clear()
+        plugin._watch_used.clear()
+
+    def run_cmd(self, command):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": command}, result="ok", status="ok")
+
+    def test_ssh_reads_cannot_use_up_the_budget_of_a_later_merge(self):
+        for i in range(4):
+            self.run_cmd(f"ssh pi 'ls /config/{i}'")
+        self.assertIn("[ADVISOR", self.run_cmd("gh pr merge 142 --squash"))
+        self.assertIn("[ADVISOR", self.run_cmd("git tag v2.9.4"))
+
+    def test_watch_commands_get_one_review_per_card(self):
+        self.run_cmd("ssh pi 'ls /a'")
+        self.assertIsNone(self.run_cmd("ssh pi 'ls /b'"))
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_a_noop_answer_still_uses_the_watch_budget(self):
+        self.llm._res.text = "NO_ACTION"
+        self.run_cmd("ssh pi 'ls /a'")
+        self.run_cmd("ssh pi 'ls /b'")
+        self.run_cmd("scp f pi:/tmp/")
+        self.assertEqual(len(self.llm.calls), 1)          # no comment was written, the counter still counts
+
+    def test_critical_budget_is_four_by_default(self):
+        outs = [self.run_cmd(f"kubectl -n prod delete pod p{i}") for i in range(6)]
+        self.assertEqual(sum(1 for o in outs if o), 4)
+
+    def test_curl_write_to_the_github_api_is_critical(self):
+        cmd = 'curl -sf -X PUT -H "Authorization: token T" https://api.github.com/repos/o/r/pulls/1/merge'
+        self.assertIn("[ADVISOR", self.run_cmd(cmd))
+
+    def test_a_critical_command_inside_ssh_is_critical_not_watch(self):
+        self.run_cmd("ssh pi 'ls /a'")                      # uses the watch budget
+        self.assertIn("[ADVISOR", self.run_cmd("ssh pi 'kubectl -n prod delete pvc x'"))
+
+    def test_commands_extra_adds_your_own_patterns(self):
+        self.assertIsNone(self.run_cmd("flyctl deploy"))
+        cats = plugin.DEFAULTS["categories"]
+        plugin.DEFAULTS["categories"] = {**cats, "architecture": {**cats["architecture"], "commands_extra": [r"\bflyctl deploy\b"]}}
+        self.assertIn("[ADVISOR", self.run_cmd("flyctl deploy"))
+
+    def test_watch_is_never_escalated_to_mom(self):
+        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
+        self.llm = SeqLlm(["ESCALATE: x", "mom must not be asked"])
+        plugin._ctx.llm = self.llm
+        self.run_cmd("ssh pi 'ls /a'")
+        self.assertEqual([c["model"] for c in self.llm.calls], [STRONG])
+
+
+class CompletionPerRunTest(AdvisorTest):
+    def complete(self):
+        return plugin.on_pre_tool(tool_name="kanban_complete", args={"summary": "done"})
+
+    def test_every_run_gets_its_own_completion_check(self):
+        self.llm._res.text = "DONE"
+        for run in ("1", "2", "3"):
+            os.environ["HERMES_KANBAN_RUN_ID"] = run
+            self.complete()
+        self.assertEqual(len(self.llm.calls), 3)
+
+    def test_still_once_per_run(self):
+        self.llm._res.text = "DONE"
+        self.complete()
+        plugin._completion_checked.clear()                # same run, e.g. after a restart of the process
+        self.complete()
+        self.assertEqual(len(self.llm.calls), 1)
+
+
 class DefensivePathsTest(AdvisorTest):
     """Paths the old basename-based coverage counted by accident (any package's __init__.py matched)."""
 

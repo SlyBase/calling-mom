@@ -28,6 +28,15 @@ versioning: [SemVer](https://semver.org/).
   every critical command of a worker (one card saw 7 failing calls in a minute).
 - `status` shows today's advisor failures and the last cause.
 
+- **Risk list from existing agents** (`rules.py`, table-tested in `test_rules.py`): download-and-execute, destructive
+  git, `curl`/`gh` writes to GitHub (merge, release, dispatch), `terraform`/`kubectl`/`helm`, `DROP`/`TRUNCATE`, broad
+  `rm -rf`, secret and IAM writes, `--insecure`, tunnels, the metadata endpoint. Add your own with
+  `categories.architecture.commands_extra`.
+- **Two risk tiers.** `ssh`/`scp`/`pct`/`qm` are `watch`: one short sibling review per card with their own budget, so
+  they can no longer use up the critical budget (a real run spent both reviews on ssh reads, then merged and released
+  unreviewed). The critical budget is 4 per card (was 2).
+- **The completion check runs once per run, not once per card.** A later, bigger run is checked again.
+
 ### Changed
 - The `steps` pace signal is logged but no longer calls the advisor.
 - `kubectl -n prod delete ...` (flags before the verb) is now a critical command.
