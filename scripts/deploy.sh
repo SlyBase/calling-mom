@@ -1,31 +1,39 @@
 #!/usr/bin/env bash
-# Deploy this checkout to every directory that loads the plugin, then verify.
+# Maintainer helper: copy this checkout to the directories that load the plugin, gate, smoke-test.
 #
 #   scripts/deploy.sh              # sync copies + gate + smoke
-#   scripts/deploy.sh --restart    # also restart the gateway so it reloads the plugins
+#   scripts/deploy.sh --restart    # also run $CALLING_MOM_RESTART (e.g. a gateway restart command)
 #
-# Both target dirs are on the /opt/data volume: an image pull does not remove them.
+# Targets come from the environment or from scripts/.deploy.env (git-ignored):
+#   CALLING_MOM_TARGETS="/path/one/plugins/calling-mom /path/two/plugins/calling-mom"
+#   CALLING_MOM_DEPLOYED=/path/two/plugins/calling-mom   # copy that check.py compares byte for byte
+#   CALLING_MOM_PYTHON=/path/to/hermes/venv/bin/python
+#   CALLING_MOM_RESTART="systemctl --user restart hermes-gateway"   # optional
+#   CALLING_MOM_PROFILES="name=/hermes/home,other=/other/home"      # profiles the smoke test inspects
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-CANON="${CALLING_MOM_CANONICAL:-/opt/data/profiles/daidalos/plugins/calling-mom}"
-DEPLOYED="${CALLING_MOM_DEPLOYED:-/opt/data/plugins/calling-mom}"
-PY="${CALLING_MOM_PYTHON:-/opt/hermes/.venv/bin/python}"
-FILES="__init__.py metrics.py signals.py plugin.yaml README.md CHANGELOG.md LICENSE test_signals.py test_calling_mom.py test_metrics.py test_matrix.py linecov.py check.py"
+if [ -f "$SRC/scripts/.deploy.env" ]; then set -a; . "$SRC/scripts/.deploy.env"; set +a; fi
+: "${CALLING_MOM_TARGETS:?set CALLING_MOM_TARGETS (see the header of this script)}"
+PY="${CALLING_MOM_PYTHON:-python3}"
+FILES="__init__.py cli.py rules.py test_rules.py metrics.py signals.py plugin.yaml README.md CHANGELOG.md LICENSE test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py linecov.py check.py"
 
-for dst in "$CANON" "$DEPLOYED"; do
+first=""
+for dst in $CALLING_MOM_TARGETS; do
     [ -d "$dst" ] || { echo "skip (absent): $dst"; continue; }
     for f in $FILES; do cp "$SRC/$f" "$dst/$f"; done
     mkdir -p "$dst/scripts"
     cp "$SRC"/scripts/*.py "$dst/scripts/"
     echo "synced: $dst"
+    first="${first:-$dst}"
 done
+[ -n "$first" ] || { echo "no target directory exists"; exit 1; }
 
-"$PY" "$CANON/check.py"
+"$PY" "$first/check.py"
 
-if [ "${1:-}" = "--restart" ]; then
-    /command/s6-svc -r /run/service/gateway-default || echo "WARN: gateway restart failed (s6-svc)"
+if [ "${1:-}" = "--restart" ] && [ -n "${CALLING_MOM_RESTART:-}" ]; then
+    sh -c "$CALLING_MOM_RESTART" || echo "WARN: restart command failed"
     sleep 20
 fi
 
-"$PY" "$CANON/scripts/smoke.py"
+"$PY" "$first/scripts/smoke.py"

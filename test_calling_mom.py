@@ -1,6 +1,6 @@
 """Tests for the calling-mom plugin (stdlib unittest, no pytest needed).
 
-    cd <plugin dir> && /opt/hermes/.venv/bin/python -m unittest -v test_calling_mom
+    cd <plugin dir> && python -m unittest -v test_calling_mom
 """
 
 import importlib.util
@@ -463,7 +463,7 @@ class FakeLlm:
     def complete(self, messages, **kw):
         self.calls.append({"messages": messages, **kw})
         if self.boom:
-            raise RuntimeError("provider down")
+            raise RuntimeError(getattr(self, "error", "provider down"))
         return self._res
 
 
@@ -482,6 +482,7 @@ class AdvisorTest(unittest.TestCase):
         plugin.DEFAULTS["advisor"]["boards"] = ["t-board"]
         os.environ["HERMES_KANBAN_BOARD"] = "t-board"
         self.llm = FakeLlm()
+        plugin._down.clear()
         plugin._ctx = NS(llm=self.llm)
         self.tid = with_conn(lambda c: kb.create_task(c, title="fix the parser", body="Make tests pass.", assignee="worker"))
         os.environ["HERMES_KANBAN_TASK"] = self.tid
@@ -657,7 +658,8 @@ class CriticalDefaultsTest(AdvisorTest):
     def test_irreversible_or_public_commands_are_reviewed(self):
         for cmd in ("gh pr merge 135 --squash", "gh release create v2.9.2", "git push origin main",
                     "git push --force origin feat/x", "git tag v1.2.0", "gh issue comment 133 --body x",
-                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- id"):
+                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- id",
+                    "kubectl -n prod delete pvc pgdata", "kubectl --context p apply -f x.yaml"):
             with self.subTest(cmd=cmd):
                 self.assertIn("[ADVISOR", self.run_cmd(cmd) or "")
 
@@ -879,6 +881,427 @@ class OptInTest(AdvisorTest):
         tid = with_conn(lambda c: kb.create_task(c, title="[advisor] [local-only] secrets", assignee="worker"))
         os.environ["HERMES_KANBAN_TASK"] = tid
         self.assertIsNone(self.stuck(3))
+
+
+class SeqLlm(FakeLlm):
+    """Answers from a list, one per call, and reports the model it was asked for."""
+
+    def __init__(self, texts):
+        super().__init__()
+        self.texts = list(texts)
+
+    def complete(self, messages, **kw):
+        from types import SimpleNamespace as NS
+        self.calls.append({"messages": messages, **kw})
+        text = self.texts.pop(0) if self.texts else "ok"
+        return NS(text=text, model=kw["model"], provider=kw["provider"],
+                  usage=NS(input_tokens=500, output_tokens=50, cost_usd=0.01))
+
+
+class TwoTierTest(AdvisorTest):
+    """Mom answers first; the olymp model is asked only when the mom says ESCALATE."""
+
+    def setUp(self):
+        super().setUp()
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
+        plugin.DEFAULTS["categories"] = {"architecture": {"max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+        plugin._arch_seen.clear()
+        self.models = lambda: [c["model"] for c in self.llm.calls]
+
+    def seq(self, *texts):
+        self.llm = SeqLlm(texts)
+        plugin._ctx.llm = self.llm
+
+    def critical(self, cmd="terraform apply"):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": cmd}, result="r", status="ok")
+
+    def comments(self):
+        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
+
+    def test_routine_critical_change_is_answered_by_the_mom_alone(self):
+        self.seq("Fine, nothing irreversible.")
+        out = self.critical()
+        self.assertEqual(self.models(), [STRONG])
+        self.assertIn("Fine", out)
+
+    def test_mom_escalates_a_real_edge_case_to_olymp(self):
+        self.seq("ESCALATE: prod deploy without rollback", "Olymp says: keep the cron as fallback.")
+        out = self.critical()
+        self.assertEqual(self.models(), [STRONG, "m/olymp"])
+        self.assertEqual(self.llm.calls[1]["provider"], "p/olymp")
+        self.assertIn("Olymp says", out)
+        self.assertNotIn("ESCALATE", out)
+
+    def test_gate_instruction_goes_only_to_the_mom(self):
+        self.seq("ESCALATE: x", "ok")
+        self.critical()
+        self.assertIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+        self.assertNotIn("ESCALATE", self.llm.calls[1]["messages"][0]["content"])
+
+    def test_routine_stuck_signal_never_reaches_olymp(self):
+        self.seq("ESCALATE: x")
+        self.stuck(3)
+        self.assertEqual(self.models(), [STRONG])
+        self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+
+    def test_olymp_is_off_without_a_complete_pair(self):
+        plugin.DEFAULTS["olymp"]["provider"] = ""
+        self.seq("ESCALATE: x")
+        self.critical()
+        self.assertEqual(self.models(), [STRONG])
+        self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+
+    def test_olymp_is_asked_once_per_card(self):
+        self.seq("ESCALATE: a", "olymp a", "ESCALATE: b", "must not be asked")
+        self.critical("terraform apply -a")
+        self.critical("terraform apply -b")
+        self.assertEqual(self.models(), [STRONG, "m/olymp", STRONG])
+
+    def test_olymp_has_a_daily_call_limit(self):
+        plugin.DEFAULTS["olymp"].update(max_per_card=9, max_per_day=1)
+        self.seq("ESCALATE: a", "olymp a", "ESCALATE: b")
+        self.critical("terraform apply -a")
+        self.critical("terraform apply -b")
+        self.assertEqual(self.models(), [STRONG, "m/olymp", STRONG])
+
+    def test_olymp_calls_do_not_count_against_the_dollar_cap(self):
+        self.seq("ESCALATE: a", "olymp a")
+        self.critical()
+        self.assertEqual(plugin._spent_today()["usd"], 0.01)   # mom only
+        self.assertEqual(plugin._spent_today()["olymp"], 1)
+
+    def test_comment_names_model_and_provider_and_the_olymp_tier(self):
+        self.seq("ESCALATE: a", "olymp a")
+        self.critical()
+        self.assertIn("m/olymp (p/olymp, olymp)", self.comments()[0])
+
+    def test_mom_comment_names_the_provider_without_olymp_tag(self):
+        self.seq("fine")
+        self.critical()
+        self.assertIn(f"{STRONG} ({PROVIDER})", self.comments()[0])
+        self.assertNotIn("olymp)", self.comments()[0])
+
+    def test_trace_row_carries_the_provider(self):
+        self.seq("fine")
+        self.critical()
+        rows = [json.loads(l) for l in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
+        self.assertEqual([r["provider"] for r in rows if r.get("kind") == "advisor"], [PROVIDER])
+
+    def test_half_pair_in_a_category_is_ignored(self):
+        plugin.DEFAULTS["categories"]["architecture"]["model"] = "m/only-model"
+        self.seq("fine")
+        self.critical()
+        self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), (STRONG, PROVIDER))
+
+    def test_full_pair_in_a_category_beats_olymp(self):
+        plugin.DEFAULTS["categories"]["architecture"].update(model="m/arch", provider="p/arch")
+        self.seq("ESCALATE: x")
+        self.critical()
+        self.assertEqual(self.models(), ["m/arch"])
+        self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
+
+    def test_olymp_failure_is_fail_open(self):
+        class Boom(SeqLlm):
+            def complete(self, messages, **kw):
+                if kw["model"] == "m/olymp":
+                    raise RuntimeError("down")
+                return super().complete(messages, **kw)
+        self.llm = Boom(["ESCALATE: x"])
+        plugin._ctx.llm = self.llm
+        self.assertIsNone(self.critical())
+
+
+class LocalContractTest(AdvisorTest):
+    """completion_contract=local-only is the board default (no PR/CI gate), not a privacy flag."""
+
+    def test_default_contract_does_not_block_the_advisor(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="infra change", assignee="worker",
+                                                 completion_contract="local-only"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        self.assertIn("[ADVISOR", self.stuck(3))
+
+
+class StepsSignalTest(AdvisorTest):
+    def test_steps_alone_does_not_call_the_advisor(self):
+        for i in range(plugin.DEFAULTS["limits"]["steps"]):
+            out = plugin.on_tool_result(tool_name="read_file", args={"path": f"/f{i}"}, result="r", status="ok")
+        self.assertIsNone(out)
+        self.assertEqual(self.llm.calls, [])
+
+
+class EgressRedactionTest(AdvisorTest):
+    """Everything sent to a remote model passes the redactor. One row per secret shape (see SECURITY.md)."""
+
+    SECRETS = {
+        "github token": "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+        "openai key": "sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        "anthropic key": "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6-xyz",
+        "openrouter key": "sk-or-v1-" + "a1B2c3D4" * 8,
+        "aws key id": "AKIA" + "ABCDEFGHIJKLMNOP",
+        "bearer header": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijklmnop.qrstuvwxyz0123",
+        "password assignment": "DB_PASSWORD=hunter2hunter2",
+        "url credentials": "https://deploy:s3cretpass@git.example.com/org/repo.git",
+    }
+    NEEDLES = ("a1B2c3D4e5F6", "A1b2C3d4E5f6", "ABCDEFGHIJKLMNOP", "abcdefghijklmnop", "hunter2hunter2", "s3cretpass")
+
+    def test_no_secret_shape_reaches_the_remote_model(self):
+        for name, secret in self.SECRETS.items():
+            with self.subTest(secret=name):
+                os.environ["HERMES_KANBAN_TASK"] = with_conn(lambda c: kb.create_task(c, title="deploy", assignee="worker"))
+                self.llm.calls.clear()
+                plugin._trackers.clear()
+                self.stuck(3, text=f"deploy failed, config had {secret} in it")
+                sent = "\n".join(m["content"] for m in self.llm.calls[0]["messages"])
+                self.assertFalse(any(n in sent for n in self.NEEDLES), (name, sent[-300:]))
+
+
+class ProviderErrorTest(AdvisorTest):
+    """A dead provider must not be silent: ONE visible comment per card, the worker is not disturbed."""
+
+    def comments(self):
+        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
+
+    def test_failure_leaves_one_comment_and_does_not_touch_the_result(self):
+        self.llm.boom = True
+        self.assertIsNone(self.stuck(3))
+        plugin._trackers.clear()
+        self.assertIsNone(self.stuck(3))
+        bodies = self.comments()
+        self.assertEqual(len(bodies), 1)
+        self.assertTrue(bodies[0].startswith("[advisor unavailable]"))
+        self.assertIn("provider down", bodies[0])
+        self.assertIn("doctor", bodies[0])
+
+    def test_error_text_is_redacted_and_short(self):
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        self.llm.boom = True
+        self.llm.error = f"403 key {token} " + "x" * 2000
+        self.stuck(3)
+        body = self.comments()[0]
+        self.assertNotIn(token, body)
+        self.assertLess(len(body), 600)
+
+    def test_a_later_worker_run_does_not_comment_twice(self):
+        """The cooldown is per process; the comment check must hold across runs (new process = empty cooldown)."""
+        plugin._report_unavailable(self.tid, RuntimeError("first run"))
+        plugin._report_unavailable(self.tid, RuntimeError("second run"))
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn("first run", self.comments()[0])
+
+    def test_dead_model_is_not_called_again_during_the_cooldown(self):
+        self.llm.boom = True
+        self.stuck(3)
+        plugin._trackers.clear()
+        self.stuck(3)
+        self.assertEqual(len(self.llm.calls), 1)          # the second question never left
+        self.assertEqual(len(self.comments()), 1)         # and made no second comment
+
+    def test_cooldown_ends_and_a_success_clears_it(self):
+        self.llm.boom = True
+        self.stuck(3)
+        for pair in plugin._down:
+            plugin._down[pair] -= plugin.COOLDOWN_S + 1   # cooldown over
+        self.llm.boom = False
+        plugin._trackers.clear()
+        self.assertIn("[ADVISOR", self.stuck(3))
+        self.assertEqual(plugin._down, {})
+
+    def test_cooldown_is_per_model(self):
+        plugin._down[("openrouter", "other/model")] = plugin.time.time()
+        self.assertIn("[ADVISOR", self.stuck(3))
+
+    def test_failure_does_not_eat_the_advice_budget(self):
+        self.llm.boom = True
+        self.stuck(3)
+        plugin._down.clear()
+        self.llm.boom = False
+        plugin._trackers.clear()
+        for _ in range(plugin.DEFAULTS["advisor"]["max_consults_per_card"]):
+            plugin._trackers.clear()
+            self.stuck(3)
+        self.assertEqual(len(self.llm.calls), 1 + plugin.DEFAULTS["advisor"]["max_consults_per_card"])
+
+    def test_card_that_did_not_opt_in_gets_no_error_comment(self):
+        os.environ["HERMES_KANBAN_BOARD"] = "other-board"
+        self.llm.boom = True
+        self.stuck(3)
+        self.assertEqual(self.comments(), [])
+
+    def test_failure_is_traced(self):
+        self.llm.boom = True
+        self.stuck(3)
+        rows = [json.loads(l) for l in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
+        self.assertEqual([r["error"] for r in rows if r.get("kind") == "advisor_error"], ["RuntimeError"])
+
+
+class MomBlockTest(unittest.TestCase):
+    """`calling_mom.mom.{model,provider}` names the cheap tier; the legacy top-level pair still works."""
+
+    def settings_with(self, block):
+        orig = _hermes_config.load_config
+        _hermes_config.load_config = lambda *a, **k: {"calling_mom": block}
+        try:
+            return plugin.settings()
+        finally:
+            _hermes_config.load_config = orig
+
+    def test_mom_pair_replaces_the_top_level_pair(self):
+        s = self.settings_with({"mom": {"model": "s/m", "provider": "s-p"}})
+        self.assertEqual((s["model"], s["provider"]), ("s/m", "s-p"))
+
+    def test_mom_beats_a_legacy_pair_in_the_same_config(self):
+        s = self.settings_with({"model": "old/m", "provider": "old-p", "mom": {"model": "s/m", "provider": "s-p"}})
+        self.assertEqual((s["model"], s["provider"]), ("s/m", "s-p"))
+
+    def test_half_mom_pair_is_ignored(self):
+        s = self.settings_with({"mom": {"model": "s/m"}})
+        self.assertEqual((s["model"], s["provider"]), (plugin.DEFAULTS["model"], plugin.DEFAULTS["provider"]))
+
+    def test_without_a_mom_block_nothing_changes(self):
+        s = self.settings_with({"model": "old/m", "provider": "old-p"})
+        self.assertEqual((s["model"], s["provider"]), ("old/m", "old-p"))
+
+
+class CliRegistrationTest(unittest.TestCase):
+    def test_register_adds_the_calling_mom_command(self):
+        from types import SimpleNamespace as NS
+        seen = {}
+        ctx = NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: None, llm=None,
+                 register_cli_command=lambda **kw: seen.update(kw))
+        plugin.register(ctx)
+        self.assertEqual(seen["name"], "calling-mom")
+        self.assertTrue(callable(seen["setup_fn"]) and callable(seen["handler_fn"]))
+
+    def test_old_hermes_without_cli_registration_still_loads(self):
+        from types import SimpleNamespace as NS
+        plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: None, llm=None))
+
+
+class RiskTiersTest(AdvisorTest):
+    """Critical commands and `watch` commands (ssh, pct, ...) have separate budgets; the list comes from rules.py."""
+
+    def setUp(self):
+        super().setUp()
+        plugin._arch_seen.clear()
+        plugin._watch_used.clear()
+
+    def run_cmd(self, command):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": command}, result="ok", status="ok")
+
+    def test_ssh_reads_cannot_use_up_the_budget_of_a_later_merge(self):
+        for i in range(4):
+            self.run_cmd(f"ssh pi 'ls /config/{i}'")
+        self.assertIn("[ADVISOR", self.run_cmd("gh pr merge 142 --squash"))
+        self.assertIn("[ADVISOR", self.run_cmd("git tag v2.9.4"))
+
+    def test_watch_commands_get_one_review_per_card(self):
+        self.run_cmd("ssh pi 'ls /a'")
+        self.assertIsNone(self.run_cmd("ssh pi 'ls /b'"))
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_a_noop_answer_still_uses_the_watch_budget(self):
+        self.llm._res.text = "NO_ACTION"
+        self.run_cmd("ssh pi 'ls /a'")
+        self.run_cmd("ssh pi 'ls /b'")
+        self.run_cmd("scp f pi:/tmp/")
+        self.assertEqual(len(self.llm.calls), 1)          # no comment was written, the counter still counts
+
+    def test_critical_budget_is_four_by_default(self):
+        outs = [self.run_cmd(f"kubectl -n prod delete pod p{i}") for i in range(6)]
+        self.assertEqual(sum(1 for o in outs if o), 4)
+
+    def test_curl_write_to_the_github_api_is_critical(self):
+        cmd = 'curl -sf -X PUT -H "Authorization: token T" https://api.github.com/repos/o/r/pulls/1/merge'
+        self.assertIn("[ADVISOR", self.run_cmd(cmd))
+
+    def test_a_critical_command_inside_ssh_is_critical_not_watch(self):
+        self.run_cmd("ssh pi 'ls /a'")                      # uses the watch budget
+        self.assertIn("[ADVISOR", self.run_cmd("ssh pi 'kubectl -n prod delete pvc x'"))
+
+    def test_commands_extra_adds_your_own_patterns(self):
+        self.assertIsNone(self.run_cmd("flyctl deploy"))
+        cats = plugin.DEFAULTS["categories"]
+        plugin.DEFAULTS["categories"] = {**cats, "architecture": {**cats["architecture"], "commands_extra": [r"\bflyctl deploy\b"]}}
+        self.assertIn("[ADVISOR", self.run_cmd("flyctl deploy"))
+
+    def test_watch_is_never_escalated_to_olymp(self):
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
+        self.llm = SeqLlm(["ESCALATE: x", "olymp must not be asked"])
+        plugin._ctx.llm = self.llm
+        self.run_cmd("ssh pi 'ls /a'")
+        self.assertEqual([c["model"] for c in self.llm.calls], [STRONG])
+
+
+class CompletionPerRunTest(AdvisorTest):
+    def complete(self):
+        return plugin.on_pre_tool(tool_name="kanban_complete", args={"summary": "done"})
+
+    def test_every_run_gets_its_own_completion_check(self):
+        self.llm._res.text = "DONE"
+        for run in ("1", "2", "3"):
+            os.environ["HERMES_KANBAN_RUN_ID"] = run
+            self.complete()
+        self.assertEqual(len(self.llm.calls), 3)
+
+    def test_still_once_per_run(self):
+        self.llm._res.text = "DONE"
+        self.complete()
+        plugin._completion_checked.clear()                # same run, e.g. after a restart of the process
+        self.complete()
+        self.assertEqual(len(self.llm.calls), 1)
+
+
+class DefensivePathsTest(AdvisorTest):
+    """Paths the old basename-based coverage counted by accident (any package's __init__.py matched)."""
+
+    def test_merge_keeps_the_default_for_a_wrong_type(self):
+        self.assertEqual(plugin._merge({"a": 1}, "x"), {"a": 1})
+        self.assertEqual(plugin._merge(1.5, "x"), 1.5)
+        self.assertEqual(plugin._merge(None, 5), 5)
+        self.assertIsNone(plugin._merge(None, None))
+
+    def test_profile_runs_strong_is_false_when_the_config_breaks(self):
+        orig = _hermes_config.load_config
+        _hermes_config.load_config = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+        try:
+            self.assertFalse(plugin._profile_runs_strong())
+        finally:
+            _hermes_config.load_config = orig
+
+    def test_a_card_that_vanished_is_not_escalated(self):
+        task = type("T", (), {"id": "t1", "status": "blocked", "block_kind": None, "model_override": None,
+                              "last_failure_error": "boom", "title": "x", "body": ""})()
+
+        class Ctx:
+            def __enter__(self):
+                return "CONN"
+
+            def __exit__(self, *exc):
+                return False
+
+        orig = (plugin._connect, plugin.kb)
+        plugin._connect = lambda board=None: Ctx()
+        plugin.kb = type("KB", (), {"get_task": staticmethod(lambda c, i: None)})()
+        try:
+            self.assertFalse(plugin._escalate_parked_task(task, {"error": "boom"}, "default"))
+        finally:
+            plugin._connect, plugin.kb = orig
+
+    def test_dispatch_tick_sweeps_without_error(self):
+        plugin.on_dispatch_tick(board=None)
+
+    def test_yesterdays_spend_does_not_count(self):
+        plugin._spend_path().write_text(json.dumps({"date": "2000-01-01", "usd": 9.0, "tokens": 9, "olymp": 9}))
+        self.assertEqual(plugin._spent_today(), {"usd": 0.0, "tokens": 0, "olymp": 0})
+
+    def test_earlier_run_summaries_reach_the_advisor_prompt(self):
+        def add_run(c):
+            c.execute("INSERT INTO task_runs (task_id, status, started_at, summary) VALUES (?, 'done', 1, 'earlier result')",
+                      (self.tid,))
+            c.commit()
+        with_conn(add_run)
+        self.stuck(3)
+        self.assertIn("earlier result", self.llm.calls[0]["messages"][1]["content"])
 
 
 class VerifySecurityTest(unittest.TestCase):

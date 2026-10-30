@@ -47,6 +47,20 @@ except ImportError:  # loaded by path (tests, plugin doctor): no package context
     signals = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(signals)
 
+try:
+    from . import rules
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _rules_spec = importlib.util.spec_from_file_location("calling_mom_rules", Path(__file__).with_name("rules.py"))
+    rules = importlib.util.module_from_spec(_rules_spec)
+    _rules_spec.loader.exec_module(rules)
+
+try:
+    from . import cli
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _cli_spec = importlib.util.spec_from_file_location("calling_mom_cli", Path(__file__).with_name("cli.py"))
+    cli = importlib.util.module_from_spec(_cli_spec)
+    _cli_spec.loader.exec_module(cli)
+
 DEFAULTS = {
     "model": "deepseek/deepseek-v4.1-flash-1017",
     "provider": "openrouter",
@@ -69,21 +83,24 @@ DEFAULTS = {
         "max_consults_per_card": 3, "max_output_tokens": 700,
         "context_chars": 6000, "daily_usd_cap": 2.0, "daily_token_cap": 200000, "timeout_s": 40,
     },
+    # "olymp" tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
+    # every category then uses the "mom" (top-level model/provider). A per-category entry below still wins.
+    # The mom answers first and says ESCALATE only for a rare high-stakes case; then (and only then) olymp is asked.
+    # Olymp runs on a subscription: no USD/token cap, but a hard call limit per card and per day.
+    "olymp": {"model": "", "provider": "", "categories": ["architecture"], "max_per_card": 1, "max_per_day": 6},
     # per category {model, provider}; missing keys fall back to the top-level model/provider.
-    # categories: error (same_error, malformed) | loop (loop, steps) | validation (failed verify:) | architecture
+    # categories: error (same_error, malformed) | loop (loop) | validation (failed verify:) | architecture
     "categories": {
         "error": {}, "loop": {}, "validation": {},
-        # completion: once per run, card vs. completion summary before kanban_complete; own budget
+        # completion: once per run, card vs. completion summary before kanban_complete
         "completion": {"max": 1},
-        # architecture: soft review of critical changes (+ the second_opinion tool); own small budget
+        # watch: privileged access to another machine (ssh, pct, ...): ONE look per card, own budget, mom only
+        "watch": {"max": 1},
+        # architecture: review of critical changes (+ the second_opinion tool). The lists live in rules.py;
+        # `commands_extra` adds your own regexes without replacing them.
         "architecture": {
-            "max": 2,
-            "patterns": [r"\.tf$", r"migrations?/", r"(^|/)Dockerfile$", r"docker-compose", r"\.github/workflows/"],
-            "commands": [r"terraform (apply|destroy)", r"kubectl (apply|delete)", r"\bDROP\s+(TABLE|DATABASE)\b", r"ansible-playbook",
-                         # public or irreversible: merge, release, tag, push to main/force, public comments, host shells
-                         r"\bgh (pr merge|release create)\b", r"\bgh api\b.*/(merge|releases|comments)\b", r"\bgit tag\b",
-                         r"\bgit push\b.*(--force|\s-f\b|\b(main|master)\b)", r"\bgh (issue|pr) comment\b",
-                         r"\b(ssh|pct|qm)\s"],
+            "max": 4, "patterns": rules.CRITICAL_FILES, "commands": rules.CRITICAL_COMMANDS,
+            "commands_extra": [], "watch": rules.WATCH_COMMANDS,
         },
     },
 }
@@ -95,6 +112,7 @@ AUTHOR = "escalation"
 _trackers: dict = {}  # (task, run) -> signals.Tracker, one per worker run
 _verify_fails: dict = {}  # (task, run) -> failed verifications so far
 _history: dict = {}  # (task, run) -> last tool steps (advisor context)
+_watch_used: dict = {}  # (task, run) -> `watch` reviews so far (a NO_ACTION answer writes no comment to count)
 _arch_seen: set = set()  # (task, run, path-or-command) already reviewed
 _redirected: set = set()  # (task, run) whose completion was already handed to the reviewer
 _completion_checked: set = set()  # (task, run) whose completion summary was already checked
@@ -105,7 +123,15 @@ _REFUTED = re.compile(
 _HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"
-_CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop", "steps": "loop"}
+_UNAVAILABLE = "[advisor unavailable]"
+COOLDOWN_S = 300  # a model that just failed is not asked again for this long (each dead call delays the worker)
+_down: dict = {}  # (provider, model) -> time of its last failure
+
+
+class _CoolingDown(Exception):
+    """The model failed a moment ago: skip silently, the first failure already left its comment."""
+# `steps` is a pace signal (logged, never a question): it cost one advisor call and returned NO_ACTION
+_CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop"}
 
 
 def _merge(default, override):
@@ -134,10 +160,15 @@ def settings() -> dict:
     try:
         from hermes_cli.config import load_config
 
-        return _merge(DEFAULTS, (load_config() or {}).get("calling_mom") or {})
+        raw = (load_config() or {}).get("calling_mom") or {}
     except Exception as exc:  # pragma: no cover - config is best effort
         logger.debug("calling-mom: config read failed: %s", exc)
-        return _merge(DEFAULTS, {})
+        raw = {}
+    cfg = _merge(DEFAULTS, raw)
+    mom = raw.get("mom") if isinstance(raw.get("mom"), dict) else {}
+    if mom.get("model") and mom.get("provider"):  # the mom block names the cheap tier; a half pair is ignored
+        cfg["model"], cfg["provider"] = str(mom["model"]), str(mom["provider"])
+    return cfg
 
 
 def _enabled() -> bool:
@@ -434,6 +465,7 @@ def _advisor_opted_in(task) -> bool:
 
 
 def _is_local_only(task) -> bool:
+    # not `completion_contract`: "local-only" there is the board DEFAULT (no PR/CI acceptance), not a privacy flag
     marker = settings()["local_only_marker"].lower()
     return bool(marker) and marker in f"{task.title or ''}\n{task.body or ''}".lower()
 
@@ -444,23 +476,25 @@ def _spend_path() -> Path:
 
 
 def _spent_today() -> dict:
-    """``{"usd", "tokens"}`` spent on advice today (UTC). Tokens cap what USD cannot: some models report no cost."""
+    """``{"usd", "tokens", "olymp"}`` spent on advice today (UTC). Tokens cap what USD cannot: some models
+    report no cost. ``olymp`` counts calls to the olymp model (a subscription: calls, not dollars)."""
+    zero = {"usd": 0.0, "tokens": 0, "olymp": 0}
     try:
         data = json.loads(_spend_path().read_text())
     except (OSError, ValueError):
-        return {"usd": 0.0, "tokens": 0}
+        return zero
     if data.get("date") != time.strftime("%Y-%m-%d", time.gmtime()):
-        return {"usd": 0.0, "tokens": 0}
-    return {"usd": float(data.get("usd", 0.0)), "tokens": int(data.get("tokens", 0))}
+        return zero
+    return {"usd": float(data.get("usd", 0.0)), "tokens": int(data.get("tokens", 0)), "olymp": int(data.get("olymp", 0))}
 
 
-def _add_spend(usd: float, tokens: int) -> None:
+def _add_spend(usd: float, tokens: int, olymp: int = 0) -> None:
     path = _spend_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     now = _spent_today()
     path.write_text(json.dumps({
         "date": time.strftime("%Y-%m-%d", time.gmtime()),
-        "usd": now["usd"] + usd, "tokens": now["tokens"] + tokens,
+        "usd": now["usd"] + usd, "tokens": now["tokens"] + tokens, "olymp": now["olymp"] + olymp,
     }))
 
 
@@ -485,9 +519,19 @@ _PROMPTS = {
                   "with the agent's completion summary. A requested deliverable (PR, merge, release, fix, report) "
                   "that is missing is a gap unless the summary proves it is not needed; a claim like 'not our bug' "
                   "needs evidence. Answer exactly DONE, or 'GAP: ' plus what is missing in at most 60 words.",
+    "watch_change": "You review a command a weaker coding agent ran on another machine (ssh, pct, qm, scp). "
+                    "Answer in at most 80 words: only if it changes state or exposes data, name the risk and what to "
+                    "double-check. A plain read-only command: answer exactly NO_ACTION. Do not restate the task.",
     "second_opinion": "You answer a design question from a coding agent. Answer in at most 120 words: "
                       "recommend one option, give the deciding reason and name one risk.",
 }
+
+
+_URL_CREDS = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", re.I)
+_GATE = ("\n\nYou are the FIRST reviewer; a far more expensive reviewer exists. Give your normal answer. "
+         "Only for a rare high-stakes case that you cannot judge as safe from this context (irreversible "
+         "production or public action without a fallback) answer exactly 'ESCALATE: ' plus a one-line reason. "
+         "Routine or reversible changes: never escalate.")
 
 
 def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_runs=None) -> list:
@@ -506,7 +550,7 @@ def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_
     user += f"\nStuck signal: {signal}\nLast steps:\n" + "\n".join(lines)
     if note:
         user += f"\n\nDetails:\n{note}"
-    user = redact_for_egress(user)
+    user = redact_for_egress(_URL_CREDS.sub(r"\1***@", user))  # Hermes' redactor misses scheme://user:pass@host
     if len(user) > limit:  # keep the task head and the most recent steps
         head = limit // 3
         user = user[:head] + "\n...\n" + user[-(limit - head - 5):]
@@ -522,20 +566,34 @@ def _advise(key, category, signal, note="") -> "str | None":
         return None
     from hermes_cli import kanban_db as kb
 
-    route = {"model": cfg["model"], "provider": cfg["provider"], **(cfg["categories"].get(category) or {})}
+    # model and provider only travel as a PAIR: a half pair would send one provider's model id to another
+    ov = {k: v for k, v in (cfg["categories"].get(category) or {}).items() if k in ("model", "provider") and v}
+    if len(ov) == 1:
+        logger.warning("calling-mom: categories.%s needs model AND provider; ignored", category)
+        ov = {}
+    olymp = cfg["olymp"]
+    olymp_pair = bool(olymp["model"] and olymp["provider"])
+    if olymp["model"] and not olymp_pair:
+        logger.warning("calling-mom: olymp needs model AND provider; olymp is off")
+    route = {"model": cfg["model"], "provider": cfg["provider"], **ov}
+    gate = olymp_pair and not ov and category in olymp["categories"]
     # categories with an own budget; every other category shares max_consults_per_card
-    own = {"architecture": 2, "completion": 1} | {
+    own = {"architecture": 4, "completion": 1, "watch": 1} | {
         c: v["max"] for c, v in cfg["categories"].items() if isinstance(v, dict) and "max" in v}
-    if category in own:
+    if category == "completion":  # one check per RUN: a later, bigger run must not inherit an earlier run's check
+        limit, where, params = own[category], "body LIKE ?", [f"[completion/%] run {key[1] or '?'} %"]
+    elif category in own:
         limit, where, params = own[category], "body LIKE ?", [f"[{category}/%"]
     else:
-        limit, params = adv["max_consults_per_card"], [f"[{c}/%" for c in own]
+        limit, params = adv["max_consults_per_card"], [f"[{c}/%" for c in own] + [_UNAVAILABLE + "%"]
         where = " AND ".join(["body NOT LIKE ?"] * len(params))
+    task, opted_in = None, False
     try:
         with _connect() as conn:
             task = kb.get_task(conn, key[0])
             if task is None or not _advisor_opted_in(task):
                 return None
+            opted_in = True
             # Get the latest operator comment (current subtask)
             latest_comment = conn.execute(
                 "SELECT body FROM task_comments WHERE task_id = ? AND author != ? ORDER BY created_at DESC LIMIT 1",
@@ -556,38 +614,93 @@ def _advise(key, category, signal, note="") -> "str | None":
             ).fetchone()[0]
             if used >= limit:
                 return None
+            olymp_used = conn.execute(
+                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE '%, olymp)%'",
+                (task.id, ADVISOR),
+            ).fetchone()[0]
         spent = _spent_today()
         if spent["usd"] >= adv["daily_usd_cap"] or spent["tokens"] >= adv["daily_token_cap"]:
             return None
-        res = _ctx.llm.complete(
-            _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs),
-            provider=route["provider"], model=route["model"], max_tokens=adv["max_output_tokens"],
-            timeout=adv["timeout_s"], purpose="kanban-advisor",
-        )
+        gate = gate and olymp_used < olymp["max_per_card"] and spent["olymp"] < olymp["max_per_day"]
+
+        def ask(r, msgs):
+            pair = (r["provider"], r["model"])
+            if time.time() - _down.get(pair, 0) < COOLDOWN_S:
+                raise _CoolingDown()
+            try:
+                out = _ctx.llm.complete(msgs, provider=r["provider"], model=r["model"],
+                                        max_tokens=adv["max_output_tokens"], timeout=adv["timeout_s"],
+                                        purpose="kanban-advisor")
+            except Exception:
+                _down[pair] = time.time()
+                raise
+            _down.pop(pair, None)
+            return out
+
+        msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
+        is_olymp = False
+        if gate:  # mom first, with the escalation instruction
+            first = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
+            if (first.text or "").strip().upper().startswith("ESCALATE"):
+                _add_spend(first.usage.cost_usd or 0.0, (first.usage.input_tokens or 0) + (first.usage.output_tokens or 0))
+                route, is_olymp = {"model": olymp["model"], "provider": olymp["provider"]}, True
+                res = ask(route, msgs)
+            else:
+                res = first
+        else:
+            res = ask(route, msgs)
         text = (res.text or "").strip()
         if not text:
             return None
         cost = res.usage.cost_usd or 0.0
-        _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
+        if is_olymp:  # subscription: counted in calls, never in dollars or tokens
+            _add_spend(0.0, 0, olymp=1)
+        else:
+            _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
         if text.upper().startswith("NO_ACTION"):  # nothing to say: no comment, no interruption
             _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
+                       provider=route["provider"], olymp=is_olymp,
                        tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
         with _connect() as conn:
             cid = kb.add_comment(
                 conn, task.id, ADVISOR,
-                f"[{category}/{signal}] run {key[1] or '?'} · {res.model}: "
+                f"[{category}/{signal}] run {key[1] or '?'} · {res.model} ({route['provider']}{', olymp' if is_olymp else ''}): "
                 f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}",
             )
             _skip_relay(conn, task.id, cid)
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
+                   provider=route["provider"], olymp=is_olymp,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
         _awaiting_reply.add(key)
         return f"[ADVISOR {res.model}] {text}"
+    except _CoolingDown:
+        return None
     except Exception as exc:
         logger.warning("calling-mom: advisor failed (%s): %s", signal, exc)
+        if opted_in:
+            _report_unavailable(task.id, exc)
         return None
+
+
+def _report_unavailable(task_id, exc) -> None:
+    """ONE visible comment per card when the advisor model cannot be reached (dead key, no login, ...).
+    Without it the card just runs on without advice and nobody learns why."""
+    try:
+        from agent.redact import redact_for_egress
+
+        _trace_row("advisor_error", task=task_id, error=type(exc).__name__)
+        with _connect() as conn:
+            if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE ?",
+                            (task_id, ADVISOR, _UNAVAILABLE + "%")).fetchone():
+                return
+            reason = redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
+            cid = kb.add_comment(conn, task_id, ADVISOR,
+                                 f"{_UNAVAILABLE} {reason}\nThe card continues without advice. Check the setup: hermes calling-mom doctor")
+            _skip_relay(conn, task_id, cid)
+    except Exception as err:  # pragma: no cover - reporting must never break the worker
+        logger.warning("calling-mom: could not report advisor failure: %s", err)
 
 
 def _skip_relay(conn, task_id, comment_id) -> None:
@@ -723,22 +836,29 @@ def _completion_check(key, args):
 
 
 def _architecture_hit(key, tool_name, args):
-    """Note for the reviewer when this call touches something critical (once per path/command), else None."""
+    """``(category, signal, note)`` when this call touches something risky (once per path/command), else None.
+    Critical things and `watch` things (ssh, pct, ...) have separate budgets, see rules.py."""
     cfg = settings()["categories"].get("architecture") or {}
     args = args or {}
     if tool_name in ("write_file", "patch"):
         target = str(args.get("path") or "")
-        rules, body = cfg.get("patterns") or [], str(args.get("content") or args.get("new_string") or "")[:800]
-        note = f"File: {target}\n{body}"
+        body = str(args.get("content") or args.get("new_string") or "")[:800]
+        tier, note = ("critical" if rules.is_critical_file(target, cfg.get("patterns") or []) else None), f"File: {target}\n{body}"
     elif tool_name in ("terminal", "execute_code"):  # execute_code runs shell commands too
         target = str(args.get("command") or args.get("code") or "")
-        rules, note = cfg.get("commands") or [], f"Command: {target[:400]}"
+        tier = rules.classify(target, extra=cfg.get("commands_extra") or [], critical=cfg.get("commands") or [],
+                              watch=cfg.get("watch") or [])
+        note = f"Command: {target[:400]}"
     else:
         return None
-    if not target or not any(re.search(r, target, re.I) for r in rules) or (*key, target) in _arch_seen:
+    if not target or tier is None or (*key, target) in _arch_seen:
         return None
+    if tier == "watch":
+        if _watch_used.get(key, 0) >= (settings()["categories"].get("watch") or {}).get("max", 1):
+            return None
+        _watch_used[key] = _watch_used.get(key, 0) + 1
     _arch_seen.add((*key, target))
-    return note
+    return ("watch", "watch_change", note) if tier == "watch" else ("architecture", "critical_change", note)
 
 
 def handle_second_opinion(args, **_):
@@ -822,8 +942,8 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
                 if advice:
                     return f"{result}\n\n{advice}"
         if question is None and cfg["advisor"]["enabled"] and isinstance(result, str) and status != "error":
-            note = _architecture_hit(key, tool_name, args)
-            advice = _advise(key, "architecture", "critical_change", note=note) if note else None
+            hit = _architecture_hit(key, tool_name, args)
+            advice = _advise(key, hit[0], hit[1], note=hit[2]) if hit else None
             if advice:
                 return f"{result}\n\n{advice}"
     except Exception as exc:  # pragma: no cover - observing must never break a worker
@@ -864,6 +984,13 @@ def register(ctx) -> None:
     ctx.register_tool(name="second_opinion", toolset="calling-mom", schema=_SECOND_OPINION,
                       handler=handle_second_opinion, check_fn=lambda: bool(os.environ.get("HERMES_KANBAN_TASK")),
                       emoji="\U0001f9d0")
+    register_cli = getattr(ctx, "register_cli_command", None)
+    if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
+        register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
+                     setup_fn=cli.setup_parser,
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path),
+                     description="setup: choose mom/olymp from your providers. status: show setup and usage. "
+                                 "doctor: check the setup with one real call per model.")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
     cfg = settings()

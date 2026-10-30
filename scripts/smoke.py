@@ -5,7 +5,7 @@ Answers three questions after a deploy or a Hermes image update:
   2. is the hook registered in each profile that loads it?
   3. is the release gate green (tests, coverage, copy drift)?
 
-    /opt/hermes/.venv/bin/python scripts/smoke.py     # exit 1 when anything fails
+    python scripts/smoke.py     # exit 1 when anything fails
 """
 import json
 import os
@@ -14,11 +14,12 @@ import sys
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent
-PY = os.environ.get("CALLING_MOM_PYTHON", "/opt/hermes/.venv/bin/python")
-HOME_DIR = Path("/opt/hermes")
-HERMES = str(HOME_DIR / ".venv" / "bin" / "hermes")
+PY = os.environ.get("CALLING_MOM_PYTHON", sys.executable)
+HERMES = os.environ.get("CALLING_MOM_HERMES") or str(Path(PY).with_name("hermes"))
 HOOK = "on_kanban_worker_exited"
-PROFILES = {"default": "/opt/data", "daidalos": "/opt/data/profiles/daidalos"}
+# profile name -> HERMES_HOME; override with CALLING_MOM_PROFILES="name=/home1,name2=/home2"
+PROFILES = dict(p.split("=", 1) for p in os.environ.get("CALLING_MOM_PROFILES", "").split(",") if "=" in p) \
+    or {"current": os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))}
 
 
 def run(cmd, **kw):

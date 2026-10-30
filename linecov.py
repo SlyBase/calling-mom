@@ -5,6 +5,7 @@ executable lines were never reached. No third-party dependency.
 
     /opt/hermes/.venv/bin/python linecov.py [test modules ...]
 """
+import ast
 import dis
 import io
 import os
@@ -14,7 +15,7 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent  # measure the copy this file lives in
 
-targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "__init__.py"}
+targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "rules.py", PLUGIN / "__init__.py"}
 hit = {p: set() for p in targets}
 
 
@@ -31,6 +32,10 @@ def executable_lines(path):
         for const in c.co_consts:
             if hasattr(const, "co_code"):
                 stack.append(const)
+    # `# pragma: no cover` on an `except` or a `def` line drops the whole handler / function
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.ExceptHandler, ast.FunctionDef)) and "pragma: no cover" in src.splitlines()[node.lineno - 1]:
+            lines -= set(range(node.lineno, node.end_lineno + 1))
     return lines
 
 
@@ -39,8 +44,10 @@ NAMES = {p.name: p for p in targets}
 
 def tracer(frame, event, arg):
     if event == "line":
-        t = NAMES.get(os.path.basename(frame.f_code.co_filename))
-        if t is not None:
+        fn = frame.f_code.co_filename
+        t = NAMES.get(os.path.basename(fn))
+        # same basename in another package (hermes_cli/__init__.py) must not count as ours
+        if t is not None and os.path.dirname(os.path.realpath(fn)) == str(PLUGIN):
             hit[t].add(frame.f_lineno)
     return tracer
 
@@ -79,4 +86,4 @@ def main(mods):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix"]))
+    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules"]))

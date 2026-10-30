@@ -1,6 +1,6 @@
 """Pure-logic tests for signals.py (no board, no Hermes imports).
 
-    cd <plugin dir> && /opt/hermes/.venv/bin/python -m unittest -v test_signals
+    cd <plugin dir> && python -m unittest -v test_signals
 """
 
 import unittest

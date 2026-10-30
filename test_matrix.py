@@ -4,7 +4,7 @@ One row per case: (entry point, prepared card, call kwargs, expected effect).
 Every hook a card can reach is covered here, including every guard branch.
 The row list IS the specification: add a case, add a row.
 
-    cd <plugin dir> && /opt/hermes/.venv/bin/python -m unittest test_matrix -v
+    cd <plugin dir> && python -m unittest test_matrix -v
 
 Existing suites (test_calling_mom / test_signals / test_metrics) stay for the
 internal mechanics (prompts, metrics rendering, spend ledger); this file pins the
@@ -13,6 +13,7 @@ observable behaviour of the hooks.
 import inspect
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -31,7 +32,7 @@ PROVIDER = base.PROVIDER
 def make(title="contract card", body=None, state="ready", kind=None,
          override=None, error=None, created_by=None):
     """Create one card and put it in the requested state."""
-    tid = with_conn(lambda c: kb.create_task(c, title=title, body=body, assignee="daidalos"))
+    tid = with_conn(lambda c: kb.create_task(c, title=title, body=body, assignee="worker"))
     tid = tid.id if hasattr(tid, "id") else tid
 
     def apply(conn):
@@ -379,7 +380,7 @@ class EdgeContractTest(unittest.TestCase):
         self.old_ctx = plugin._ctx
         plugin._ctx = NS(llm=base.FakeLlm(text="   "))  # empty answer
         self.old_log = os.environ.get("CALLING_MOM_LOG")
-        os.environ["CALLING_MOM_LOG"] = str(Path(__file__).parent / "cache-edge.jsonl")
+        os.environ["CALLING_MOM_LOG"] = str(Path(tempfile.mkdtemp()) / "cache-edge.jsonl")
         os.environ["HERMES_KANBAN_BOARD"] = "t-board"
 
     def tearDown(self):

@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
 
       - name: compile every module
-        run: python -m py_compile __init__.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py linecov.py check.py
+        run: python -m py_compile __init__.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py cli.py rules.py test_rules.py linecov.py check.py
 
       - name: plugin manifest is valid YAML with the required keys
         run: |
@@ -49,6 +49,19 @@ jobs:
           print("hooks match:", sorted(declared))
           PY
 
+      - name: release archive ships every module the plugin imports
+        run: |
+          python - <<'PY'
+          import re
+          src = open("__init__.py").read()
+          needed = set(re.findall(r'spec_from_file_location\("[^"]+", Path\(__file__\)\.with_name\("([^"]+)"\)', src))
+          needed |= {m + ".py" for m in re.findall(r"^\s+from \. import (\w+)", src, re.M)}
+          release = open(".github/workflows/release.yml").read()
+          missing = sorted(f for f in needed if f not in release)
+          assert needed and not missing, f"release.yml archive misses: {missing} (found {sorted(needed)})"
+          print("release ships", sorted(needed))
+          PY
+
       - name: CHANGELOG has an entry for the manifest version
         run: |
           python - <<'PY'
@@ -58,3 +71,26 @@ jobs:
           assert re.search(rf"^## \[{re.escape(version)}\]", text, re.M), f"no CHANGELOG section for {version}"
           print("changelog ok for", version)
           PY
+
+  full-suite:
+    # The real gate: the plugin against Hermes main. A red run
+    # after a green history usually means "Hermes moved": fix the plugin or raise the minimum version.
+    name: full suite against Hermes main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: plugin
+      - uses: actions/checkout@v5
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes
+      - uses: astral-sh/setup-uv@v6
+      - name: install Hermes (its own lockfile and Python)
+        working-directory: hermes
+        run: uv sync --quiet
+      - name: run the gate
+        working-directory: plugin
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: ../hermes/.venv/bin/python check.py

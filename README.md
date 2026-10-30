@@ -1,185 +1,123 @@
-# Calling mom
-
 ![Calling mom: Thetis rises from the sea to answer Achilles, Mount Olympus far above](assets/calling-mom-banner.jpg)
 
-<sub>*Homer, Iliad I: the hero Achilles is stuck and calls his mother, the sea goddess Thetis, who rises from the sea to help; only once does she climb to Olympus to ask Zeus. This plugin does the same: when the cheap worker model is stuck, it "calls mom", a stronger model that answers only that one question, and only in a rare high-stakes case does mom escalate to olymp, the strongest model.*</sub>
+<sub>*Homer, Iliad I: the hero Achilles is stuck and calls his mother, the sea goddess Thetis, who rises from the sea to help; only once does she climb to Olympus to ask Zeus. The plugin works the same way. Your **main model** is Achilles: it does the work. When it is stuck or about to do something risky, it **calls mom** (Thetis), a good, affordable model that answers that one question, and she does so often. Only in a rare high-stakes case does mom say "this is too big for me" and send the question up to **olymp** (Zeus), the strongest and most expensive model, who is asked rarely and has a hard limit.*</sub>
 
-A [Hermes](https://hermes-agent.nousresearch.com) plugin that lets a **cheap local model run your Kanban board** and "calls mom" (a stronger model) only where the board shows it is needed.
+# Calling mom
 
-The local model never judges itself. A weak model does not know when it is out of its depth, so every trigger is a **durable fact from the board or the tool results**, not a self-assessment.
+[![ci](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml)
 
-> Status: 1.0.0, private preview. Tested on one setup (local vLLM worker, DeepSeek via OpenRouter as the strong model).
+**Let a cheap model run your Kanban board. It calls mom when it needs help, and Olymp only when it really matters.**
 
-## What it does
+A [Hermes](https://hermes-agent.nousresearch.com) plugin. Your everyday model (a local model, DeepSeek, Sonnet) does the work.
+When it gets stuck or is about to do something risky, a stronger model looks over its shoulder. You pay for the big model
+only in the rare moments it is worth it.
 
-| Trigger | Action | Cost |
+## Who is who
+
+| | What it is | How often it is asked |
 |---|---|---|
-| Worker blocks a card with kind `capability` (or untyped) | Pin the card to the strong model, return it to `ready`, once. A second block parks it for a human. | one strong run |
-| The crash circuit breaker parks a card (`gave_up`) | Same, reactively on `on_kanban_worker_exited` (fired by the dispatcher after the breaker accounting). The cron sweep stays as the idempotent fallback for timeout-parked cards and for setups without the hook. Infrastructure failures are skipped. | one strong run |
-| `[crit]` in title/body | Pin to the strong model at claim time. | one strong run |
-| Stuck signal in a worker run (same error x3, identical call x3, malformed call x3, 40+ steps without a heartbeat or a file edit) | **Advisor**: one short question to the strong model with a redacted tail of the run. The answer is appended to the tool result (once: the board does not relay it again as an operator note). `NO_ACTION` answers are dropped. The worker keeps going. | ~300 output tokens |
-| Edit of a risky file / risky command (`*.tf`, `migrations/`, `terraform apply`, `gh pr merge`, `gh release create`, `git push … main`, `git tag`, public comments, `ssh`/`pct`/`qm`; `terminal` and `execute_code`) | Same advisor call, category `architecture`. Also reachable as the `second_opinion` tool and as a `SECOND-OPINION:` comment. | ~300 tokens |
-| `verify: <cmd>` line on a card | Gates `kanban_complete`: the command must pass. Failures go back to the worker. After `max_fix` failures the advisor looks at it. | free |
-| `kanban_complete` on an advisor card | **Completion check**, once per run: card vs. completion summary. `GAP: …` blocks the first attempt with the missing parts; the second attempt always passes. Own budget (1 per card). | ~1 advisor call |
-| `[review]` in title/body | On `kanban_complete` the plugin itself calls `kanban_request_review(reviewer=...)`. A separate reviewer profile with the strong model reads the result. | one short review run |
-| `ladder.effort_first: true` (off) | First give-up raises `reasoning_effort` on the same model before paying for another one. | free |
+| **Your main model** | The model that works the cards. | All the time. It is the worker. |
+| **Mom** | Your everyday helper. A good, affordable model (for example Sonnet or DeepSeek). | Often: whenever the main model is stuck, unsure, or about to do something risky. |
+| **Olymp** | The expensive heavyweight (for example Opus). | Rarely. Only when Mom herself says "this one is too big for me". |
 
-Only the **stuck point** goes to the strong model, not the whole turn. Blocks that need a human (`needs_input`, `dependency`) are never escalated.
+The main model never decides for itself that it needs help. A weak model cannot tell when it is out of its depth,
+so the plugin watches for **signals** instead.
 
-## Install
+## When is Mom called?
+
+| Signal | Who sends it | What Mom does |
+|---|---|---|
+| The main model **gives up** on a card ("capability" block), or the card keeps **crashing** | the main model / the board | The whole card is handed to Mom's model, once. |
+| The **same error 3 times in a row** | the main model | A short tip: probable cause, next steps. |
+| The **same command 3 times** (going in circles) | the main model | A short tip to get out of the loop. |
+| **Broken tool calls 3 times** | the main model | A short tip. |
+| A **risky command or file** (merge, release, force push, `terraform apply`, `kubectl delete`, `DROP TABLE`, `rm -rf` of broad folders, secrets, ...) | the main model | A review: the biggest risk, what to double-check. |
+| A command on **another machine** (`ssh`, `scp`, `pct`, `qm`) | the main model | One short look per card. |
+| **`SECOND-OPINION: <question>`** as a card comment (or the `second_opinion` tool) | the main model | Mom answers the question. |
+| It says **"done"** | the main model | A check: does the result match what the card asked? Missing parts go back once. |
+| Card marker **`[crit]`** | you | The card runs on Mom's model from the start. |
+| Card marker **`[review]`** | you | A separate reviewer reads the result. |
+| A **`verify: <command>`** line on the card | you | The command must pass before the card can finish. No model needed. |
+
+Mom's answer appears **in the card** as a comment and is shown to the main model, which keeps working.
+
+## When is Olymp called?
+
+**Almost never.** Olymp is asked only if all of this is true:
+
+1. The question is a **risky change** or a **`SECOND-OPINION`**. Stuck errors, loops and "done" checks never go to Olymp.
+2. Mom answered first and wrote **`ESCALATE: <reason>`**: a high-stakes case she cannot judge as safe, an irreversible production or public action without a way back.
+3. The limits are not used up: **1 Olymp question per card and 6 per day**.
+
+Everything else, including routine `ssh` calls and ordinary reviews, is settled by Mom. If Olymp is down or the limit is
+reached, the card simply carries on without his advice. (Advice arrives right after the command ran: it warns, it cannot undo.)
+
+## Quick start
 
 ```bash
 hermes plugins install SlyBase/calling-mom
 hermes plugins enable calling-mom
+hermes calling-mom setup     # pick Mom and Olymp from the providers and models you already have
+hermes calling-mom doctor    # one real test call to each, tells you what is missing
 ```
 
-Then set the strong model (defaults: `deepseek/deepseek-v4.1-flash-1017` on `openrouter`):
+`setup` shows a numbered list of your configured providers and models, asks which board may use the helpers, and
+**asks before it writes anything**. Olymp stays off unless you choose one. In a hurry:
+`hermes calling-mom setup --preset subscription --yes`.
 
-```bash
-hermes config set calling_mom.model <model> --force
-hermes config set calling_mom.provider <provider> --force
-```
-
-### Cron sweep (fallback for breaker-parked cards and metrics push)
-
-```bash
-cp ~/.hermes/plugins/calling-mom/scripts/sweep.py "$HERMES_HOME/scripts/calling_mom_sweep.py"
-hermes cron create "every 1m" --name calling-mom-sweep --no-agent \
-    --script calling_mom_sweep.py --interpreter <hermes venv python> --deliver local
-```
-
-### Advisor (opt-in, off by default)
-
-The advisor sends redacted code to a remote model, so it is off until you opt in twice:
-
-```bash
-hermes config set calling_mom.advisor.enabled true --force
-hermes config set calling_mom.advisor.boards '[my-board]' --force     # or put [advisor] on a card
-```
-
-The plugin calls the model through `ctx.llm`, which Hermes only allows for models you grant:
-
-```bash
-hermes config set plugins.entries.calling-mom.llm.allow_model_override true --force
-hermes config set plugins.entries.calling-mom.llm.allow_provider_override true --force
-hermes config set plugins.entries.calling-mom.llm.allowed_models '[<model>]' --force
-hermes config set plugins.entries.calling-mom.llm.allowed_providers '[<provider>]' --force
-```
-
-### Reviewer profile (for `[review]` cards)
-
-```bash
-hermes profile create reviewer --clone-from <your-profile> --no-alias
-hermes -p reviewer config set model.default <strong-model> --force
-hermes -p reviewer config set model.provider <provider> --force
-# remove inherited local endpoint settings: model.base_url, model.api_key, model.api_mode
-hermes -p reviewer plugins disable calling-mom
-```
-
-## Configuration
-
-All keys live under `calling_mom:` in `config.yaml`. Defaults are in `__init__.py` (`DEFAULTS`).
-
-| Key | Default | Meaning |
-|---|---|---|
-| `model`, `provider` | DeepSeek Flash / openrouter | The strong model. |
-| `marker` | `[crit]` | Pin the card to the strong model. |
-| `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. |
-| `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
-| `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000`. |
-| `categories.<name>` | inherit | Per category (`error`, `loop`, `validation`, `architecture`) its own `model`/`provider`. |
-| `verify.*` | see below | `timeout_s`, `max_fix`, `trusted_creators ["user"]`, `allow`. |
-| `review.*` | `[review]` / `reviewer` | Marker and reviewer profile (`""` = off). |
-| `ladder.effort_first` | `false` | Free rung before the strong model. |
-| `metrics.pushgateways` | `[]` | Pushgateway URLs, tried in order. `instance` defaults to `hermes`. |
-
-Kill switch: `CALLING_MOM=off` in the environment.
-
-## Security model
-
-Card text can come from mail or web content, so treat it as untrusted.
-
-- **`verify:`** runs only for cards created by `verify.trusted_creators`, never through a shell (`shlex`), only commands whose first word is in `verify.allow`, with a reduced environment. `python3 -c` is still arbitrary code: the creator check is the real control. Ignored lines are logged as `verify_ignored`.
-- **Advisor** is opt-in per board or card. Context is redacted with Hermes' `redact_for_egress`. Board tool results (`kanban_*`) are filtered out of the context. Daily USD and token caps apply.
-- **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content.
-- The plugin never edits Hermes config.
-
-## Metrics
-
-`metrics.py` renders Prometheus text from the plugin log, the spend ledger and read-only board DBs. The sweep PUTs it to `/metrics/job/calling_mom/instance/<instance>` on the first reachable Pushgateway. Families: `calling_mom_events_total`, `_advisor_calls_total`, `_advisor_tokens_total`, `_advisor_cost_usd_total`, `_advice_feedback_total{verdict}`, `_stuck_signals_total`, `_verify_total`, `_verify_ignored_total`, `_review_redirects_total`, `_ladder_total`, `_escalations_total{reason}`, `_gave_up_age_seconds{board}`, `_spend_today_{usd,tokens}`, `_spend_cap_{usd,tokens}`, `_cards{board,state}`, `_last_push_timestamp_seconds`.
-
-Two of them exist for alerting:
-
-| Metric | Meaning |
+| Command | What it does |
 |---|---|
-| `calling_mom_escalations_total{reason}` | cards pinned to the strong model — `crit` (marker at claim), `blocked` (worker gave up), `breaker` (crash park) |
-| `calling_mom_gave_up_age_seconds{board}` | age of the newest breaker park on that board; absent when the board never parked |
+| `hermes calling-mom setup` | Choose Mom and Olymp from your own providers. Safe to repeat. |
+| `hermes calling-mom status` | Who is Mom, who is Olymp, Olymp calls today, any failures. |
+| `hermes calling-mom doctor` | Checks the setup and makes a real call to each model. Run it after every Hermes update. |
 
-The Pushgateway keeps the last push, so alert on the age of `calling_mom_last_push_timestamp_seconds`, not on absence. A park that nobody escalated shows up as a small `gave_up_age` with no matching increase of `escalations_total`.
+## What you will see in a card
 
-### One log for all profiles
-
-The observation log, sweep watermark and spend ledger live under the installation root (`<hermes root>/logs/`), not under a profile home: the gateway escalates reactively, the cron sweeps, and both must land in ONE file or the metrics only see half the story. `CALLING_MOM_LOG`, `CALLING_MOM_STATE`, `CALLING_MOM_SPEND` still override the paths. The log is tail-trimmed at 5 MB.
-
-## What we measured, and what we did not
-
-24 runs (6 hidden-test coding tasks x 4 arms: local, local + high reasoning effort, local + advisor, strong model). **All 24 were correct.** The local model solved every task alone, so this set shows **no case for escalation**: it is too easy to find the capability boundary. `ladder.effort_first` stays off because high effort was slower for no gain. Build a harder set (multi-file, ambiguous spec) before tuning any threshold.
-
-Known limits:
-
-- The advisor was exercised live once; the stuck detectors fired one false positive (fixed: the identical-call history now resets on `write_file`/`patch`).
-- `claim_review_task` fires no `kanban_task_claimed` hook, so the strong model cannot be pinned per review run. That is why review uses a separate profile.
-- `model_override` is per card, not per run.
-- The plugin imports Hermes internals (`hermes_cli.kanban_db`, `kanban_db_connect`, `kanban_db_boards`). `hermes plugins validate` passes but warns about them; a Hermes update can break the plugin. The tests catch that.
-- The dispatcher tick hook did not fire in the gateway we tested. The cron sweep covers it.
-- The reactive hook `on_kanban_worker_exited` only fires in the process that runs the dispatcher,
-  and only for the crash path. Timeout parks and spawn-failure parks emit no hook, so the cron
-  sweep stays as the idempotent fallback for them.
-
-## Development
-
-Needs a Hermes checkout/venv (the tests use the real `kanban_db`). No pytest required:
-
-```bash
-python -W error::ResourceWarning -m unittest test_signals test_calling_mom test_metrics test_matrix
+```
+[architecture/critical_change] run 68 · claude-sonnet-5-5 (claude-subscription-directsdk-experimental): 2719 in / 780 out
+Biggest risk: the SSH keys now sit unencrypted in the scratch folder ... Double-check: delete them after the deploy ...
 ```
 
-Tests write to a sandbox, never to your real log.
+When Olymp answered, the comment says so: `claude-opus-5-5 (claude-subscription-directsdk-experimental, olymp)`.
+If a helper cannot be reached (dead key, not logged in) you get **one** comment, never silence:
+`[advisor unavailable] ... Check the setup: hermes calling-mom doctor`.
 
-### Deploy and release
+## Your money and your data
 
-```bash
-scripts/deploy.sh            # sync both plugin copies, gate, smoke test
-scripts/deploy.sh --restart  # same, then restart the gateway so it reloads the plugin
+- **Nothing leaves your machine until you say so.** Helpers are off until you enable them and name a board (or put `[advisor]` on a card).
+- **`[local-only]` on a card always wins**: nothing from that card is sent anywhere.
+- Secrets (tokens, keys, passwords, credentials in URLs) are **blanked out** before anything is sent.
+- Olymp is limited by **number of calls**, so a subscription never surprises you. Mom has a daily dollar and token cap.
+- The plugin never changes your config by itself. Only `setup` does, after you confirm.
+
+More in [SECURITY.md](SECURITY.md).
+
+## Minimal configuration
+
+`setup` writes this for you. By hand, in `config.yaml`:
+
+```yaml
+calling_mom:
+  mom:   {provider: openrouter, model: deepseek/deepseek-v4.1-flash-1017}
+  olymp: {provider: claude-subscription-directsdk-experimental, model: claude-opus-5-5}   # leave empty for no Olymp
+  advisor: {enabled: true, boards: [my-board]}
 ```
 
-Release: bump `version` in `plugin.yaml`, add the CHANGELOG section, commit, tag `v<version>`.
-The `release` workflow refuses a tag that does not match the manifest, builds
-`calling-mom-<version>.zip` from the tracked files and publishes it as a GitHub release.
-CI (`ci.yml`) checks compile, manifest, hook/manifest agreement and the CHANGELOG entry —
-the full suite needs a Hermes venv and runs on the host via `check.py`.
+Hermes only lets a plugin use a model you have granted (`plugins.entries.calling-mom.llm.*`); `setup` does that too.
+Kill switch: set `CALLING_MOM=off`. Every other option is in the [technical reference](docs/TECHNICAL.md).
 
-### Release gate
+## Something wrong?
 
-One command, before every release (and daily as the `calling-mom-check` cron job):
-
-```bash
-/opt/hermes/.venv/bin/python check.py          # exit 1 on any failure
-/opt/hermes/.venv/bin/python check.py --sync   # make the deployed copy match
-```
-
-It runs three things:
-
-| Part | What it proves |
+| You see | Try |
 |---|---|
-| `unittest` (178 tests) | the behaviour is unchanged |
-| line coverage over `__init__.py`, `metrics.py`, `signals.py` | **100 % threshold**; a new branch without a test fails the gate (`linecov.py`, stdlib only) |
-| copy drift vs. `/opt/data/plugins/calling-mom` | the deployed copy is byte-identical to the canonical one |
+| `[advisor unavailable]` in a card | `hermes calling-mom doctor` names the cause (key limit, login, missing grant). |
+| Nothing happens at all | `hermes calling-mom status`: is a board opted in? Is the advisor on? |
+| Two sweep cron jobs | `doctor` lists them. `setup` never creates a second one. |
+| Config from an early version (`sibling`) | The names changed; run `hermes calling-mom setup` once. |
 
-`test_matrix.py` is the standardised contract: one row per case (entry point, prepared
-card, call, expected effect). A new guard branch needs a new row — that is what keeps the
-coverage gate honest.
+## More
 
-## License
+- [Technical reference](docs/TECHNICAL.md): all options, metrics, how the risk list was built, what was measured, development and release
+- [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
 
-MIT
+MIT licensed.

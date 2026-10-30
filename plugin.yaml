@@ -1,13 +1,14 @@
 name: calling-mom
 label: Calling mom
 kind: standalone
-version: 1.2.0
+version: 1.3.0
 manifest_version: 2
 description: >
-  Routes Kanban cards to a stronger model without asking the local model to
-  judge itself. A worker that blocks with kind "capability" (or untyped) is
-  pinned to the strong model and returned to ready once; cards whose title or
-  body carries the [crit] marker are pinned to the strong model at claim time.
+  Two-tier help for a cheap Kanban worker, without asking it to judge itself.
+  Mom (a good, affordable model) answers stuck signals and risky changes;
+  Olymp (the expensive heavyweight) is asked only when Mom escalates a rare edge
+  case. Cards that give up or carry [crit] are pinned to Mom's model. Setup, status and
+  doctor commands: hermes calling-mom.
 provides_tools:
   - second_opinion
 provides_hooks:
