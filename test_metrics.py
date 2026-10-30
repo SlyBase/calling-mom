@@ -62,14 +62,14 @@ class RenderTest(unittest.TestCase):
         rows = ROWS + [{"kind": "advice_feedback", "verdict": "rejected"}]
         self.assertIn('calling_mom_advice_feedback_total{verdict="rejected"} 1', lines(self.render(rows=rows)))
 
-    def test_provider_failures_and_mom_calls_are_counted_from_the_first_push(self):
+    def test_provider_failures_and_olymp_calls_are_counted_from_the_first_push(self):
         out = lines(self.render())
         self.assertIn("calling_mom_advisor_errors_total 0", out)
-        self.assertIn("calling_mom_mom_calls_total 0", out)
-        rows = ROWS + [{"kind": "advisor_error", "error": "RuntimeError"}] * 2 + [{"kind": "advisor", "mom": True}]
+        self.assertIn("calling_mom_olymp_calls_total 0", out)
+        rows = ROWS + [{"kind": "advisor_error", "error": "RuntimeError"}] * 2 + [{"kind": "advisor", "olymp": True}]
         out = lines(self.render(rows=rows))
         self.assertIn("calling_mom_advisor_errors_total 2", out)
-        self.assertIn("calling_mom_mom_calls_total 1", out)
+        self.assertIn("calling_mom_olymp_calls_total 1", out)
 
     def test_advisor_counters(self):
         out = lines(self.render())

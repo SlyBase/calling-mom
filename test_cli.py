@@ -70,12 +70,12 @@ class PickTest(unittest.TestCase):
 
 
 class UpdatesTest(unittest.TestCase):
-    def test_sibling_and_mom_pairs_and_allowlists(self):
+    def test_mom_and_olymp_pairs_and_allowlists(self):
         upd = cli.updates((SUB, "claude-sonnet-5-5"), (SUB, "claude-opus-5-5"), ["coding"], {})
-        self.assertEqual(upd["calling_mom.sibling.model"], "claude-sonnet-5-5")
-        self.assertEqual(upd["calling_mom.sibling.provider"], SUB)
-        self.assertEqual(upd["calling_mom.mom.model"], "claude-opus-5-5")
+        self.assertEqual(upd["calling_mom.mom.model"], "claude-sonnet-5-5")
         self.assertEqual(upd["calling_mom.mom.provider"], SUB)
+        self.assertEqual(upd["calling_mom.olymp.model"], "claude-opus-5-5")
+        self.assertEqual(upd["calling_mom.olymp.provider"], SUB)
         self.assertEqual(upd["calling_mom.advisor.enabled"], True)
         self.assertEqual(upd["calling_mom.advisor.boards"], ["coding"])
         llm = "plugins.entries.calling-mom.llm."
@@ -94,19 +94,26 @@ class UpdatesTest(unittest.TestCase):
         self.assertEqual(upd[llm + "allowed_providers"], ["openrouter", SUB])
         self.assertEqual(upd["calling_mom.advisor.boards"], ["default", "coding"])
 
-    def test_no_mom_leaves_mom_off(self):
+    def test_no_olymp_leaves_olymp_off(self):
         upd = cli.updates((SUB, "claude-sonnet-5-5"), None, [], {})
-        self.assertEqual(upd["calling_mom.mom.model"], "")
-        self.assertEqual(upd["calling_mom.mom.provider"], "")
+        self.assertEqual(upd["calling_mom.olymp.model"], "")
+        self.assertEqual(upd["calling_mom.olymp.provider"], "")
         self.assertNotIn("claude-opus-5-5", upd["plugins.entries.calling-mom.llm.allowed_models"])
+
+    def test_setup_removes_the_pre_release_sibling_block(self):
+        cfg = {"calling_mom": {"sibling": {"model": "a", "provider": "b"}, "mom": {"model": "old-expensive", "provider": "p"}}}
+        out = cli.apply_updates(cfg, cli.updates((SUB, "claude-sonnet-5-5"), None, [], cfg))
+        self.assertNotIn("sibling", out["calling_mom"])
+        self.assertEqual(out["calling_mom"]["mom"]["model"], "claude-sonnet-5-5")   # the old expensive entry is replaced
+        self.assertEqual(out["calling_mom"]["olymp"]["model"], "")
 
     def test_apply_creates_nested_keys_and_keeps_the_rest(self):
         cfg = {"keep": 1, "calling_mom": {"marker": "[crit]"}}
-        out = cli.apply_updates(cfg, {"calling_mom.mom.model": "m", "plugins.entries.calling-mom.llm.x": True})
-        self.assertEqual(out["calling_mom"], {"marker": "[crit]", "mom": {"model": "m"}})
+        out = cli.apply_updates(cfg, {"calling_mom.olymp.model": "m", "plugins.entries.calling-mom.llm.x": True})
+        self.assertEqual(out["calling_mom"], {"marker": "[crit]", "olymp": {"model": "m"}})
         self.assertIs(out["plugins"]["entries"]["calling-mom"]["llm"]["x"], True)
         self.assertEqual(out["keep"], 1)
-        self.assertNotIn("mom", cfg["calling_mom"])  # input untouched
+        self.assertNotIn("olymp", cfg["calling_mom"])  # input untouched
 
 
 class SetupFlowTest(unittest.TestCase):
@@ -116,37 +123,37 @@ class SetupFlowTest(unittest.TestCase):
         return result, s
 
     def test_interactive_pick_of_provider_and_model_for_both_tiers(self):
-        # sibling: provider 2 (subscription), model 1 (sonnet); mom: provider 2, model 2 (opus); board 2 (coding)
+        # mom: provider 2 (subscription), model 1 (sonnet); olymp: provider 2, model 2 (opus); board 2 (coding)
         (upd, _), s = self.run_setup("2", "1", "2", "2", "2")
-        self.assertEqual((upd["calling_mom.sibling.provider"], upd["calling_mom.sibling.model"]), (SUB, "claude-sonnet-5-5"))
-        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-opus-5-5"))
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-sonnet-5-5"))
+        self.assertEqual((upd["calling_mom.olymp.provider"], upd["calling_mom.olymp.model"]), (SUB, "claude-opus-5-5"))
         self.assertEqual(upd["calling_mom.advisor.boards"], ["coding"])
         self.assertIn("OpenRouter", s.text)           # providers are listed by name
         self.assertIn("claude-opus-5-5", s.text)      # models are listed
 
-    def test_enter_everywhere_keeps_mom_off(self):
+    def test_enter_everywhere_keeps_olymp_off(self):
         (upd, _), _ = self.run_setup("", "", "", "")
-        self.assertEqual(upd["calling_mom.mom.model"], "")
-        self.assertNotEqual(upd["calling_mom.sibling.model"], "")
+        self.assertEqual(upd["calling_mom.olymp.model"], "")
+        self.assertNotEqual(upd["calling_mom.mom.model"], "")
 
     def test_current_setup_is_preselected(self):
-        cfg = {"calling_mom": {"sibling": {"provider": SUB, "model": "claude-opus-5-5"},
-                               "mom": {"provider": SUB, "model": "claude-sonnet-5-5"}}}
+        cfg = {"calling_mom": {"mom": {"provider": SUB, "model": "claude-opus-5-5"},
+                               "olymp": {"provider": SUB, "model": "claude-sonnet-5-5"}}}
         (upd, _), s = self.run_setup("", "", "", "", "", cfg=cfg)
-        self.assertEqual((upd["calling_mom.sibling.provider"], upd["calling_mom.sibling.model"]), (SUB, "claude-opus-5-5"))
-        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-sonnet-5-5"))
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-opus-5-5"))
+        self.assertEqual((upd["calling_mom.olymp.provider"], upd["calling_mom.olymp.model"]), (SUB, "claude-sonnet-5-5"))
         self.assertIn("[2] >", s.text)
 
-    def test_mom_can_be_skipped(self):
-        # sibling 1/1, mom: choose the "no mom" entry (3 = after two providers), board: all
+    def test_olymp_can_be_skipped(self):
+        # mom 1/1, olymp: choose the "no olymp" entry (3 = after two providers), board: all
         (upd, _), _ = self.run_setup("1", "1", "3", "3")
-        self.assertEqual(upd["calling_mom.mom.model"], "")
+        self.assertEqual(upd["calling_mom.olymp.model"], "")
         self.assertEqual(upd["calling_mom.advisor.boards"], ["*"])
 
     def test_preset_needs_no_questions_but_one_board(self):
         (upd, _), s = self.run_setup("1", preset="subscription")
-        self.assertEqual(upd["calling_mom.mom.model"], "claude-opus-5-5")
-        self.assertEqual(upd["calling_mom.sibling.model"], "claude-sonnet-5-5")
+        self.assertEqual(upd["calling_mom.olymp.model"], "claude-opus-5-5")
+        self.assertEqual(upd["calling_mom.mom.model"], "claude-sonnet-5-5")
         self.assertEqual(upd["calling_mom.advisor.boards"], ["default"])
 
     def test_unknown_preset_is_an_error(self):
@@ -156,47 +163,51 @@ class SetupFlowTest(unittest.TestCase):
     def test_provider_without_a_model_list_asks_for_the_model(self):
         s = Script("1", "typed/model", "1", "1")
         upd, _ = cli.setup({}, [{"slug": "custom", "name": "Custom", "models": []}], [], s.ask, s.say)
-        self.assertEqual((upd["calling_mom.sibling.provider"], upd["calling_mom.sibling.model"]), ("custom", "typed/model"))
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), ("custom", "typed/model"))
 
     def test_without_a_provider_list_the_user_types_the_pair(self):
         s = Script("my-provider", "my/model", "", "", "")
         upd, _ = cli.setup({}, [], [], s.ask, s.say)
-        self.assertEqual((upd["calling_mom.sibling.provider"], upd["calling_mom.sibling.model"]), ("my-provider", "my/model"))
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), ("my-provider", "my/model"))
 
 
 class StatusTest(unittest.TestCase):
     CFG = {
-        "sibling": {"model": "claude-sonnet-5-5", "provider": SUB},
+        "mom": {"model": "claude-sonnet-5-5", "provider": SUB},
         "model": "deepseek/x", "provider": "openrouter",
-        "mom": {"model": "claude-opus-5-5", "provider": SUB, "max_per_card": 1, "max_per_day": 6},
+        "olymp": {"model": "claude-opus-5-5", "provider": SUB, "max_per_card": 1, "max_per_day": 6},
         "advisor": {"enabled": True, "boards": ["coding"], "daily_usd_cap": 2.0, "daily_token_cap": 200000},
     }
 
-    def test_sibling_block_beats_the_legacy_top_level_pair(self):
-        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0.1, "tokens": 5, "mom": 2}))
+    def test_mom_block_beats_the_legacy_top_level_pair(self):
+        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0.1, "tokens": 5, "olymp": 2}))
         self.assertIn("claude-sonnet-5-5", text)
         self.assertNotIn("deepseek/x", text)
         self.assertIn("claude-opus-5-5", text)
-        self.assertIn("2 / 6", text)                  # mom calls today / limit
+        self.assertIn("2 / 6", text)                  # olymp calls today / limit
         self.assertIn("coding", text)
 
     def test_warns_when_the_advisor_is_on_without_a_board(self):
         cfg = {**self.CFG, "advisor": {"enabled": True, "boards": [], "daily_usd_cap": 2.0, "daily_token_cap": 1}}
-        self.assertIn("no board", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "mom": 0})))
+        self.assertIn("no board", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "olymp": 0})))
 
     def test_advisor_errors_today_are_shown_with_the_last_cause(self):
-        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "mom": 0}, (7, "ClaudeCodeLoggedOut")))
+        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "olymp": 0}, (7, "ClaudeCodeLoggedOut")))
         self.assertIn("7", text)
         self.assertIn("ClaudeCodeLoggedOut", text)
         self.assertIn("doctor", text)
 
     def test_no_error_line_without_errors(self):
-        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "mom": 0}, (0, None)))
+        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "olymp": 0}, (0, None)))
         self.assertNotIn("errors", text)
 
-    def test_mom_off_is_said_plainly(self):
-        cfg = {**self.CFG, "mom": {"model": "", "provider": "", "max_per_card": 1, "max_per_day": 6}}
-        self.assertIn("off", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "mom": 0})).lower())
+    def test_leftover_sibling_block_is_flagged_in_status(self):
+        cfg = {**self.CFG, "sibling": {"model": "a", "provider": "b"}}
+        self.assertIn("renamed", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "olymp": 0})))
+
+    def test_olymp_off_is_said_plainly(self):
+        cfg = {**self.CFG, "olymp": {"model": "", "provider": "", "max_per_card": 1, "max_per_day": 6}}
+        self.assertIn("off", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "olymp": 0})).lower())
 
 
 class DoctorTest(unittest.TestCase):
@@ -204,8 +215,8 @@ class DoctorTest(unittest.TestCase):
            "allowed_models": ["claude-sonnet-5-5", "claude-opus-5-5"], "allowed_providers": [SUB]}
 
     def cfg(self, **over):
-        base = {"sibling": {"model": "claude-sonnet-5-5", "provider": SUB},
-                "mom": {"model": "claude-opus-5-5", "provider": SUB},
+        base = {"mom": {"model": "claude-sonnet-5-5", "provider": SUB},
+                "olymp": {"model": "claude-opus-5-5", "provider": SUB},
                 "advisor": {"enabled": True, "boards": ["coding"]}}
         return {**base, **over}
 
@@ -232,8 +243,8 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(self.by_name(self.run_doctor(internals=False))["hermes internals"][0], "fail")
 
     def test_half_pair_fails(self):
-        cfg = self.cfg(sibling={"model": "claude-sonnet-5-5", "provider": ""})
-        self.assertEqual(self.by_name(self.run_doctor(cfg))["sibling pair"][0], "fail")
+        cfg = self.cfg(mom={"model": "claude-sonnet-5-5", "provider": ""})
+        self.assertEqual(self.by_name(self.run_doctor(cfg))["mom pair"][0], "fail")
 
     def test_missing_allowlist_entry_names_the_fix(self):
         llm = {**self.LLM, "allowed_models": ["claude-sonnet-5-5"]}
@@ -251,9 +262,9 @@ class DoctorTest(unittest.TestCase):
             if model == "claude-opus-5-5":
                 raise RuntimeError("Key limit exceeded")
         checks = self.by_name(self.run_doctor(probe=probe))
-        self.assertEqual(checks["sibling call"][0], "ok")
-        self.assertEqual(checks["mom call"][0], "fail")
-        self.assertIn("Key limit exceeded", checks["mom call"][1])
+        self.assertEqual(checks["mom call"][0], "ok")
+        self.assertEqual(checks["olymp call"][0], "fail")
+        self.assertIn("Key limit exceeded", checks["olymp call"][1])
 
     def test_probe_is_skipped_when_the_config_is_already_broken(self):
         calls = []
@@ -261,11 +272,11 @@ class DoctorTest(unittest.TestCase):
         self.run_doctor(llm=llm, probe=lambda p, m: calls.append(m))
         self.assertEqual(calls, [])
 
-    def test_mom_off_is_fine(self):
-        cfg = self.cfg(mom={"model": "", "provider": ""})
+    def test_olymp_off_is_fine(self):
+        cfg = self.cfg(olymp={"model": "", "provider": ""})
         checks = self.by_name(self.run_doctor(cfg))
-        self.assertEqual(checks["mom pair"][0], "ok")
-        self.assertNotIn("mom call", checks)
+        self.assertEqual(checks["olymp pair"][0], "ok")
+        self.assertNotIn("olymp call", checks)
 
     def test_advisor_off_or_without_board_is_a_warning(self):
         cfg = self.cfg(advisor={"enabled": True, "boards": []})
@@ -297,6 +308,16 @@ class DoctorTest(unittest.TestCase):
 
     def test_only_a_paused_job_is_a_warning(self):
         self.assertEqual(self.by_name(self.run_doctor(sweeps=[("/h", "p", "paused")]))["sweep cron"][0], "warn")
+
+    def test_leftover_sibling_block_is_a_warning_that_explains_the_rename(self):
+        cfg = self.cfg(sibling={"model": "a", "provider": "b"})
+        s, d = self.by_name(self.run_doctor(cfg))["old names"]
+        self.assertEqual(s, "warn")
+        self.assertIn("renamed", d)
+        self.assertIn("setup", d)
+
+    def test_no_old_names_no_extra_check(self):
+        self.assertNotIn("old names", self.by_name(self.run_doctor()))
 
     def test_exit_code_counts_failures_only(self):
         self.assertEqual(cli.exit_code([("a", "ok", ""), ("b", "warn", "")]), 0)
@@ -354,11 +375,11 @@ class CommandWiringTest(unittest.TestCase):
         s = Script("1", "1", "3", "1")
         saved = {}
         env = cli.Env(load=lambda: saved, save=lambda cfg: saved.update(cfg), providers=lambda: LISTING,
-                      boards=lambda: ["default"], spent=lambda: {"usd": 0, "tokens": 0, "mom": 0},
+                      boards=lambda: ["default"], spent=lambda: {"usd": 0, "tokens": 0, "olymp": 0},
                       probe=lambda p, m: None, version="0.22.5", internals=True,
                       ask=s.ask, say=s.say, cron=lambda: s.say("cron created"), sweeps=lambda: [])
         self.assertEqual(cli.cmd_setup(env, preset=None, yes=True), 0)
-        self.assertEqual(saved["calling_mom"]["sibling"]["provider"], "openrouter")
+        self.assertEqual(saved["calling_mom"]["mom"]["provider"], "openrouter")
         self.assertIn("cron created", s.text)
         self.assertEqual(cli.cmd_status(env), 0)
         self.assertEqual(cli.cmd_doctor(env), 0)

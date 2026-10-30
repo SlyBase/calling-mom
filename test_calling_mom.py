@@ -899,11 +899,11 @@ class SeqLlm(FakeLlm):
 
 
 class TwoTierTest(AdvisorTest):
-    """Sibling answers first; the mom model is asked only when the sibling says ESCALATE."""
+    """Mom answers first; the olymp model is asked only when the mom says ESCALATE."""
 
     def setUp(self):
         super().setUp()
-        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
         plugin.DEFAULTS["categories"] = {"architecture": {"max": 2, "patterns": [], "commands": [r"terraform apply"]}}
         plugin._arch_seen.clear()
         self.models = lambda: [c["model"] for c in self.llm.calls]
@@ -918,68 +918,68 @@ class TwoTierTest(AdvisorTest):
     def comments(self):
         return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
 
-    def test_routine_critical_change_is_answered_by_the_sibling_alone(self):
+    def test_routine_critical_change_is_answered_by_the_mom_alone(self):
         self.seq("Fine, nothing irreversible.")
         out = self.critical()
         self.assertEqual(self.models(), [STRONG])
         self.assertIn("Fine", out)
 
-    def test_sibling_escalates_a_real_edge_case_to_mom(self):
-        self.seq("ESCALATE: prod deploy without rollback", "Mom says: keep the cron as fallback.")
+    def test_mom_escalates_a_real_edge_case_to_olymp(self):
+        self.seq("ESCALATE: prod deploy without rollback", "Olymp says: keep the cron as fallback.")
         out = self.critical()
-        self.assertEqual(self.models(), [STRONG, "m/mom"])
-        self.assertEqual(self.llm.calls[1]["provider"], "p/mom")
-        self.assertIn("Mom says", out)
+        self.assertEqual(self.models(), [STRONG, "m/olymp"])
+        self.assertEqual(self.llm.calls[1]["provider"], "p/olymp")
+        self.assertIn("Olymp says", out)
         self.assertNotIn("ESCALATE", out)
 
-    def test_gate_instruction_goes_only_to_the_sibling(self):
+    def test_gate_instruction_goes_only_to_the_mom(self):
         self.seq("ESCALATE: x", "ok")
         self.critical()
         self.assertIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
         self.assertNotIn("ESCALATE", self.llm.calls[1]["messages"][0]["content"])
 
-    def test_routine_stuck_signal_never_reaches_mom(self):
+    def test_routine_stuck_signal_never_reaches_olymp(self):
         self.seq("ESCALATE: x")
         self.stuck(3)
         self.assertEqual(self.models(), [STRONG])
         self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
 
-    def test_mom_is_off_without_a_complete_pair(self):
-        plugin.DEFAULTS["mom"]["provider"] = ""
+    def test_olymp_is_off_without_a_complete_pair(self):
+        plugin.DEFAULTS["olymp"]["provider"] = ""
         self.seq("ESCALATE: x")
         self.critical()
         self.assertEqual(self.models(), [STRONG])
         self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
 
-    def test_mom_is_asked_once_per_card(self):
-        self.seq("ESCALATE: a", "mom a", "ESCALATE: b", "must not be asked")
+    def test_olymp_is_asked_once_per_card(self):
+        self.seq("ESCALATE: a", "olymp a", "ESCALATE: b", "must not be asked")
         self.critical("terraform apply -a")
         self.critical("terraform apply -b")
-        self.assertEqual(self.models(), [STRONG, "m/mom", STRONG])
+        self.assertEqual(self.models(), [STRONG, "m/olymp", STRONG])
 
-    def test_mom_has_a_daily_call_limit(self):
-        plugin.DEFAULTS["mom"].update(max_per_card=9, max_per_day=1)
-        self.seq("ESCALATE: a", "mom a", "ESCALATE: b")
+    def test_olymp_has_a_daily_call_limit(self):
+        plugin.DEFAULTS["olymp"].update(max_per_card=9, max_per_day=1)
+        self.seq("ESCALATE: a", "olymp a", "ESCALATE: b")
         self.critical("terraform apply -a")
         self.critical("terraform apply -b")
-        self.assertEqual(self.models(), [STRONG, "m/mom", STRONG])
+        self.assertEqual(self.models(), [STRONG, "m/olymp", STRONG])
 
-    def test_mom_calls_do_not_count_against_the_dollar_cap(self):
-        self.seq("ESCALATE: a", "mom a")
+    def test_olymp_calls_do_not_count_against_the_dollar_cap(self):
+        self.seq("ESCALATE: a", "olymp a")
         self.critical()
-        self.assertEqual(plugin._spent_today()["usd"], 0.01)   # sibling only
-        self.assertEqual(plugin._spent_today()["mom"], 1)
+        self.assertEqual(plugin._spent_today()["usd"], 0.01)   # mom only
+        self.assertEqual(plugin._spent_today()["olymp"], 1)
 
-    def test_comment_names_model_and_provider_and_the_mom_tier(self):
-        self.seq("ESCALATE: a", "mom a")
+    def test_comment_names_model_and_provider_and_the_olymp_tier(self):
+        self.seq("ESCALATE: a", "olymp a")
         self.critical()
-        self.assertIn("m/mom (p/mom, mom)", self.comments()[0])
+        self.assertIn("m/olymp (p/olymp, olymp)", self.comments()[0])
 
-    def test_sibling_comment_names_the_provider_without_mom_tag(self):
+    def test_mom_comment_names_the_provider_without_olymp_tag(self):
         self.seq("fine")
         self.critical()
         self.assertIn(f"{STRONG} ({PROVIDER})", self.comments()[0])
-        self.assertNotIn("mom)", self.comments()[0])
+        self.assertNotIn("olymp)", self.comments()[0])
 
     def test_trace_row_carries_the_provider(self):
         self.seq("fine")
@@ -993,17 +993,17 @@ class TwoTierTest(AdvisorTest):
         self.critical()
         self.assertEqual((self.llm.calls[0]["model"], self.llm.calls[0]["provider"]), (STRONG, PROVIDER))
 
-    def test_full_pair_in_a_category_beats_mom(self):
+    def test_full_pair_in_a_category_beats_olymp(self):
         plugin.DEFAULTS["categories"]["architecture"].update(model="m/arch", provider="p/arch")
         self.seq("ESCALATE: x")
         self.critical()
         self.assertEqual(self.models(), ["m/arch"])
         self.assertNotIn("ESCALATE", self.llm.calls[0]["messages"][0]["content"])
 
-    def test_mom_failure_is_fail_open(self):
+    def test_olymp_failure_is_fail_open(self):
         class Boom(SeqLlm):
             def complete(self, messages, **kw):
-                if kw["model"] == "m/mom":
+                if kw["model"] == "m/olymp":
                     raise RuntimeError("down")
                 return super().complete(messages, **kw)
         self.llm = Boom(["ESCALATE: x"])
@@ -1134,8 +1134,8 @@ class ProviderErrorTest(AdvisorTest):
         self.assertEqual([r["error"] for r in rows if r.get("kind") == "advisor_error"], ["RuntimeError"])
 
 
-class SiblingBlockTest(unittest.TestCase):
-    """`calling_mom.sibling.{model,provider}` names the cheap tier; the legacy top-level pair still works."""
+class MomBlockTest(unittest.TestCase):
+    """`calling_mom.mom.{model,provider}` names the cheap tier; the legacy top-level pair still works."""
 
     def settings_with(self, block):
         orig = _hermes_config.load_config
@@ -1145,19 +1145,19 @@ class SiblingBlockTest(unittest.TestCase):
         finally:
             _hermes_config.load_config = orig
 
-    def test_sibling_pair_replaces_the_top_level_pair(self):
-        s = self.settings_with({"sibling": {"model": "s/m", "provider": "s-p"}})
+    def test_mom_pair_replaces_the_top_level_pair(self):
+        s = self.settings_with({"mom": {"model": "s/m", "provider": "s-p"}})
         self.assertEqual((s["model"], s["provider"]), ("s/m", "s-p"))
 
-    def test_sibling_beats_a_legacy_pair_in_the_same_config(self):
-        s = self.settings_with({"model": "old/m", "provider": "old-p", "sibling": {"model": "s/m", "provider": "s-p"}})
+    def test_mom_beats_a_legacy_pair_in_the_same_config(self):
+        s = self.settings_with({"model": "old/m", "provider": "old-p", "mom": {"model": "s/m", "provider": "s-p"}})
         self.assertEqual((s["model"], s["provider"]), ("s/m", "s-p"))
 
-    def test_half_sibling_pair_is_ignored(self):
-        s = self.settings_with({"sibling": {"model": "s/m"}})
+    def test_half_mom_pair_is_ignored(self):
+        s = self.settings_with({"mom": {"model": "s/m"}})
         self.assertEqual((s["model"], s["provider"]), (plugin.DEFAULTS["model"], plugin.DEFAULTS["provider"]))
 
-    def test_without_a_sibling_block_nothing_changes(self):
+    def test_without_a_mom_block_nothing_changes(self):
         s = self.settings_with({"model": "old/m", "provider": "old-p"})
         self.assertEqual((s["model"], s["provider"]), ("old/m", "old-p"))
 
@@ -1224,9 +1224,9 @@ class RiskTiersTest(AdvisorTest):
         plugin.DEFAULTS["categories"] = {**cats, "architecture": {**cats["architecture"], "commands_extra": [r"\bflyctl deploy\b"]}}
         self.assertIn("[ADVISOR", self.run_cmd("flyctl deploy"))
 
-    def test_watch_is_never_escalated_to_mom(self):
-        plugin.DEFAULTS["mom"].update(model="m/mom", provider="p/mom")
-        self.llm = SeqLlm(["ESCALATE: x", "mom must not be asked"])
+    def test_watch_is_never_escalated_to_olymp(self):
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
+        self.llm = SeqLlm(["ESCALATE: x", "olymp must not be asked"])
         plugin._ctx.llm = self.llm
         self.run_cmd("ssh pi 'ls /a'")
         self.assertEqual([c["model"] for c in self.llm.calls], [STRONG])
@@ -1291,8 +1291,8 @@ class DefensivePathsTest(AdvisorTest):
         plugin.on_dispatch_tick(board=None)
 
     def test_yesterdays_spend_does_not_count(self):
-        plugin._spend_path().write_text(json.dumps({"date": "2000-01-01", "usd": 9.0, "tokens": 9, "mom": 9}))
-        self.assertEqual(plugin._spent_today(), {"usd": 0.0, "tokens": 0, "mom": 0})
+        plugin._spend_path().write_text(json.dumps({"date": "2000-01-01", "usd": 9.0, "tokens": 9, "olymp": 9}))
+        self.assertEqual(plugin._spent_today(), {"usd": 0.0, "tokens": 0, "olymp": 0})
 
     def test_earlier_run_summaries_reach_the_advisor_prompt(self):
         def add_run(c):

@@ -21,7 +21,7 @@ _FAMILIES = {  # name -> (type, help)
     "calling_mom_events_total": ("counter", "Plugin log rows by kind."),
     "calling_mom_advisor_calls_total": ("counter", "Advisor questions to the strong model by category."),
     "calling_mom_advisor_errors_total": ("counter", "Advisor calls that failed (dead key, no login, provider down)."),
-    "calling_mom_mom_calls_total": ("counter", "Questions answered by the mom model (the expensive tier)."),
+    "calling_mom_olymp_calls_total": ("counter", "Questions answered by the olymp model (the expensive tier)."),
     "calling_mom_advisor_tokens_total": ("counter", "Advisor tokens by direction."),
     "calling_mom_advisor_cost_usd_total": ("counter", "Advisor cost as reported by the provider (0 if it reports none)."),
     "calling_mom_advice_feedback_total": ("counter", "First worker reply after advice: followed or rejected (keyword heuristic)."),
@@ -84,8 +84,8 @@ def render(rows, spend, caps, boards, now) -> str:
         _sample("calling_mom_advisor_cost_usd_total", sum(float(r.get("usd") or 0) for r in advisor)))
     samples["calling_mom_advisor_errors_total"].append(
         _sample("calling_mom_advisor_errors_total", kinds.get("advisor_error", 0)))
-    samples["calling_mom_mom_calls_total"].append(
-        _sample("calling_mom_mom_calls_total", sum(1 for r in advisor if r.get("mom"))))
+    samples["calling_mom_olymp_calls_total"].append(
+        _sample("calling_mom_olymp_calls_total", sum(1 for r in advisor if r.get("olymp"))))
     verdicts = Counter({v: 0 for v in _VERDICTS})
     verdicts.update(r.get("verdict") or "unknown" for r in rows if r.get("kind") == "advice_feedback")
     for verdict in sorted(verdicts):

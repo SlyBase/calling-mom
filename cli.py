@@ -17,9 +17,9 @@ LLM_KEY = "plugins.entries.calling-mom.llm."
 CRON_NAME = "calling-mom-sweep"
 # Starting points, not promises: model ids change. `setup` lists what is really configured.
 PRESETS = {
-    "subscription": {"sibling": ("claude-subscription-directsdk-experimental", "claude-sonnet-5-5"),
-                     "mom": ("claude-subscription-directsdk-experimental", "claude-opus-5-5")},
-    "openrouter": {"sibling": ("openrouter", "deepseek/deepseek-v4.1-flash-1017"), "mom": None},
+    "subscription": {"mom": ("claude-subscription-directsdk-experimental", "claude-sonnet-5-5"),
+                     "olymp": ("claude-subscription-directsdk-experimental", "claude-opus-5-5")},
+    "openrouter": {"mom": ("openrouter", "deepseek/deepseek-v4.1-flash-1017"), "olymp": None},
 }
 
 
@@ -95,18 +95,20 @@ def _get(cfg, dotted, default=None):
     return cfg
 
 
-def updates(sibling, mom, boards, cfg) -> dict:
+def updates(mom, olymp, boards, cfg) -> dict:
     """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay."""
-    pairs = [p for p in (sibling, mom) if p]
+    pairs = [p for p in (mom, olymp) if p]
     upd = {
-        "calling_mom.sibling.provider": sibling[0], "calling_mom.sibling.model": sibling[1],
-        "calling_mom.mom.provider": mom[0] if mom else "", "calling_mom.mom.model": mom[1] if mom else "",
+        "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
+        "calling_mom.olymp.provider": olymp[0] if olymp else "", "calling_mom.olymp.model": olymp[1] if olymp else "",
         "calling_mom.advisor.enabled": True,
         "calling_mom.advisor.boards": _merge_list(_get(cfg, "calling_mom.advisor.boards", []), boards),
         LLM_KEY + "allow_model_override": True, LLM_KEY + "allow_provider_override": True,
         LLM_KEY + "allowed_models": _merge_list(_get(cfg, LLM_KEY + "allowed_models", []), [m for _, m in pairs]),
         LLM_KEY + "allowed_providers": _merge_list(_get(cfg, LLM_KEY + "allowed_providers", []), [p for p, _ in pairs]),
     }
+    if "sibling" in (_get(cfg, "calling_mom", {}) or {}):  # pre-release name of the cheap tier (now `mom`): drop it
+        upd["calling_mom.sibling"] = None
     return upd
 
 
@@ -117,7 +119,10 @@ def apply_updates(cfg, upd) -> dict:
         *path, last = dotted.split(".")
         for part in path:
             node = node.setdefault(part, {})
-        node[last] = value
+        if value is None:  # None = remove the key
+            node.pop(last, None)
+        else:
+            node[last] = value
     return out
 
 
@@ -126,27 +131,27 @@ def setup(cfg, listing, boards, ask, say, preset=None):
     if preset:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
-        sibling, mom = PRESETS[preset]["sibling"], PRESETS[preset]["mom"]
+        mom, olymp = PRESETS[preset]["mom"], PRESETS[preset]["olymp"]
     else:
-        say("Sibling = the cheap model that answers first. Mom = the expensive model, asked only for rare edge cases.")
+        say("Mom = your everyday helper (cheap, asked often). Olymp = the expensive model, asked only for rare edge cases.")
         cur = {k: ((_get(cfg, f"calling_mom.{k}.provider") or None), _get(cfg, f"calling_mom.{k}.model"))
-               for k in ("sibling", "mom")}
-        sibling = _pick_pair("Sibling", listing, ask, say, current=cur["sibling"] if cur["sibling"][0] else None)
-        mom = _pick_pair("Mom", listing, ask, say, none_label="no mom (sibling only)",
-                         current=cur["mom"] if cur["mom"][0] else None)
+               for k in ("mom", "olymp")}
+        mom = _pick_pair("Mom", listing, ask, say, current=cur["mom"] if cur["mom"][0] else None)
+        olymp = _pick_pair("Olymp", listing, ask, say, none_label="no olymp (mom only)",
+                         current=cur["olymp"] if cur["olymp"][0] else None)
     chosen = ["*"] if not boards else pick("Which board may use the advisor?", [(b, [b]) for b in boards], ask, say,
                                            none_label="all boards", other=False)
-    upd = updates(sibling, mom, chosen if chosen is not None else ["*"], cfg)
-    summary = [f"sibling : {sibling[1]} ({sibling[0]})", f"mom     : {f'{mom[1]} ({mom[0]})' if mom else 'off'}",
+    upd = updates(mom, olymp, chosen if chosen is not None else ["*"], cfg)
+    summary = [f"mom     : {mom[1]} ({mom[0]})", f"olymp   : {f'{olymp[1]} ({olymp[0]})' if olymp else 'off'}",
                f"boards  : {', '.join(upd['calling_mom.advisor.boards']) or '(none)'}"]
     return upd, summary
 
 
 # ---------------------------------------------------------------- status
 
-def sibling_pair(cm):
-    """``(provider, model)`` of the sibling: the ``sibling:`` block, else the legacy top-level pair."""
-    sb = cm.get("sibling") or {}
+def mom_pair(cm):
+    """``(provider, model)`` of the mom: the ``mom:`` block, else the legacy top-level pair."""
+    sb = cm.get("mom") or {}
     if sb.get("model") or sb.get("provider"):
         return sb.get("provider") or "", sb.get("model") or ""
     return cm.get("provider") or "", cm.get("model") or ""
@@ -173,23 +178,25 @@ def count_errors(path, now=None):
 
 
 def status_lines(cm, spent, errors=None) -> list:
-    sp, sm = sibling_pair(cm)
-    mom = cm.get("mom") or {}
+    sp, sm = mom_pair(cm)
+    olymp = cm.get("olymp") or {}
     adv = cm.get("advisor") or {}
-    lines = [f"sibling : {sm or '?'} ({sp or '?'})"]
-    if mom.get("model") and mom.get("provider"):
-        lines.append(f"mom     : {mom['model']} ({mom['provider']}), calls today {spent.get('mom', 0)} / {mom.get('max_per_day', '?')}, "
-                     f"max {mom.get('max_per_card', '?')} per card")
+    lines = [f"mom     : {sm or '?'} ({sp or '?'})"]
+    if olymp.get("model") and olymp.get("provider"):
+        lines.append(f"olymp   : {olymp['model']} ({olymp['provider']}), calls today {spent.get('olymp', 0)} / {olymp.get('max_per_day', '?')}, "
+                     f"max {olymp.get('max_per_card', '?')} per card")
     else:
-        lines.append("mom     : off")
+        lines.append("olymp   : off")
     boards = adv.get("boards") or []
     lines.append(f"advisor : {'on' if adv.get('enabled') else 'OFF'}, boards: {', '.join(boards) or '(none)'}")
     if adv.get("enabled") and not boards:
         lines.append("warning : advisor is on but no board is opted in, nothing is sent (run: hermes calling-mom setup)")
+    if "sibling" in cm:
+        lines.append("warning : 'sibling' was renamed to 'mom' and the old 'mom' to 'olymp'; run: hermes calling-mom setup")
     if errors and errors[0]:
         lines.append(f"errors  : {errors[0]} advisor call(s) failed today, last: {errors[1]}. Run: hermes calling-mom doctor")
     lines.append(f"spend   : ${spent.get('usd', 0):.4f} / ${adv.get('daily_usd_cap', '?')}, "
-                 f"{spent.get('tokens', 0)} / {adv.get('daily_token_cap', '?')} tokens today (sibling only)")
+                 f"{spent.get('tokens', 0)} / {adv.get('daily_token_cap', '?')} tokens today (mom only)")
     return lines
 
 
@@ -237,15 +244,15 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
         f"{version}" if version_ok(version) else f"found {version!r}, need >= {minimum}")
     add("hermes internals", "ok" if internals else "fail",
         "" if internals else "kanban_db / kanban_db_connect not importable: this Hermes is not supported")
-    sp, sm = sibling_pair(cm)
-    sibling_ok = bool(sp and sm)
-    add("sibling pair", "ok" if sibling_ok else "fail",
-        f"{sm} ({sp})" if sibling_ok else "model AND provider are needed (run: hermes calling-mom setup)")
-    mom = cm.get("mom") or {}
-    mm, mp = mom.get("model") or "", mom.get("provider") or ""
-    mom_on = bool(mm and mp)
-    add("mom pair", "ok" if (mom_on or not (mm or mp)) else "fail",
-        f"{mm} ({mp})" if mom_on else ("off" if not (mm or mp) else "model AND provider are needed"))
+    sp, sm = mom_pair(cm)
+    mom_ok = bool(sp and sm)
+    add("mom pair", "ok" if mom_ok else "fail",
+        f"{sm} ({sp})" if mom_ok else "model AND provider are needed (run: hermes calling-mom setup)")
+    olymp = cm.get("olymp") or {}
+    mm, mp = olymp.get("model") or "", olymp.get("provider") or ""
+    olymp_on = bool(mm and mp)
+    add("olymp pair", "ok" if (olymp_on or not (mm or mp)) else "fail",
+        f"{mm} ({mp})" if olymp_on else ("off" if not (mm or mp) else "model AND provider are needed"))
     need_models = [m for m in (sm, mm) if m]
     need_providers = [p for p in (sp, mp) if p]
     miss_m = [m for m in need_models if m not in (llm.get("allowed_models") or [])]
@@ -257,15 +264,18 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
         what = ([] if flags else ["allow_*_override is off"]) + [f"model {m}" for m in miss_m] + [f"provider {p}" for p in miss_p]
         add("allowlist", "fail", "not granted: " + ", ".join(what) + " (fix: hermes calling-mom setup)")
     static_ok = all(status == "ok" for _, status, _ in out)
+    if "sibling" in cm:  # pre-release names: sibling -> mom, old mom -> olymp. The old `mom` block would now be read as the cheap tier!
+        add("old names", "warn", "'sibling' was renamed to 'mom' and the old 'mom' to 'olymp': your 'mom' block may hold "
+            "the expensive model. Run: hermes calling-mom setup (rewrites the keys)")
     adv = cm.get("advisor") or {}
     if adv.get("enabled") and adv.get("boards"):
         add("advisor", "ok", "boards: " + ", ".join(adv["boards"]))
     else:
-        add("advisor", "warn", "off or no board opted in: nothing is sent to the sibling or mom")
+        add("advisor", "warn", "off or no board opted in: nothing is sent to the mom or olymp")
     if sweeps is not None:
         add("sweep cron", *_sweep_check(sweeps))
     if static_ok:
-        tiers = [("sibling call", sp, sm)] + ([("mom call", mp, mm)] if mom_on else [])
+        tiers = [("mom call", sp, sm)] + ([("olymp call", mp, mm)] if olymp_on else [])
         for name, prov, model in tiers:
             try:
                 probe(prov, model)
@@ -407,7 +417,7 @@ def make_env(spent, effective, log_path, ask=input, say=print):  # pragma: no co
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
     sub = parser.add_subparsers(dest="cm_cmd")
-    s = sub.add_parser("setup", help="choose sibling/mom from your configured providers and grant them")
+    s = sub.add_parser("setup", help="choose mom/olymp from your configured providers and grant them")
     s.add_argument("--preset", choices=sorted(PRESETS), help="skip the model questions")
     s.add_argument("--yes", action="store_true", help="do not ask before writing")
     sub.add_parser("status", help="show the effective setup and today's usage")

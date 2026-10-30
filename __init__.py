@@ -83,18 +83,18 @@ DEFAULTS = {
         "max_consults_per_card": 3, "max_output_tokens": 700,
         "context_chars": 6000, "daily_usd_cap": 2.0, "daily_token_cap": 200000, "timeout_s": 40,
     },
-    # "mom" tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
-    # every category then uses the "sibling" (top-level model/provider). A per-category entry below still wins.
-    # The sibling answers first and says ESCALATE only for a rare high-stakes case; then (and only then) mom is asked.
-    # Mom runs on a subscription: no USD/token cap, but a hard call limit per card and per day.
-    "mom": {"model": "", "provider": "", "categories": ["architecture"], "max_per_card": 1, "max_per_day": 6},
+    # "olymp" tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
+    # every category then uses the "mom" (top-level model/provider). A per-category entry below still wins.
+    # The mom answers first and says ESCALATE only for a rare high-stakes case; then (and only then) olymp is asked.
+    # Olymp runs on a subscription: no USD/token cap, but a hard call limit per card and per day.
+    "olymp": {"model": "", "provider": "", "categories": ["architecture"], "max_per_card": 1, "max_per_day": 6},
     # per category {model, provider}; missing keys fall back to the top-level model/provider.
     # categories: error (same_error, malformed) | loop (loop) | validation (failed verify:) | architecture
     "categories": {
         "error": {}, "loop": {}, "validation": {},
         # completion: once per run, card vs. completion summary before kanban_complete
         "completion": {"max": 1},
-        # watch: privileged access to another machine (ssh, pct, ...): ONE look per card, own budget, sibling only
+        # watch: privileged access to another machine (ssh, pct, ...): ONE look per card, own budget, mom only
         "watch": {"max": 1},
         # architecture: review of critical changes (+ the second_opinion tool). The lists live in rules.py;
         # `commands_extra` adds your own regexes without replacing them.
@@ -165,9 +165,9 @@ def settings() -> dict:
         logger.debug("calling-mom: config read failed: %s", exc)
         raw = {}
     cfg = _merge(DEFAULTS, raw)
-    sib = raw.get("sibling") if isinstance(raw.get("sibling"), dict) else {}
-    if sib.get("model") and sib.get("provider"):  # the sibling block names the cheap tier; a half pair is ignored
-        cfg["model"], cfg["provider"] = str(sib["model"]), str(sib["provider"])
+    mom = raw.get("mom") if isinstance(raw.get("mom"), dict) else {}
+    if mom.get("model") and mom.get("provider"):  # the mom block names the cheap tier; a half pair is ignored
+        cfg["model"], cfg["provider"] = str(mom["model"]), str(mom["provider"])
     return cfg
 
 
@@ -476,25 +476,25 @@ def _spend_path() -> Path:
 
 
 def _spent_today() -> dict:
-    """``{"usd", "tokens", "mom"}`` spent on advice today (UTC). Tokens cap what USD cannot: some models
-    report no cost. ``mom`` counts calls to the mom model (a subscription: calls, not dollars)."""
-    zero = {"usd": 0.0, "tokens": 0, "mom": 0}
+    """``{"usd", "tokens", "olymp"}`` spent on advice today (UTC). Tokens cap what USD cannot: some models
+    report no cost. ``olymp`` counts calls to the olymp model (a subscription: calls, not dollars)."""
+    zero = {"usd": 0.0, "tokens": 0, "olymp": 0}
     try:
         data = json.loads(_spend_path().read_text())
     except (OSError, ValueError):
         return zero
     if data.get("date") != time.strftime("%Y-%m-%d", time.gmtime()):
         return zero
-    return {"usd": float(data.get("usd", 0.0)), "tokens": int(data.get("tokens", 0)), "mom": int(data.get("mom", 0))}
+    return {"usd": float(data.get("usd", 0.0)), "tokens": int(data.get("tokens", 0)), "olymp": int(data.get("olymp", 0))}
 
 
-def _add_spend(usd: float, tokens: int, mom: int = 0) -> None:
+def _add_spend(usd: float, tokens: int, olymp: int = 0) -> None:
     path = _spend_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     now = _spent_today()
     path.write_text(json.dumps({
         "date": time.strftime("%Y-%m-%d", time.gmtime()),
-        "usd": now["usd"] + usd, "tokens": now["tokens"] + tokens, "mom": now["mom"] + mom,
+        "usd": now["usd"] + usd, "tokens": now["tokens"] + tokens, "olymp": now["olymp"] + olymp,
     }))
 
 
@@ -571,12 +571,12 @@ def _advise(key, category, signal, note="") -> "str | None":
     if len(ov) == 1:
         logger.warning("calling-mom: categories.%s needs model AND provider; ignored", category)
         ov = {}
-    mom = cfg["mom"]
-    mom_pair = bool(mom["model"] and mom["provider"])
-    if mom["model"] and not mom_pair:
-        logger.warning("calling-mom: mom needs model AND provider; mom is off")
+    olymp = cfg["olymp"]
+    olymp_pair = bool(olymp["model"] and olymp["provider"])
+    if olymp["model"] and not olymp_pair:
+        logger.warning("calling-mom: olymp needs model AND provider; olymp is off")
     route = {"model": cfg["model"], "provider": cfg["provider"], **ov}
-    gate = mom_pair and not ov and category in mom["categories"]
+    gate = olymp_pair and not ov and category in olymp["categories"]
     # categories with an own budget; every other category shares max_consults_per_card
     own = {"architecture": 4, "completion": 1, "watch": 1} | {
         c: v["max"] for c, v in cfg["categories"].items() if isinstance(v, dict) and "max" in v}
@@ -614,14 +614,14 @@ def _advise(key, category, signal, note="") -> "str | None":
             ).fetchone()[0]
             if used >= limit:
                 return None
-            mom_used = conn.execute(
-                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE '%, mom)%'",
+            olymp_used = conn.execute(
+                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE '%, olymp)%'",
                 (task.id, ADVISOR),
             ).fetchone()[0]
         spent = _spent_today()
         if spent["usd"] >= adv["daily_usd_cap"] or spent["tokens"] >= adv["daily_token_cap"]:
             return None
-        gate = gate and mom_used < mom["max_per_card"] and spent["mom"] < mom["max_per_day"]
+        gate = gate and olymp_used < olymp["max_per_card"] and spent["olymp"] < olymp["max_per_day"]
 
         def ask(r, msgs):
             pair = (r["provider"], r["model"])
@@ -638,12 +638,12 @@ def _advise(key, category, signal, note="") -> "str | None":
             return out
 
         msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
-        is_mom = False
-        if gate:  # sibling first, with the escalation instruction
+        is_olymp = False
+        if gate:  # mom first, with the escalation instruction
             first = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
             if (first.text or "").strip().upper().startswith("ESCALATE"):
                 _add_spend(first.usage.cost_usd or 0.0, (first.usage.input_tokens or 0) + (first.usage.output_tokens or 0))
-                route, is_mom = {"model": mom["model"], "provider": mom["provider"]}, True
+                route, is_olymp = {"model": olymp["model"], "provider": olymp["provider"]}, True
                 res = ask(route, msgs)
             else:
                 res = first
@@ -653,25 +653,25 @@ def _advise(key, category, signal, note="") -> "str | None":
         if not text:
             return None
         cost = res.usage.cost_usd or 0.0
-        if is_mom:  # subscription: counted in calls, never in dollars or tokens
-            _add_spend(0.0, 0, mom=1)
+        if is_olymp:  # subscription: counted in calls, never in dollars or tokens
+            _add_spend(0.0, 0, olymp=1)
         else:
             _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
         if text.upper().startswith("NO_ACTION"):  # nothing to say: no comment, no interruption
             _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
-                       provider=route["provider"], mom=is_mom,
+                       provider=route["provider"], olymp=is_olymp,
                        tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
         with _connect() as conn:
             cid = kb.add_comment(
                 conn, task.id, ADVISOR,
-                f"[{category}/{signal}] run {key[1] or '?'} · {res.model} ({route['provider']}{', mom' if is_mom else ''}): "
+                f"[{category}/{signal}] run {key[1] or '?'} · {res.model} ({route['provider']}{', olymp' if is_olymp else ''}): "
                 f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}",
             )
             _skip_relay(conn, task.id, cid)
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
-                   provider=route["provider"], mom=is_mom,
+                   provider=route["provider"], olymp=is_olymp,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
         _awaiting_reply.add(key)
         return f"[ADVISOR {res.model}] {text}"
@@ -989,7 +989,7 @@ def register(ctx) -> None:
         register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
                      setup_fn=cli.setup_parser,
                      handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path),
-                     description="setup: choose sibling/mom from your providers. status: show setup and usage. "
+                     description="setup: choose mom/olymp from your providers. status: show setup and usage. "
                                  "doctor: check the setup with one real call per model.")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)

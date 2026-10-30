@@ -10,6 +10,6 @@ about: Something does not work as documented
 ```
 ```
 
-**Hermes version** (`hermes --version`), plugin version, provider/model of sibling and mom
+**Hermes version** (`hermes --version`), plugin version, provider/model of mom and olymp
 
 **Card or log lines** (`logs/calling-mom.jsonl` has hashes only, safe to share)

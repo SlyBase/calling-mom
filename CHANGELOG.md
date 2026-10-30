@@ -6,18 +6,18 @@ versioning: [SemVer](https://semver.org/).
 ## [1.3.0] - 2026-10-30
 
 ### Added
-- **Two tiers: sibling and mom.** `sibling.{model,provider}` is the cheap tier (the old top-level pair still
-  works). `mom.{model,provider}` (empty = off) is the expensive tier. For `mom.categories` (default
-  `architecture`) the sibling answers first and writes `ESCALATE: <reason>` only for a rare high-stakes case;
-  only then mom is asked. Mom is limited by calls (`mom.max_per_card` 1, `mom.max_per_day` 6), exempt from the
+- **Two tiers: mom and olymp** (the names changed during the 1.3.0 preview: `sibling` is now `mom`, the old `mom` is now `olymp`; `setup` rewrites old config). `mom.{model,provider}` is the cheap tier (the old top-level pair still
+  works). `olymp.{model,provider}` (empty = off) is the expensive tier. For `olymp.categories` (default
+  `architecture`) the mom answers first and writes `ESCALATE: <reason>` only for a rare high-stakes case;
+  only then olymp is asked. Olymp is limited by calls (`olymp.max_per_card` 1, `olymp.max_per_day` 6), exempt from the
   USD/token caps (subscription). Model and provider only travel as a pair; a half pair is ignored and logged.
 - **`hermes calling-mom setup | status | doctor`**: `setup` lists your configured providers and models,
   grants them in the plugin allowlist (entries only grow), asks before writing and offers the sweep cron job
   (`--preset subscription|openrouter`, `--yes`). `status` shows the effective setup and usage. `doctor` checks
   the Hermes version and internals, the pairs, the allowlist and makes one real call per tier.
 - A dead advisor provider is **visible**: one `[advisor unavailable]` comment per card (redacted, short),
-  trace row `advisor_error`, metric `calling_mom_advisor_errors_total`; `calling_mom_mom_calls_total` counts mom.
-- Comments and trace rows name the provider: `model (provider, mom)`.
+  trace row `advisor_error`, metric `calling_mom_advisor_errors_total`; `calling_mom_olymp_calls_total` counts olymp.
+- Comments and trace rows name the provider: `model (provider, olymp)`.
 - `SECURITY.md` with the threat model, `CONTRIBUTING.md`, issue and PR templates, a compatibility table,
   CI job running the full suite against Hermes `main`.
 
@@ -32,7 +32,7 @@ versioning: [SemVer](https://semver.org/).
   git, `curl`/`gh` writes to GitHub (merge, release, dispatch), `terraform`/`kubectl`/`helm`, `DROP`/`TRUNCATE`, broad
   `rm -rf`, secret and IAM writes, `--insecure`, tunnels, the metadata endpoint. Add your own with
   `categories.architecture.commands_extra`.
-- **Two risk tiers.** `ssh`/`scp`/`pct`/`qm` are `watch`: one short sibling review per card with their own budget, so
+- **Two risk tiers.** `ssh`/`scp`/`pct`/`qm` are `watch`: one short mom review per card with their own budget, so
   they can no longer use up the critical budget (a real run spent both reviews on ssh reads, then merged and released
   unreviewed). The critical budget is 4 per card (was 2).
 - **The completion check runs once per run, not once per card.** A later, bigger run is checked again.
