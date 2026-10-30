@@ -49,6 +49,19 @@ jobs:
           print("hooks match:", sorted(declared))
           PY
 
+      - name: release archive ships every module the plugin imports
+        run: |
+          python - <<'PY'
+          import re
+          src = open("__init__.py").read()
+          needed = set(re.findall(r'spec_from_file_location\("[^"]+", Path\(__file__\)\.with_name\("([^"]+)"\)', src))
+          needed |= {m + ".py" for m in re.findall(r"^\s+from \. import (\w+)", src, re.M)}
+          release = open(".github/workflows/release.yml").read()
+          missing = sorted(f for f in needed if f not in release)
+          assert needed and not missing, f"release.yml archive misses: {missing} (found {sorted(needed)})"
+          print("release ships", sorted(needed))
+          PY
+
       - name: CHANGELOG has an entry for the manifest version
         run: |
           python - <<'PY'
