@@ -6,6 +6,8 @@ pixel glitch bars, thin HUD lines, heavy yellow uppercase headline, grain and
 soft focus. Brand variant: glitch and lines in the SlyBase product oranges
 instead of Hermes blue/yellow. Artwork art.png (compose_art.py from
 gen2b.png): own AI-generated engraving (Thetis answers Achilles, Iliad I).
+Olymp variant: Mount Olympus small and dim above, reached only by a dashed
+line (the strongest tier is asked rarely); tags STUCK -> MOM .. OLYMP.
 """
 import math
 
@@ -74,7 +76,7 @@ r = 114 * S
 d.ellipse([tx - r, ty - r, tx + r, ty + r], fill=RED)
 d.arc([-330 * S, H / 2 - 330 * S, 330 * S - 200 * S, H / 2 + 330 * S], 0, 360, fill=LINE, width=S)
 d.arc([W - 130 * S, H / 2 - 300 * S, W + 470 * S, H / 2 + 300 * S], 0, 360, fill=LINE, width=S)
-for cx, cy in [(70, 110), (520, 95), (1120, 90), (1135, 520), (610, 545), (95, 520)]:
+for cx, cy in [(70, 110), (520, 95), (1135, 520), (610, 545), (95, 520)]:
     cx, cy = cx * S, cy * S
     d.line([(cx - 14 * S, cy), (cx + 14 * S, cy)], fill=LINE, width=S)
     d.line([(cx, cy - 14 * S), (cx, cy + 14 * S)], fill=LINE, width=S)
@@ -104,6 +106,30 @@ fig += sepia * lum[..., None]
 reg = bg[:, ax:]
 m = (mask * fade)[..., None]
 bg[:, ax:] = np.maximum(reg, fig) * (1 - m) + fig * m
+
+# --- 3b. Olympus: small, dim, far away; a dashed path from Thetis -------
+OLYMP_SRC, OLYMP_BOX = "olymp.png", (190, 60, 840, 430)   # motif bbox in olymp.png
+OX, OY, OW, DIM = 912, 58, 262, 0.78                       # final px: top-left, width, brightness
+ol = Image.open(OLYMP_SRC).convert("L").crop(OLYMP_BOX)
+ow = OW * S
+ol = ol.resize((ow, ow * ol.height // ol.width), Image.BICUBIC)
+olum = np.asarray(ol, np.float32) / 255
+oy = np.linspace(1, 0, olum.shape[0], dtype=np.float32)[:, None]
+olum *= DIM * np.clip(oy / 0.35, 0, 1)                       # clouds dissolve downwards
+ofig = INK + (IVORY - INK) * (olum ** 0.85)[..., None]
+y0, x0 = OY * S, OX * S
+reg = bg[y0:y0 + olum.shape[0], x0:x0 + ow]
+bg[y0:y0 + olum.shape[0], x0:x0 + ow] = np.maximum(reg, ofig)
+path = Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8))
+pd = ImageDraw.Draw(path)
+(px0, py0), (px1, py1) = (tx + r * 0.92, ty - r * 0.3), ((OX + 44) * S, (OY + 88) * S)
+n = 14
+for i in range(0, n, 2):                                     # dashed: the rare call
+    a0, a1 = i / n, (i + 1) / n
+    pd.line([(px0 + (px1 - px0) * a0, py0 + (py1 - py0) * a0),
+             (px0 + (px1 - px0) * a1, py0 + (py1 - py0) * a1)], fill=LINE, width=2 * S)
+pd.rectangle([px1 - 4 * S, py1 - 4 * S, px1 + 4 * S, py1 + 4 * S], fill=(255, 242, 228))
+bg = np.asarray(path, np.float32).copy()
 
 # --- 4. Pixel glitch: shifted slices and blue/yellow block bars -----------
 img = np.clip(bg, 0, 255)
@@ -150,27 +176,38 @@ for i, line in enumerate(["CALLING", "MOM"]):
     hd.text((L + 5 * S, y + 5 * S), line, font=big, fill=(120, 28, 18))  # misprint shadow
     hd.text((L, y), line, font=big, fill=YELLOW)
 
-# flow: stuck -> second opinion -> stronger model
+# flow: stuck -> mom, and only rarely -> olymp (dashed)
+TAGS = ["STUCK", "MOM", "OLYMP"]
 tag = font("ArchivoBlack.ttf", 15)
 y = 488 * S
 x = L
 boxes = []
-for word in ["STUCK", "SECOND-OPINION", "STRONGER MODEL"]:
+for word in TAGS:
     tw = d.textlength(word, font=tag)
     boxes.append((x, x + tw + 22 * S))
     x += tw + 22 * S + 46 * S
 glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 g = ImageDraw.Draw(glow)
-for (a0, a1), (b0, _) in zip(boxes, boxes[1:]):
-    g.line([(a1, y + 14 * S), (b0, y + 14 * S)], fill=LINE + (255,), width=5 * S)
+def seg(x0, x1, dashed):
+    """Connector pieces; the last hop is dashed (rare)."""
+    if not dashed:
+        return [(x0, x1)]
+    step = (x1 - x0) / 7
+    return [(x0 + i * step, x0 + (i + 1) * step) for i in range(0, 7, 2)]
+
+
+for i, ((a0, a1), (b0, _)) in enumerate(zip(boxes, boxes[1:])):
+    for s0, s1 in seg(a1, b0, i == len(boxes) - 2):
+        g.line([(s0, y + 14 * S), (s1, y + 14 * S)], fill=LINE + (255,), width=5 * S)
 glow = glow.filter(ImageFilter.GaussianBlur(5 * S))
 txt = Image.alpha_composite(glow, txt)
 d = ImageDraw.Draw(txt)
-for (a0, a1), (b0, _) in zip(boxes, boxes[1:]):
-    d.line([(a1, y + 14 * S), (b0, y + 14 * S)], fill=(255, 196, 140), width=2 * S)
+for i, ((a0, a1), (b0, _)) in enumerate(zip(boxes, boxes[1:])):
+    for s0, s1 in seg(a1, b0, i == len(boxes) - 2):
+        d.line([(s0, y + 14 * S), (s1, y + 14 * S)], fill=(255, 196, 140), width=2 * S)
     for px in (a1 + 6 * S, b0 - 6 * S):
         d.rectangle([px - 4 * S, y + 10 * S, px + 4 * S, y + 18 * S], fill=(255, 242, 228))
-for (a0, a1), word in zip(boxes, ["STUCK", "SECOND-OPINION", "STRONGER MODEL"]):
+for (a0, a1), word in zip(boxes, TAGS):
     d.rectangle([a0, y, a1, y + 29 * S], fill=YELLOW)
     d.text((a0 + 11 * S, y + 5 * S), word, font=tag, fill=(14, 13, 12))
 
