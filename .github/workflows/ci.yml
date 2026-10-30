@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
 
       - name: compile every module
-        run: python -m py_compile __init__.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py linecov.py check.py
+        run: python -m py_compile __init__.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py cli.py linecov.py check.py
 
       - name: plugin manifest is valid YAML with the required keys
         run: |
@@ -58,3 +58,28 @@ jobs:
           assert re.search(rf"^## \[{re.escape(version)}\]", text, re.M), f"no CHANGELOG section for {version}"
           print("changelog ok for", version)
           PY
+
+  full-suite:
+    # The real gate: the plugin against Hermes main. Not blocking yet: it proves compatibility, a red run
+    # means "Hermes moved" (fix the plugin or raise the minimum version) rather than "the PR is wrong".
+    name: full suite against Hermes main
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: plugin
+      - uses: actions/checkout@v5
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: install Hermes
+        run: pip install --quiet ./hermes
+      - name: run the gate
+        working-directory: plugin
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: python check.py

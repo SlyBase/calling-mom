@@ -1,6 +1,6 @@
 """Tests for the calling-mom plugin (stdlib unittest, no pytest needed).
 
-    cd <plugin dir> && /opt/hermes/.venv/bin/python -m unittest -v test_calling_mom
+    cd <plugin dir> && python -m unittest -v test_calling_mom
 """
 
 import importlib.util
@@ -463,7 +463,7 @@ class FakeLlm:
     def complete(self, messages, **kw):
         self.calls.append({"messages": messages, **kw})
         if self.boom:
-            raise RuntimeError("provider down")
+            raise RuntimeError(getattr(self, "error", "provider down"))
         return self._res
 
 
@@ -1026,6 +1026,124 @@ class StepsSignalTest(AdvisorTest):
             out = plugin.on_tool_result(tool_name="read_file", args={"path": f"/f{i}"}, result="r", status="ok")
         self.assertIsNone(out)
         self.assertEqual(self.llm.calls, [])
+
+
+class EgressRedactionTest(AdvisorTest):
+    """Everything sent to a remote model passes the redactor. One row per secret shape (see SECURITY.md)."""
+
+    SECRETS = {
+        "github token": "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+        "openai key": "sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        "anthropic key": "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6-xyz",
+        "openrouter key": "sk-or-v1-" + "a1B2c3D4" * 8,
+        "aws key id": "AKIA" + "ABCDEFGHIJKLMNOP",
+        "bearer header": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijklmnop.qrstuvwxyz0123",
+        "password assignment": "DB_PASSWORD=hunter2hunter2",
+        "url credentials": "https://deploy:s3cretpass@git.example.com/org/repo.git",
+    }
+    NEEDLES = ("a1B2c3D4e5F6", "A1b2C3d4E5f6", "ABCDEFGHIJKLMNOP", "abcdefghijklmnop", "hunter2hunter2", "s3cretpass")
+
+    def test_no_secret_shape_reaches_the_remote_model(self):
+        for name, secret in self.SECRETS.items():
+            with self.subTest(secret=name):
+                os.environ["HERMES_KANBAN_TASK"] = with_conn(lambda c: kb.create_task(c, title="deploy", assignee="worker"))
+                self.llm.calls.clear()
+                plugin._trackers.clear()
+                self.stuck(3, text=f"deploy failed, config had {secret} in it")
+                sent = "\n".join(m["content"] for m in self.llm.calls[0]["messages"])
+                self.assertFalse(any(n in sent for n in self.NEEDLES), (name, sent[-300:]))
+
+
+class ProviderErrorTest(AdvisorTest):
+    """A dead provider must not be silent: ONE visible comment per card, the worker is not disturbed."""
+
+    def comments(self):
+        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
+
+    def test_failure_leaves_one_comment_and_does_not_touch_the_result(self):
+        self.llm.boom = True
+        self.assertIsNone(self.stuck(3))
+        plugin._trackers.clear()
+        self.assertIsNone(self.stuck(3))
+        bodies = self.comments()
+        self.assertEqual(len(bodies), 1)
+        self.assertTrue(bodies[0].startswith("[advisor unavailable]"))
+        self.assertIn("provider down", bodies[0])
+        self.assertIn("doctor", bodies[0])
+
+    def test_error_text_is_redacted_and_short(self):
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        self.llm.boom = True
+        self.llm.error = f"403 key {token} " + "x" * 2000
+        self.stuck(3)
+        body = self.comments()[0]
+        self.assertNotIn(token, body)
+        self.assertLess(len(body), 600)
+
+    def test_failure_does_not_eat_the_advice_budget(self):
+        self.llm.boom = True
+        self.stuck(3)
+        self.llm.boom = False
+        plugin._trackers.clear()
+        for _ in range(plugin.DEFAULTS["advisor"]["max_consults_per_card"]):
+            plugin._trackers.clear()
+            self.stuck(3)
+        self.assertEqual(len(self.llm.calls), 1 + plugin.DEFAULTS["advisor"]["max_consults_per_card"])
+
+    def test_card_that_did_not_opt_in_gets_no_error_comment(self):
+        os.environ["HERMES_KANBAN_BOARD"] = "other-board"
+        self.llm.boom = True
+        self.stuck(3)
+        self.assertEqual(self.comments(), [])
+
+    def test_failure_is_traced(self):
+        self.llm.boom = True
+        self.stuck(3)
+        rows = [json.loads(l) for l in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
+        self.assertEqual([r["error"] for r in rows if r.get("kind") == "advisor_error"], ["RuntimeError"])
+
+
+class SiblingBlockTest(unittest.TestCase):
+    """`calling_mom.sibling.{model,provider}` names the cheap tier; the legacy top-level pair still works."""
+
+    def settings_with(self, block):
+        orig = _hermes_config.load_config
+        _hermes_config.load_config = lambda *a, **k: {"calling_mom": block}
+        try:
+            return plugin.settings()
+        finally:
+            _hermes_config.load_config = orig
+
+    def test_sibling_pair_replaces_the_top_level_pair(self):
+        s = self.settings_with({"sibling": {"model": "s/m", "provider": "s-p"}})
+        self.assertEqual((s["model"], s["provider"]), ("s/m", "s-p"))
+
+    def test_sibling_beats_a_legacy_pair_in_the_same_config(self):
+        s = self.settings_with({"model": "old/m", "provider": "old-p", "sibling": {"model": "s/m", "provider": "s-p"}})
+        self.assertEqual((s["model"], s["provider"]), ("s/m", "s-p"))
+
+    def test_half_sibling_pair_is_ignored(self):
+        s = self.settings_with({"sibling": {"model": "s/m"}})
+        self.assertEqual((s["model"], s["provider"]), (plugin.DEFAULTS["model"], plugin.DEFAULTS["provider"]))
+
+    def test_without_a_sibling_block_nothing_changes(self):
+        s = self.settings_with({"model": "old/m", "provider": "old-p"})
+        self.assertEqual((s["model"], s["provider"]), ("old/m", "old-p"))
+
+
+class CliRegistrationTest(unittest.TestCase):
+    def test_register_adds_the_calling_mom_command(self):
+        from types import SimpleNamespace as NS
+        seen = {}
+        ctx = NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: None, llm=None,
+                 register_cli_command=lambda **kw: seen.update(kw))
+        plugin.register(ctx)
+        self.assertEqual(seen["name"], "calling-mom")
+        self.assertTrue(callable(seen["setup_fn"]) and callable(seen["handler_fn"]))
+
+    def test_old_hermes_without_cli_registration_still_loads(self):
+        from types import SimpleNamespace as NS
+        plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: None, llm=None))
 
 
 class DefensivePathsTest(AdvisorTest):

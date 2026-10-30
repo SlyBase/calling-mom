@@ -1,6 +1,6 @@
 """Tests for metrics.py: Prometheus text rendering and Pushgateway push (stdlib only).
 
-    cd <plugin dir> && /opt/hermes/.venv/bin/python -m unittest -v test_metrics
+    cd <plugin dir> && python -m unittest -v test_metrics
 """
 
 import http.server
@@ -61,6 +61,15 @@ class RenderTest(unittest.TestCase):
         self.assertIn('calling_mom_advice_feedback_total{verdict="followed"} 0', out)
         rows = ROWS + [{"kind": "advice_feedback", "verdict": "rejected"}]
         self.assertIn('calling_mom_advice_feedback_total{verdict="rejected"} 1', lines(self.render(rows=rows)))
+
+    def test_provider_failures_and_mom_calls_are_counted_from_the_first_push(self):
+        out = lines(self.render())
+        self.assertIn("calling_mom_advisor_errors_total 0", out)
+        self.assertIn("calling_mom_mom_calls_total 0", out)
+        rows = ROWS + [{"kind": "advisor_error", "error": "RuntimeError"}] * 2 + [{"kind": "advisor", "mom": True}]
+        out = lines(self.render(rows=rows))
+        self.assertIn("calling_mom_advisor_errors_total 2", out)
+        self.assertIn("calling_mom_mom_calls_total 1", out)
 
     def test_advisor_counters(self):
         out = lines(self.render())

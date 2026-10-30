@@ -1,11 +1,11 @@
 """One gate for the calling-mom plugin: tests, coverage threshold, copy drift.
 
-    /opt/hermes/.venv/bin/python check.py            # gate: exit 1 on any failure
-    /opt/hermes/.venv/bin/python check.py --sync     # make the deployed copy match
-    /opt/hermes/.venv/bin/python check.py --min 95   # relax the coverage threshold
+    python check.py            # gate: exit 1 on any failure
+    python check.py --sync     # make the deployed copy match
+    python check.py --min 95   # relax the coverage threshold
 
-Stdlib only. The canonical copy is the profile one; ``/opt/data/plugins/calling-mom``
-is the deployed copy the default-profile gateway loads.
+Stdlib only. ``CALLING_MOM_DEPLOYED`` (optional) names an installed copy that must stay byte-identical
+to this checkout; without it the drift check is skipped.
 """
 import argparse
 import contextlib
@@ -18,11 +18,11 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CANONICAL = Path(os.environ.get("CALLING_MOM_CANONICAL", "/opt/data/profiles/daidalos/plugins/calling-mom"))
-DEPLOYED = Path(os.environ.get("CALLING_MOM_DEPLOYED", "/opt/data/plugins/calling-mom"))
-MODULES = ["test_signals", "test_calling_mom", "test_metrics", "test_matrix"]
-PAYLOAD = ["__init__.py", "metrics.py", "signals.py", "plugin.yaml",
-           "test_signals.py", "test_calling_mom.py", "test_metrics.py", "test_matrix.py",
+CANONICAL = HERE
+DEPLOYED = Path(os.environ["CALLING_MOM_DEPLOYED"]) if os.environ.get("CALLING_MOM_DEPLOYED") else None
+MODULES = ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli"]
+PAYLOAD = ["__init__.py", "cli.py", "metrics.py", "signals.py", "plugin.yaml",
+           "test_signals.py", "test_calling_mom.py", "test_metrics.py", "test_matrix.py", "test_cli.py",
            "linecov.py", "check.py", "README.md", "CHANGELOG.md", "scripts/sweep.py"]
 
 
@@ -47,8 +47,8 @@ def measure(minimum):
 
 
 def compare(sync):
-    if not DEPLOYED.exists():
-        print("drift      : skipped (%s not installed)" % DEPLOYED)
+    if DEPLOYED is None or not DEPLOYED.exists():
+        print("drift      : skipped (set CALLING_MOM_DEPLOYED to compare an installed copy)")
         return True
     drift = [name for name in PAYLOAD
              if not (DEPLOYED / name).exists()

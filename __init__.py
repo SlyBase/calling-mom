@@ -47,6 +47,13 @@ except ImportError:  # loaded by path (tests, plugin doctor): no package context
     signals = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(signals)
 
+try:
+    from . import cli
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _cli_spec = importlib.util.spec_from_file_location("calling_mom_cli", Path(__file__).with_name("cli.py"))
+    cli = importlib.util.module_from_spec(_cli_spec)
+    _cli_spec.loader.exec_module(cli)
+
 DEFAULTS = {
     "model": "deepseek/deepseek-v4.1-flash-1017",
     "provider": "openrouter",
@@ -110,6 +117,7 @@ _REFUTED = re.compile(
 _HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"
+_UNAVAILABLE = "[advisor unavailable]"
 # `steps` is a pace signal (logged, never a question): it cost one advisor call and returned NO_ACTION
 _CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop"}
 
@@ -140,10 +148,15 @@ def settings() -> dict:
     try:
         from hermes_cli.config import load_config
 
-        return _merge(DEFAULTS, (load_config() or {}).get("calling_mom") or {})
+        raw = (load_config() or {}).get("calling_mom") or {}
     except Exception as exc:  # pragma: no cover - config is best effort
         logger.debug("calling-mom: config read failed: %s", exc)
-        return _merge(DEFAULTS, {})
+        raw = {}
+    cfg = _merge(DEFAULTS, raw)
+    sib = raw.get("sibling") if isinstance(raw.get("sibling"), dict) else {}
+    if sib.get("model") and sib.get("provider"):  # the sibling block names the cheap tier; a half pair is ignored
+        cfg["model"], cfg["provider"] = str(sib["model"]), str(sib["provider"])
+    return cfg
 
 
 def _enabled() -> bool:
@@ -499,6 +512,7 @@ _PROMPTS = {
 }
 
 
+_URL_CREDS = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", re.I)
 _GATE = ("\n\nYou are the FIRST reviewer; a far more expensive reviewer exists. Give your normal answer. "
          "Only for a rare high-stakes case that you cannot judge as safe from this context (irreversible "
          "production or public action without a fallback) answer exactly 'ESCALATE: ' plus a one-line reason. "
@@ -521,7 +535,7 @@ def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_
     user += f"\nStuck signal: {signal}\nLast steps:\n" + "\n".join(lines)
     if note:
         user += f"\n\nDetails:\n{note}"
-    user = redact_for_egress(user)
+    user = redact_for_egress(_URL_CREDS.sub(r"\1***@", user))  # Hermes' redactor misses scheme://user:pass@host
     if len(user) > limit:  # keep the task head and the most recent steps
         head = limit // 3
         user = user[:head] + "\n...\n" + user[-(limit - head - 5):]
@@ -554,13 +568,15 @@ def _advise(key, category, signal, note="") -> "str | None":
     if category in own:
         limit, where, params = own[category], "body LIKE ?", [f"[{category}/%"]
     else:
-        limit, params = adv["max_consults_per_card"], [f"[{c}/%" for c in own]
+        limit, params = adv["max_consults_per_card"], [f"[{c}/%" for c in own] + [_UNAVAILABLE + "%"]
         where = " AND ".join(["body NOT LIKE ?"] * len(params))
+    task, opted_in = None, False
     try:
         with _connect() as conn:
             task = kb.get_task(conn, key[0])
             if task is None or not _advisor_opted_in(task):
                 return None
+            opted_in = True
             # Get the latest operator comment (current subtask)
             latest_comment = conn.execute(
                 "SELECT body FROM task_comments WHERE task_id = ? AND author != ? ORDER BY created_at DESC LIMIT 1",
@@ -635,7 +651,28 @@ def _advise(key, category, signal, note="") -> "str | None":
         return f"[ADVISOR {res.model}] {text}"
     except Exception as exc:
         logger.warning("calling-mom: advisor failed (%s): %s", signal, exc)
+        if opted_in:
+            _report_unavailable(task.id, exc)
         return None
+
+
+def _report_unavailable(task_id, exc) -> None:
+    """ONE visible comment per card when the advisor model cannot be reached (dead key, no login, ...).
+    Without it the card just runs on without advice and nobody learns why."""
+    try:
+        from agent.redact import redact_for_egress
+
+        _trace_row("advisor_error", task=task_id, error=type(exc).__name__)
+        with _connect() as conn:
+            if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE ?",
+                            (task_id, ADVISOR, _UNAVAILABLE + "%")).fetchone():
+                return
+            reason = redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
+            cid = kb.add_comment(conn, task_id, ADVISOR,
+                                 f"{_UNAVAILABLE} {reason}\nThe card continues without advice. Check the setup: hermes calling-mom doctor")
+            _skip_relay(conn, task_id, cid)
+    except Exception as err:  # pragma: no cover - reporting must never break the worker
+        logger.warning("calling-mom: could not report advisor failure: %s", err)
 
 
 def _skip_relay(conn, task_id, comment_id) -> None:
@@ -912,6 +949,13 @@ def register(ctx) -> None:
     ctx.register_tool(name="second_opinion", toolset="calling-mom", schema=_SECOND_OPINION,
                       handler=handle_second_opinion, check_fn=lambda: bool(os.environ.get("HERMES_KANBAN_TASK")),
                       emoji="\U0001f9d0")
+    register_cli = getattr(ctx, "register_cli_command", None)
+    if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
+        register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
+                     setup_fn=cli.setup_parser,
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings),
+                     description="setup: choose sibling/mom from your providers. status: show setup and usage. "
+                                 "doctor: check the setup with one real call per model.")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
     cfg = settings()

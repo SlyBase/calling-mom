@@ -6,15 +6,32 @@ versioning: [SemVer](https://semver.org/).
 ## [1.3.0] - 2026-10-30
 
 ### Added
-- **Mom is a gate, not a default**: the sibling answers first and only a rare `ESCALATE:` reaches mom. Mom is limited per card (1) and per day (6), exempt from USD/token caps. Comments and trace rows now name the provider (`model (provider, mom)`).
-- `kubectl -n prod delete ...` (flags before the verb) is now a critical command.
-- **Two-tier advisor**: `mom.model`/`mom.provider` (empty = off) name the "mom", a very strong model
-  that is asked only for `mom.categories` (default `architecture`: critical files and
-  commands, `SECOND-OPINION`). Stuck, validation and completion questions stay on the sibling (`model`/`provider`).
+- **Two tiers: sibling and mom.** `sibling.{model,provider}` is the cheap tier (the old top-level pair still
+  works). `mom.{model,provider}` (empty = off) is the expensive tier. For `mom.categories` (default
+  `architecture`) the sibling answers first and writes `ESCALATE: <reason>` only for a rare high-stakes case;
+  only then mom is asked. Mom is limited by calls (`mom.max_per_card` 1, `mom.max_per_day` 6), exempt from the
+  USD/token caps (subscription). Model and provider only travel as a pair; a half pair is ignored and logged.
+- **`hermes calling-mom setup | status | doctor`**: `setup` lists your configured providers and models,
+  grants them in the plugin allowlist (entries only grow), asks before writing and offers the sweep cron job
+  (`--preset subscription|openrouter`, `--yes`). `status` shows the effective setup and usage. `doctor` checks
+  the Hermes version and internals, the pairs, the allowlist and makes one real call per tier.
+- A dead advisor provider is **visible**: one `[advisor unavailable]` comment per card (redacted, short),
+  trace row `advisor_error`, metric `calling_mom_advisor_errors_total`; `calling_mom_mom_calls_total` counts mom.
+- Comments and trace rows name the provider: `model (provider, mom)`.
+- `SECURITY.md` with the threat model, `CONTRIBUTING.md`, issue and PR templates, a compatibility table,
+  CI job running the full suite against Hermes `main`.
 
 ### Changed
-- The `steps` pace signal is logged but no longer calls the advisor (it produced a call that
-  answered `NO_ACTION`).
+- The `steps` pace signal is logged but no longer calls the advisor.
+- `kubectl -n prod delete ...` (flags before the verb) is now a critical command.
+- URL credentials (`scheme://user:pass@host`) are scrubbed before anything is sent to a remote model.
+- Maintainer scripts (`check.py`, `deploy.sh`, `smoke.py`) no longer contain machine paths: everything comes
+  from the environment or the git-ignored `scripts/.deploy.env`.
+
+### Fixed
+- `linecov.py` counted lines of any package's `__init__.py` (e.g. `hermes_cli`) as the plugin's, which showed
+  100 % while about 20 lines were untested. It now matches the directory and honours `# pragma: no cover`.
+- The test matrix no longer leaves `cache-edge.jsonl` in the checkout.
 
 ## [1.2.0] - 2026-10-29
 

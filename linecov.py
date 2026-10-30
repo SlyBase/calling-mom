@@ -15,7 +15,7 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent  # measure the copy this file lives in
 
-targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "__init__.py"}
+targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "__init__.py"}
 hit = {p: set() for p in targets}
 
 
@@ -32,9 +32,9 @@ def executable_lines(path):
         for const in c.co_consts:
             if hasattr(const, "co_code"):
                 stack.append(const)
-    # `except ...:  # pragma: no cover` marks a defensive handler; drop the whole handler
+    # `# pragma: no cover` on an `except` or a `def` line drops the whole handler / function
     for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.ExceptHandler) and "pragma: no cover" in src.splitlines()[node.lineno - 1]:
+        if isinstance(node, (ast.ExceptHandler, ast.FunctionDef)) and "pragma: no cover" in src.splitlines()[node.lineno - 1]:
             lines -= set(range(node.lineno, node.end_lineno + 1))
     return lines
 
