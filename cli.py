@@ -3,6 +3,7 @@
 Pure logic first (testable with fake I/O), Hermes wiring last (``make_env``).
 """
 import copy
+import json
 import re
 import shutil
 import subprocess
@@ -151,7 +152,27 @@ def sibling_pair(cm):
     return cm.get("provider") or "", cm.get("model") or ""
 
 
-def status_lines(cm, spent) -> list:
+def count_errors(path, now=None):
+    """``(count, last error name)`` of today's (UTC) ``advisor_error`` rows in the plugin log."""
+    import time
+    now = int(now if now is not None else time.time())
+    start = now - now % 86400
+    count, last = 0, None
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        return 0, None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("kind") == "advisor_error" and row.get("ts", 0) >= start:
+            count, last = count + 1, row.get("error")
+    return count, last
+
+
+def status_lines(cm, spent, errors=None) -> list:
     sp, sm = sibling_pair(cm)
     mom = cm.get("mom") or {}
     adv = cm.get("advisor") or {}
@@ -165,6 +186,8 @@ def status_lines(cm, spent) -> list:
     lines.append(f"advisor : {'on' if adv.get('enabled') else 'OFF'}, boards: {', '.join(boards) or '(none)'}")
     if adv.get("enabled") and not boards:
         lines.append("warning : advisor is on but no board is opted in, nothing is sent (run: hermes calling-mom setup)")
+    if errors and errors[0]:
+        lines.append(f"errors  : {errors[0]} advisor call(s) failed today, last: {errors[1]}. Run: hermes calling-mom doctor")
     lines.append(f"spend   : ${spent.get('usd', 0):.4f} / ${adv.get('daily_usd_cap', '?')}, "
                  f"{spent.get('tokens', 0)} / {adv.get('daily_token_cap', '?')} tokens today (sibling only)")
     return lines
@@ -177,8 +200,33 @@ def version_ok(version) -> bool:
     return bool(m) and tuple(int(x or 0) for x in m.groups()) >= MIN_HERMES
 
 
-def run_checks(cm, llm, probe, version, internals) -> list:
-    """``[(name, "ok"|"warn"|"fail", detail)]``. Live calls only if the static checks passed."""
+def find_sweeps(homes) -> list:
+    """``[(home, job id, state)]`` of every ``calling-mom-sweep`` cron job in the given Hermes homes.
+    Jobs live per home (root gateway, each profile): one home cannot see the others."""
+    found = []
+    for home in homes:
+        try:
+            jobs = json.loads((Path(home) / "cron" / "jobs.json").read_text()).get("jobs") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        found += [(str(home), j.get("id"), j.get("state") or "?") for j in jobs if j.get("name") == CRON_NAME]
+    return found
+
+
+def _sweep_check(sweeps):
+    active = [(h, i) for h, i, state in sweeps if state not in ("paused", "completed")]
+    idle = [i for _, i, state in sweeps if state in ("paused", "completed")]
+    if len(active) == 1:
+        return "ok", f"{active[0][1]}" + (f" (paused duplicate: {', '.join(idle)})" if idle else "")
+    if not active:
+        return "warn", "no active sweep job: crash-parked cards are not escalated and no metrics are pushed (run: hermes calling-mom setup)"
+    ids = ", ".join(f"{i} ({h})" for h, i in active)
+    return "warn", f"{len(active)} active sweep jobs: {ids}. Keep one: hermes cron remove <id> in that home"
+
+
+def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
+    """``[(name, "ok"|"warn"|"fail", detail)]``. Live calls only if the static checks passed.
+    ``sweeps`` = ``find_sweeps()`` result; None skips the cron check."""
     out = []
 
     def add(name, status, detail=""):
@@ -214,6 +262,8 @@ def run_checks(cm, llm, probe, version, internals) -> list:
         add("advisor", "ok", "boards: " + ", ".join(adv["boards"]))
     else:
         add("advisor", "warn", "off or no board opted in: nothing is sent to the sibling or mom")
+    if sweeps is not None:
+        add("sweep cron", *_sweep_check(sweeps))
     if static_ok:
         tiers = [("sibling call", sp, sm)] + ([("mom call", mp, mm)] if mom_on else [])
         for name, prov, model in tiers:
@@ -244,8 +294,9 @@ class Env:
     ask: Callable
     say: Callable
     cron: Callable
-    cron_exists: Callable
+    sweeps: Callable
     effective: Optional[Callable] = field(default=None)
+    errors: Optional[Callable] = field(default=None)
 
 
 def _blocks(env):
@@ -265,23 +316,26 @@ def cmd_setup(env, preset=None, yes=False) -> int:
         return 1
     env.save(apply_updates(cfg, upd))
     env.say("Config written.")
-    if not env.cron_exists():
-        if yes or env.ask("Create the 1-minute sweep cron job (catches crash-parked cards, pushes metrics)? [Y/n] > ").strip().lower() in ("", "y", "yes"):
-            env.cron()
+    existing = env.sweeps()
+    if existing:  # jobs are per Hermes home: look everywhere, never create a second one
+        env.say("A sweep cron job already exists: " + ", ".join(f"{i} ({h}, {st})" for h, i, st in existing)
+                + ". Not creating another.")
+    elif yes or env.ask("Create the 1-minute sweep cron job (catches crash-parked cards, pushes metrics)? [Y/n] > ").strip().lower() in ("", "y", "yes"):
+        env.cron()
     env.say("Next: hermes calling-mom doctor   (makes one real call to each model)")
     return 0
 
 
 def cmd_status(env) -> int:
     cm, _ = _blocks(env)
-    for line in status_lines(cm, env.spent()):
+    for line in status_lines(cm, env.spent(), env.errors() if env.errors else None):
         env.say(line)
     return 0
 
 
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
-    checks = run_checks(cm, llm, env.probe, env.version, env.internals)
+    checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps())
     for name, status, detail in checks:
         env.say(f"{ {'ok': 'OK  ', 'warn': 'WARN', 'fail': 'FAIL'}[status] }  {name:<17} {detail}".rstrip())
     return exit_code(checks)
@@ -289,7 +343,7 @@ def cmd_doctor(env) -> int:
 
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
-def make_env(spent, effective, ask=input, say=print):  # pragma: no cover - needs a live Hermes
+def make_env(spent, effective, log_path, ask=input, say=print):  # pragma: no cover - needs a live Hermes
     from hermes_cli import config as hc
 
     def load():
@@ -329,9 +383,11 @@ def make_env(spent, effective, ask=input, say=print):  # pragma: no cover - need
     def hermes_bin():
         return shutil.which("hermes") or str(Path(sys.executable).with_name("hermes"))
 
-    def cron_exists():
-        r = subprocess.run([hermes_bin(), "cron", "list"], capture_output=True, text=True, timeout=120)
-        return CRON_NAME in (r.stdout or "")
+    def sweeps():
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        root = Path(get_default_hermes_root())
+        homes = {str(Path(get_hermes_home())), str(root), *map(str, sorted((root / "profiles").glob("*")))}
+        return find_sweeps(sorted(homes))
 
     def cron():
         from hermes_constants import get_hermes_home
@@ -344,8 +400,9 @@ def make_env(spent, effective, ask=input, say=print):  # pragma: no cover - need
         say("cron job created" if r.returncode == 0 else f"cron job NOT created: {(r.stderr or r.stdout).strip()[:200]}")
 
     return Env(load=load, save=hc.save_config, providers=providers, boards=boards, spent=spent, probe=probe,
-               version=str(version), internals=internals, ask=ask, say=say, cron=cron, cron_exists=cron_exists,
-               effective=lambda: {**hc.load_config(), "calling_mom": effective()})
+               version=str(version), internals=internals, ask=ask, say=say, cron=cron, sweeps=sweeps,
+               effective=lambda: {**hc.load_config(), "calling_mom": effective()},
+               errors=lambda: count_errors(log_path()))
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -358,8 +415,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     parser.set_defaults(cm_cmd=None)
 
 
-def dispatch(args, spent, effective):  # pragma: no cover - argparse glue
-    env = make_env(spent, effective)
+def dispatch(args, spent, effective, log_path):  # pragma: no cover - argparse glue
+    env = make_env(spent, effective, log_path)
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes)

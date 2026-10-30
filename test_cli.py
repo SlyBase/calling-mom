@@ -1,5 +1,7 @@
 """Tests for the user-facing commands: setup (interactive), status, doctor."""
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -182,6 +184,16 @@ class StatusTest(unittest.TestCase):
         cfg = {**self.CFG, "advisor": {"enabled": True, "boards": [], "daily_usd_cap": 2.0, "daily_token_cap": 1}}
         self.assertIn("no board", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "mom": 0})))
 
+    def test_advisor_errors_today_are_shown_with_the_last_cause(self):
+        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "mom": 0}, (7, "ClaudeCodeLoggedOut")))
+        self.assertIn("7", text)
+        self.assertIn("ClaudeCodeLoggedOut", text)
+        self.assertIn("doctor", text)
+
+    def test_no_error_line_without_errors(self):
+        text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "mom": 0}, (0, None)))
+        self.assertNotIn("errors", text)
+
     def test_mom_off_is_said_plainly(self):
         cfg = {**self.CFG, "mom": {"model": "", "provider": "", "max_per_card": 1, "max_per_day": 6}}
         self.assertIn("off", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "mom": 0})).lower())
@@ -197,9 +209,12 @@ class DoctorTest(unittest.TestCase):
                 "advisor": {"enabled": True, "boards": ["coding"]}}
         return {**base, **over}
 
-    def run_doctor(self, cfg=None, llm=None, probe=None, version="0.22.5", internals=True):
+    ONE = [("/h", "j1", "scheduled")]
+
+    def run_doctor(self, cfg=None, llm=None, probe=None, version="0.22.5", internals=True, sweeps=None):
         probe = probe or (lambda provider, model: None)
-        return cli.run_checks(cfg or self.cfg(), self.LLM if llm is None else llm, probe, version, internals)
+        return cli.run_checks(cfg or self.cfg(), self.LLM if llm is None else llm, probe, version, internals,
+                              self.ONE if sweeps is None else sweeps)
 
     def by_name(self, checks):
         return {n: (s, d) for n, s, d in checks}
@@ -258,6 +273,31 @@ class DoctorTest(unittest.TestCase):
         cfg = self.cfg(advisor={"enabled": False, "boards": ["coding"]})
         self.assertEqual(self.by_name(self.run_doctor(cfg))["advisor"][0], "warn")
 
+    def test_one_active_sweep_job_is_fine(self):
+        self.assertEqual(self.by_name(self.run_doctor())["sweep cron"][0], "ok")
+
+    def test_no_sweep_job_is_a_warning_with_the_fix(self):
+        s, d = self.by_name(self.run_doctor(sweeps=[]))["sweep cron"]
+        self.assertEqual(s, "warn")
+        self.assertIn("setup", d)
+
+    def test_two_active_sweep_jobs_are_a_warning_naming_both_and_the_fix(self):
+        sweeps = [("/root", "aaa", "scheduled"), ("/root/profiles/p", "bbb", "scheduled")]
+        s, d = self.by_name(self.run_doctor(sweeps=sweeps))["sweep cron"]
+        self.assertEqual(s, "warn")
+        self.assertIn("aaa", d)
+        self.assertIn("bbb", d)
+        self.assertIn("cron remove", d)
+
+    def test_a_paused_duplicate_does_not_count_as_active(self):
+        sweeps = [("/root", "aaa", "scheduled"), ("/root/profiles/p", "bbb", "paused")]
+        s, d = self.by_name(self.run_doctor(sweeps=sweeps))["sweep cron"]
+        self.assertEqual(s, "ok")
+        self.assertIn("bbb", d)
+
+    def test_only_a_paused_job_is_a_warning(self):
+        self.assertEqual(self.by_name(self.run_doctor(sweeps=[("/h", "p", "paused")]))["sweep cron"][0], "warn")
+
     def test_exit_code_counts_failures_only(self):
         self.assertEqual(cli.exit_code([("a", "ok", ""), ("b", "warn", "")]), 0)
         self.assertEqual(cli.exit_code([("a", "ok", ""), ("b", "fail", "")]), 1)
@@ -269,6 +309,46 @@ class DoctorTest(unittest.TestCase):
         self.assertFalse(cli.version_ok("garbage"))
 
 
+class CountErrorsTest(unittest.TestCase):
+    def test_counts_only_todays_advisor_errors_and_names_the_last(self):
+        import time as _t
+        now = int(_t.time())
+        rows = [{"ts": now - 90000, "kind": "advisor_error", "error": "Old"},
+                {"ts": now, "kind": "advisor_error", "error": "A"},
+                {"ts": now, "kind": "advisor", "model": "x"},
+                {"ts": now, "kind": "advisor_error", "error": "B"}]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "l.jsonl"
+            p.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+            self.assertEqual(cli.count_errors(p, now=now), (2, "B"))
+
+    def test_missing_log_is_zero(self):
+        self.assertEqual(cli.count_errors(Path("/nonexistent/l.jsonl")), (0, None))
+
+
+class FindSweepsTest(unittest.TestCase):
+    def home(self, root, name, jobs):
+        d = Path(root) / name / "cron"
+        d.mkdir(parents=True)
+        (d / "jobs.json").write_text(json.dumps({"jobs": jobs}))
+        return str(Path(root) / name)
+
+    def test_finds_sweep_jobs_in_every_home_and_ignores_the_rest(self):
+        with tempfile.TemporaryDirectory() as root:
+            a = self.home(root, "a", [{"id": "1", "name": "calling-mom-sweep", "state": "scheduled"},
+                                      {"id": "2", "name": "other", "state": "scheduled"}])
+            b = self.home(root, "b", [{"id": "3", "name": "calling-mom-sweep", "state": "paused"}])
+            found = cli.find_sweeps([a, b, str(Path(root) / "missing")])
+        self.assertEqual(found, [(a, "1", "scheduled"), (b, "3", "paused")])
+
+    def test_unreadable_job_files_are_skipped(self):
+        with tempfile.TemporaryDirectory() as root:
+            d = Path(root) / "h" / "cron"
+            d.mkdir(parents=True)
+            (d / "jobs.json").write_text("{not json")
+            self.assertEqual(cli.find_sweeps([str(Path(root) / "h")]), [])
+
+
 class CommandWiringTest(unittest.TestCase):
     def test_handlers_run_with_injected_io(self):
         s = Script("1", "1", "3", "1")
@@ -276,19 +356,38 @@ class CommandWiringTest(unittest.TestCase):
         env = cli.Env(load=lambda: saved, save=lambda cfg: saved.update(cfg), providers=lambda: LISTING,
                       boards=lambda: ["default"], spent=lambda: {"usd": 0, "tokens": 0, "mom": 0},
                       probe=lambda p, m: None, version="0.22.5", internals=True,
-                      ask=s.ask, say=s.say, cron=lambda: s.say("cron created"), cron_exists=lambda: False)
+                      ask=s.ask, say=s.say, cron=lambda: s.say("cron created"), sweeps=lambda: [])
         self.assertEqual(cli.cmd_setup(env, preset=None, yes=True), 0)
         self.assertEqual(saved["calling_mom"]["sibling"]["provider"], "openrouter")
         self.assertIn("cron created", s.text)
         self.assertEqual(cli.cmd_status(env), 0)
         self.assertEqual(cli.cmd_doctor(env), 0)
 
+    def test_status_uses_the_error_counter_of_the_env(self):
+        s = Script()
+        env = cli.Env(load=lambda: {}, save=lambda c: None, providers=lambda: [], boards=lambda: [],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True,
+                      ask=s.ask, say=s.say, cron=lambda: None, sweeps=lambda: [], errors=lambda: (3, "Boom"))
+        cli.cmd_status(env)
+        self.assertIn("Boom", s.text)
+
+    def test_setup_never_creates_a_second_sweep_job(self):
+        s = Script("1", "1", "3", "1")
+        created = []
+        env = cli.Env(load=lambda: {}, save=lambda cfg: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask,
+                      say=s.say, cron=lambda: created.append(1), sweeps=lambda: [("/root", "2d66", "scheduled")])
+        self.assertEqual(cli.cmd_setup(env, preset=None, yes=True), 0)
+        self.assertEqual(created, [])
+        self.assertIn("already exists", s.text)
+        self.assertIn("2d66", s.text)
+
     def test_setup_without_confirmation_does_not_write(self):
         s = Script("1", "1", "3", "1", "n")
         saved = {}
         env = cli.Env(load=lambda: {}, save=lambda cfg: saved.update(cfg), providers=lambda: LISTING,
                       boards=lambda: ["default"], spent=lambda: {}, probe=lambda p, m: None, version="0.22.5",
-                      internals=True, ask=s.ask, say=s.say, cron=lambda: None, cron_exists=lambda: True)
+                      internals=True, ask=s.ask, say=s.say, cron=lambda: None, sweeps=lambda: [("/h", "j1", "scheduled")])
         self.assertEqual(cli.cmd_setup(env, preset=None, yes=False), 1)
         self.assertEqual(saved, {})
 
@@ -296,7 +395,7 @@ class CommandWiringTest(unittest.TestCase):
         s = Script()
         env = cli.Env(load=lambda: {}, save=lambda c: None, providers=lambda: [], boards=lambda: [],
                       spent=lambda: {}, probe=lambda p, m: None, version="0.1.0", internals=True,
-                      ask=s.ask, say=s.say, cron=lambda: None, cron_exists=lambda: True)
+                      ask=s.ask, say=s.say, cron=lambda: None, sweeps=lambda: [("/h", "j1", "scheduled")])
         self.assertEqual(cli.cmd_doctor(env), 1)
         self.assertIn("FAIL", s.text)
 

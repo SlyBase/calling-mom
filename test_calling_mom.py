@@ -482,6 +482,7 @@ class AdvisorTest(unittest.TestCase):
         plugin.DEFAULTS["advisor"]["boards"] = ["t-board"]
         os.environ["HERMES_KANBAN_BOARD"] = "t-board"
         self.llm = FakeLlm()
+        plugin._down.clear()
         plugin._ctx = NS(llm=self.llm)
         self.tid = with_conn(lambda c: kb.create_task(c, title="fix the parser", body="Make tests pass.", assignee="worker"))
         os.environ["HERMES_KANBAN_TASK"] = self.tid
@@ -1080,9 +1081,39 @@ class ProviderErrorTest(AdvisorTest):
         self.assertNotIn(token, body)
         self.assertLess(len(body), 600)
 
+    def test_a_later_worker_run_does_not_comment_twice(self):
+        """The cooldown is per process; the comment check must hold across runs (new process = empty cooldown)."""
+        plugin._report_unavailable(self.tid, RuntimeError("first run"))
+        plugin._report_unavailable(self.tid, RuntimeError("second run"))
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn("first run", self.comments()[0])
+
+    def test_dead_model_is_not_called_again_during_the_cooldown(self):
+        self.llm.boom = True
+        self.stuck(3)
+        plugin._trackers.clear()
+        self.stuck(3)
+        self.assertEqual(len(self.llm.calls), 1)          # the second question never left
+        self.assertEqual(len(self.comments()), 1)         # and made no second comment
+
+    def test_cooldown_ends_and_a_success_clears_it(self):
+        self.llm.boom = True
+        self.stuck(3)
+        for pair in plugin._down:
+            plugin._down[pair] -= plugin.COOLDOWN_S + 1   # cooldown over
+        self.llm.boom = False
+        plugin._trackers.clear()
+        self.assertIn("[ADVISOR", self.stuck(3))
+        self.assertEqual(plugin._down, {})
+
+    def test_cooldown_is_per_model(self):
+        plugin._down[("openrouter", "other/model")] = plugin.time.time()
+        self.assertIn("[ADVISOR", self.stuck(3))
+
     def test_failure_does_not_eat_the_advice_budget(self):
         self.llm.boom = True
         self.stuck(3)
+        plugin._down.clear()
         self.llm.boom = False
         plugin._trackers.clear()
         for _ in range(plugin.DEFAULTS["advisor"]["max_consults_per_card"]):

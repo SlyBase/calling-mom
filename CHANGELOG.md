@@ -21,6 +21,13 @@ versioning: [SemVer](https://semver.org/).
 - `SECURITY.md` with the threat model, `CONTRIBUTING.md`, issue and PR templates, a compatibility table,
   CI job running the full suite against Hermes `main`.
 
+- **No duplicate sweep cron job.** Cron jobs live per Hermes home (root gateway, each profile), so a profile
+  could not see the root job and `setup` created a second one. `setup` now looks in every home and never
+  creates another; `doctor` warns about several active sweep jobs (names the ids and the fix) or none.
+- A model that just failed is not asked again for 5 minutes (`COOLDOWN_S`): a dead provider no longer delays
+  every critical command of a worker (one card saw 7 failing calls in a minute).
+- `status` shows today's advisor failures and the last cause.
+
 ### Changed
 - The `steps` pace signal is logged but no longer calls the advisor.
 - `kubectl -n prod delete ...` (flags before the verb) is now a critical command.

@@ -118,6 +118,12 @@ _HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"
 _UNAVAILABLE = "[advisor unavailable]"
+COOLDOWN_S = 300  # a model that just failed is not asked again for this long (each dead call delays the worker)
+_down: dict = {}  # (provider, model) -> time of its last failure
+
+
+class _CoolingDown(Exception):
+    """The model failed a moment ago: skip silently, the first failure already left its comment."""
 # `steps` is a pace signal (logged, never a question): it cost one advisor call and returned NO_ACTION
 _CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop"}
 
@@ -607,9 +613,18 @@ def _advise(key, category, signal, note="") -> "str | None":
         gate = gate and mom_used < mom["max_per_card"] and spent["mom"] < mom["max_per_day"]
 
         def ask(r, msgs):
-            return _ctx.llm.complete(msgs, provider=r["provider"], model=r["model"],
-                                     max_tokens=adv["max_output_tokens"], timeout=adv["timeout_s"],
-                                     purpose="kanban-advisor")
+            pair = (r["provider"], r["model"])
+            if time.time() - _down.get(pair, 0) < COOLDOWN_S:
+                raise _CoolingDown()
+            try:
+                out = _ctx.llm.complete(msgs, provider=r["provider"], model=r["model"],
+                                        max_tokens=adv["max_output_tokens"], timeout=adv["timeout_s"],
+                                        purpose="kanban-advisor")
+            except Exception:
+                _down[pair] = time.time()
+                raise
+            _down.pop(pair, None)
+            return out
 
         msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
         is_mom = False
@@ -649,6 +664,8 @@ def _advise(key, category, signal, note="") -> "str | None":
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
         _awaiting_reply.add(key)
         return f"[ADVISOR {res.model}] {text}"
+    except _CoolingDown:
+        return None
     except Exception as exc:
         logger.warning("calling-mom: advisor failed (%s): %s", signal, exc)
         if opted_in:
@@ -953,7 +970,7 @@ def register(ctx) -> None:
     if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
         register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
                      setup_fn=cli.setup_parser,
-                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings),
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path),
                      description="setup: choose sibling/mom from your providers. status: show setup and usage. "
                                  "doctor: check the setup with one real call per model.")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
