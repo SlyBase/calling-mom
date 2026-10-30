@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- Banner shows Mount Olympus small and far above Thetis, reached by a dashed line:
+  mom answers often, olymp (the strongest tier) is asked rarely. Tags `STUCK -> MOM .. OLYMP`.
 - New banner and icon in the Hermes official-plugin style (Thetis answers Achilles),
   shown at the top of the README. Sources and build scripts in `assets/banner-src/`;
   the old SVG generator `tools/make_assets.py` and its assets are removed.
