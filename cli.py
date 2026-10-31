@@ -417,7 +417,7 @@ def _plan(env, cfg, preset, mom, olymp, boards):
         return _result(cfg, pair_mom, pair_olymp, chosen)
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
-                         "optionally --olymp, --boards and --cron/--no-cron, and --yes.")
+                         "optionally --olymp, --boards and --cron/--no-cron.")
     return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes)
 
 
@@ -425,25 +425,20 @@ def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cr
     cfg = env.load()
     try:
         upd, summary = _plan(env, cfg, preset, mom, olymp, boards)
-        if not env.interactive and not yes:
-            raise SetupError("Writing the config needs --yes when there is no terminal to confirm.")
     except SetupError as exc:
         env.say(str(exc))
         return 2
-    env.say("\nThis will be written to your Hermes config:")
+    env.say("\nWriting to your Hermes config:")
     for line in summary:
         env.say("  " + line)
     env.say("  (and the matching plugins.entries.calling-mom.llm allowlist; existing entries stay)")
-    if not yes and env.ask("Write it? [y/N] > ").strip().lower() not in ("y", "yes"):
-        env.say("Nothing written.")
-        return 1
     env.save(apply_updates(cfg, upd))
     env.say("Config written.")
     existing = env.sweeps()
     if existing:  # jobs are per Hermes home: look everywhere, never create a second one
         env.say("A sweep cron job already exists: " + ", ".join(f"{i} ({h}, {st})" for h, i, st in existing)
                 + ". Not creating another.")
-    elif cron is True or (cron is None and (yes or env.ask("Create the 1-minute sweep cron job (catches crash-parked cards, pushes metrics)? [Y/n] > ").strip().lower() in ("", "y", "yes"))):
+    elif cron is True or (cron is None and (yes or not env.interactive or env.ask("Create the 1-minute sweep cron job (catches crash-parked cards, pushes metrics)? [Y/n] > ").strip().lower() in ("", "y", "yes"))):
         env.cron()
     env.say("Next: hermes calling-mom doctor   (makes one real call to each model)")
     return 0
@@ -512,7 +507,7 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     s.add_argument("--boards", metavar="A,B", help="boards that may use the advisor, or * (default: keep, else all)")
     s.add_argument("--cron", action=argparse.BooleanOptionalAction, default=None,
                    help="create the sweep cron job (default: with --yes yes, otherwise ask)")
-    s.add_argument("--yes", action="store_true", help="do not ask before writing")
+    s.add_argument("--yes", action="store_true", help="also create the sweep cron job without asking")
     sub.add_parser("status", help="show the effective setup and today's usage")
     sub.add_parser("doctor", help="check the setup and make one real call to each model")
     parser.set_defaults(cm_cmd=None)

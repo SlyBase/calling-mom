@@ -19,8 +19,10 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   name) and falls back to the numbered list without a terminal. When the *Advanced Delegation* plugin has model
   routes (`delegation.backends.model_map`), `setup` offers them as the source for Mom and Olymp (values are copied
   once, nothing is linked). New flags run it without any question: `--mom`, `--olymp` (`provider/model`,
-  `route:NAME`, `none`), `--boards`, `--cron/--no-cron`, `--yes`. Without a terminal and without the flags it
-  exits with code 2 instead of waiting for input.
+  `route:NAME`, `none`), `--boards`, `--cron/--no-cron`. Without a terminal and without the flags it exits with
+  code 2 instead of waiting for input. The final "Write it? [y/N]" question is gone: you have just chosen the
+  values and the summary is shown, the flags are the consent in script mode; `--yes` now only means "create the
+  sweep cron job without asking".
 - **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
   from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
   `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.

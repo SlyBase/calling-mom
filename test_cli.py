@@ -357,11 +357,12 @@ class AutomaticSetupTest(unittest.TestCase):
         self.assertIn("--mom", s.text)
         self.assertEqual(saved, {})
 
-    def test_without_a_terminal_writing_needs_yes(self):
-        saved = {}
-        e, s = self.env(saved, interactive=False)
-        self.assertEqual(cli.cmd_setup(e, mom="a/b", boards="*"), 2)
-        self.assertIn("--yes", s.text)
+    def test_flags_are_the_consent_so_no_yes_is_needed_without_a_terminal(self):
+        saved, created = {}, []
+        e, s = self.env(saved, interactive=False, created=created)
+        self.assertEqual(cli.cmd_setup(e, mom="a/b", boards="*"), 0)
+        self.assertEqual(saved["calling_mom"]["mom"]["model"], "b")
+        self.assertEqual(created, [1])          # no terminal: nobody to ask, so the cron default applies
 
     def test_olymp_or_boards_without_mom_are_refused(self):
         for kw in ({"olymp": "a/b"}, {"boards": "*"}):
@@ -613,14 +614,15 @@ class CommandWiringTest(unittest.TestCase):
         self.assertIn("already exists", s.text)
         self.assertIn("2d66", s.text)
 
-    def test_setup_without_confirmation_does_not_write(self):
-        s = Script("1", "1", "3", "1", "n")
+    def test_what_you_picked_is_written_without_asking_again(self):
+        s = Script("1", "1", "3", "1")
         saved = {}
         env = cli.Env(load=lambda: {}, save=lambda cfg: saved.update(cfg), providers=lambda: LISTING,
                       boards=lambda: ["default"], spent=lambda: {}, probe=lambda p, m: None, version="0.22.5",
                       internals=True, ask=s.ask, say=s.say, cron=lambda: None, sweeps=lambda: [("/h", "j1", "scheduled")])
-        self.assertEqual(cli.cmd_setup(env, preset=None, yes=False), 1)
-        self.assertEqual(saved, {})
+        self.assertEqual(cli.cmd_setup(env, preset=None, yes=False), 0)
+        self.assertEqual(saved["calling_mom"]["mom"]["provider"], "openrouter")
+        self.assertNotIn("Write it?", s.text)
 
     def test_doctor_returns_one_on_a_failed_check(self):
         s = Script()

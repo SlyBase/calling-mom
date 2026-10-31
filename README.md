@@ -62,20 +62,20 @@ hermes calling-mom doctor    # one real test call to each, tells you what is mis
 ```
 
 `setup` shows a list of your configured providers and models (arrow keys; type `/` to filter by name), asks which
-board may use the helpers, and **asks before it writes anything**. Olymp stays off unless you choose one. If you
+board may use the helpers, and writes exactly what you picked (it shows the summary first). Olymp stays off unless you choose one. If you
 use the *Advanced Delegation* plugin, `setup` also offers your model routes (`fast`, `deep`, ...) so you can take
 Mom or Olymp from one of them instead of picking provider and model again.
 
 No questions at all (scripts, provisioning, no terminal):
 
 ```bash
-hermes calling-mom setup --mom openrouter/deepseek/deepseek-v4.1-flash --olymp none --boards '*' --yes
-hermes calling-mom setup --mom route:fast --olymp route:deep --yes --no-cron
+hermes calling-mom setup --mom openrouter/deepseek/deepseek-v4.1-flash --olymp none --boards '*'
+hermes calling-mom setup --mom route:fast --olymp route:deep --no-cron
 ```
 
 `--mom` and `--olymp` take `provider/model` or `route:NAME`; `--olymp none` switches Olymp off, leaving it out keeps
 what is configured. Without a terminal, `setup` never waits: a missing flag ends it with exit code 2 and says what
-to pass. `hermes calling-mom setup --preset subscription --yes` still works too.
+to pass. `--yes` also creates the sweep cron job without asking. `hermes calling-mom setup --preset subscription` still works too.
 
 | Command | What it does |
 |---|---|
@@ -100,7 +100,7 @@ If a helper cannot be reached (dead key, not logged in) you get **one** comment,
 - **`[local-only]` on a card always wins**: nothing from that card is sent anywhere.
 - Secrets (tokens, keys, passwords, credentials in URLs) are **blanked out** before anything is sent.
 - Olymp is limited by **number of calls**, so a subscription never surprises you. Mom has a daily dollar and token cap.
-- The plugin never changes your config by itself. Only `setup` does, after you confirm.
+- The plugin never changes your config by itself. Only `setup` does, and only with the values you picked.
 
 More in [SECURITY.md](SECURITY.md).
 
