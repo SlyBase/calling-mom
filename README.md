@@ -62,9 +62,8 @@ hermes calling-mom doctor    # one real test call to each, tells you what is mis
 ```
 
 `setup` shows a list of your configured providers and models (arrow keys; type `/` to filter by name), asks which
-board may use the helpers, and writes exactly what you picked (it shows the summary first). Olymp stays off unless you choose one. If you
-use the *Advanced Delegation* plugin, `setup` also offers your model routes (`fast`, `deep`, ...) so you can take
-Mom or Olymp from one of them instead of picking provider and model again.
+board may use the helpers, and writes exactly what you picked (it shows the summary first). Olymp stays off unless you choose one. Already
+use *Advanced Delegation*? See [below](#optional-reuse-your-advanced-delegation-models).
 
 No questions at all (scripts, provisioning, no terminal):
 
@@ -75,7 +74,23 @@ hermes calling-mom setup --mom route:fast --olymp route:deep --no-cron
 
 `--mom` and `--olymp` take `provider/model` or `route:NAME`; `--olymp none` switches Olymp off, leaving it out keeps
 what is configured. Without a terminal, `setup` never waits: a missing flag ends it with exit code 2 and says what
-to pass. `--yes` also creates the sweep cron job without asking. `hermes calling-mom setup --preset subscription` still works too.
+to pass. `hermes calling-mom setup --preset subscription` still works too. `setup` also creates the sweep cron job
+(`calling-mom: sweep - ...`, once; skip it with `--no-cron`).
+
+### Optional: reuse your Advanced Delegation models
+
+If you use the official [*Advanced Delegation*](https://hermes-agent.nousresearch.com/docs/plugins/advanced-delegation)
+plugin, you already named your models there (`fast`, `deep`, `local` ...). `setup` reads those model routes and
+offers them as the source for Mom and Olymp, so you do not pick provider and model a second time:
+
+```bash
+hermes calling-mom setup                                      # asks "one of your delegation routes, or by hand?"
+hermes calling-mom setup --mom route:fast --olymp route:deep  # no questions
+```
+
+Good to know: the values are **copied once**, nothing stays linked, so changing a route later does not change
+Mom or Olymp (run `setup` again for that). A route needs both a provider and a model; routes with only a
+`base_url` are not offered. Without Advanced Delegation nothing changes, it is entirely optional.
 
 | Command | What it does |
 |---|---|
@@ -125,7 +140,6 @@ Kill switch: set `CALLING_MOM=off`. Every other option is in the [technical refe
 | `[advisor unavailable]` in a card | `hermes calling-mom doctor` names the cause (key limit, login, missing grant). |
 | Nothing happens at all | `hermes calling-mom status`: is a board opted in? Is the advisor on? |
 | Two sweep cron jobs | `doctor` lists them. `setup` never creates a second one. |
-| Config from an early version (`sibling`) | The names changed; run `hermes calling-mom setup` once. |
 
 ## More
 

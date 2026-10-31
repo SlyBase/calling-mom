@@ -161,6 +161,12 @@ class FlagsTest(unittest.TestCase):
 
 
 class UpdatesTest(unittest.TestCase):
+    def test_star_means_all_boards_and_replaces_single_names(self):
+        cfg = {"calling_mom": {"advisor": {"boards": ["default", "coding"]}}}
+        self.assertEqual(cli.updates((SUB, "m"), None, ["*"], cfg)["calling_mom.advisor.boards"], ["*"])
+        cfg = {"calling_mom": {"advisor": {"boards": ["*"]}}}
+        self.assertEqual(cli.updates((SUB, "m"), None, ["coding"], cfg)["calling_mom.advisor.boards"], ["*"])
+
     def test_mom_and_olymp_pairs_and_allowlists(self):
         upd = cli.updates((SUB, "claude-sonnet-5-5"), (SUB, "claude-opus-5-5"), ["coding"], {})
         self.assertEqual(upd["calling_mom.mom.model"], "claude-sonnet-5-5")
@@ -190,13 +196,6 @@ class UpdatesTest(unittest.TestCase):
         self.assertEqual(upd["calling_mom.olymp.model"], "")
         self.assertEqual(upd["calling_mom.olymp.provider"], "")
         self.assertNotIn("claude-opus-5-5", upd["plugins.entries.calling-mom.llm.allowed_models"])
-
-    def test_setup_removes_the_pre_release_sibling_block(self):
-        cfg = {"calling_mom": {"sibling": {"model": "a", "provider": "b"}, "mom": {"model": "old-expensive", "provider": "p"}}}
-        out = cli.apply_updates(cfg, cli.updates((SUB, "claude-sonnet-5-5"), None, [], cfg))
-        self.assertNotIn("sibling", out["calling_mom"])
-        self.assertEqual(out["calling_mom"]["mom"]["model"], "claude-sonnet-5-5")   # the old expensive entry is replaced
-        self.assertEqual(out["calling_mom"]["olymp"]["model"], "")
 
     def test_apply_creates_nested_keys_and_keeps_the_rest(self):
         cfg = {"keep": 1, "calling_mom": {"marker": "[crit]"}}
@@ -412,10 +411,6 @@ class StatusTest(unittest.TestCase):
         text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "olymp": 0}, (0, None)))
         self.assertNotIn("errors", text)
 
-    def test_leftover_sibling_block_is_flagged_in_status(self):
-        cfg = {**self.CFG, "sibling": {"model": "a", "provider": "b"}}
-        self.assertIn("renamed", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "olymp": 0})))
-
     def test_olymp_off_is_said_plainly(self):
         cfg = {**self.CFG, "olymp": {"model": "", "provider": "", "max_per_card": 1, "max_per_day": 6}}
         self.assertIn("off", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "olymp": 0})).lower())
@@ -519,16 +514,6 @@ class DoctorTest(unittest.TestCase):
 
     def test_only_a_paused_job_is_a_warning(self):
         self.assertEqual(self.by_name(self.run_doctor(sweeps=[("/h", "p", "paused")]))["sweep cron"][0], "warn")
-
-    def test_leftover_sibling_block_is_a_warning_that_explains_the_rename(self):
-        cfg = self.cfg(sibling={"model": "a", "provider": "b"})
-        s, d = self.by_name(self.run_doctor(cfg))["old names"]
-        self.assertEqual(s, "warn")
-        self.assertIn("renamed", d)
-        self.assertIn("setup", d)
-
-    def test_no_old_names_no_extra_check(self):
-        self.assertNotIn("old names", self.by_name(self.run_doctor()))
 
     def test_exit_code_counts_failures_only(self):
         self.assertEqual(cli.exit_code([("a", "ok", ""), ("b", "warn", "")]), 0)

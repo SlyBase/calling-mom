@@ -16,6 +16,6 @@ The plugin runs inside a Hermes Kanban worker and talks to LLM providers. Assets
 | **Model override** lets a plugin call any model on your credentials. | Cost and data exposure. | Hermes grants it only through `plugins.entries.calling-mom.llm.allowed_models/allowed_providers`. `hermes calling-mom setup` only ever **adds** entries and shows what it writes. |
 | **Runaway spend.** | A loop could call the expensive model. | Olymp: hard limits per card and per day (calls). Mom: per-card budgets, daily USD and token caps. Failures are fail-open (the worker continues). |
 | **Observation log** | A log is a data store. | It stores hashes, counts and tool names, no content. |
-| **Config** | A plugin that edits config is a risk. | Only the commands you run yourself (`setup`) write config, after confirmation. Hooks never do. |
+| **Config** | A plugin that edits config is a risk. | Only the commands you run yourself (`setup`) write config, with the values you picked. Hooks never do. |
 
 Out of scope: the security of Hermes itself and of the providers you configure.

@@ -133,6 +133,12 @@ def _merge_list(old, new):
     return out
 
 
+def _boards(old, new):
+    """Opted-in boards only grow, but ``*`` already means all of them."""
+    merged = _merge_list(old, new)
+    return ["*"] if "*" in merged else merged
+
+
 def _get(cfg, dotted, default=None):
     for part in dotted.split("."):
         if not isinstance(cfg, dict) or part not in cfg:
@@ -148,13 +154,11 @@ def updates(mom, olymp, boards, cfg) -> dict:
         "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
         "calling_mom.olymp.provider": olymp[0] if olymp else "", "calling_mom.olymp.model": olymp[1] if olymp else "",
         "calling_mom.advisor.enabled": True,
-        "calling_mom.advisor.boards": _merge_list(_get(cfg, "calling_mom.advisor.boards", []), boards),
+        "calling_mom.advisor.boards": _boards(_get(cfg, "calling_mom.advisor.boards", []), boards),
         LLM_KEY + "allow_model_override": True, LLM_KEY + "allow_provider_override": True,
         LLM_KEY + "allowed_models": _merge_list(_get(cfg, LLM_KEY + "allowed_models", []), [m for _, m in pairs]),
         LLM_KEY + "allowed_providers": _merge_list(_get(cfg, LLM_KEY + "allowed_providers", []), [p for p, _ in pairs]),
     }
-    if "sibling" in (_get(cfg, "calling_mom", {}) or {}):  # pre-release name of the cheap tier (now `mom`): drop it
-        upd["calling_mom.sibling"] = None
     return upd
 
 
@@ -165,10 +169,7 @@ def apply_updates(cfg, upd) -> dict:
         *path, last = dotted.split(".")
         for part in path:
             node = node.setdefault(part, {})
-        if value is None:  # None = remove the key
-            node.pop(last, None)
-        else:
-            node[last] = value
+        node[last] = value
     return out
 
 
@@ -275,8 +276,6 @@ def status_lines(cm, spent, errors=None) -> list:
     lines.append(f"advisor : {'on' if adv.get('enabled') else 'OFF'}, boards: {', '.join(boards) or '(none)'}")
     if adv.get("enabled") and not boards:
         lines.append("warning : advisor is on but no board is opted in, nothing is sent (run: hermes calling-mom setup)")
-    if "sibling" in cm:
-        lines.append("warning : 'sibling' was renamed to 'mom' and the old 'mom' to 'olymp'; run: hermes calling-mom setup")
     if errors and errors[0]:
         lines.append(f"errors  : {errors[0]} advisor call(s) failed today, last: {errors[1]}. Run: hermes calling-mom doctor")
     lines.append(f"spend   : ${spent.get('usd', 0):.4f} / ${adv.get('daily_usd_cap', '?')}, "
@@ -348,9 +347,6 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
         what = ([] if flags else ["allow_*_override is off"]) + [f"model {m}" for m in miss_m] + [f"provider {p}" for p in miss_p]
         add("allowlist", "fail", "not granted: " + ", ".join(what) + " (fix: hermes calling-mom setup)")
     static_ok = all(status == "ok" for _, status, _ in out)
-    if "sibling" in cm:  # pre-release names: sibling -> mom, old mom -> olymp. The old `mom` block would now be read as the cheap tier!
-        add("old names", "warn", "'sibling' was renamed to 'mom' and the old 'mom' to 'olymp': your 'mom' block may hold "
-            "the expensive model. Run: hermes calling-mom setup (rewrites the keys)")
     adv = cm.get("advisor") or {}
     if adv.get("enabled") and adv.get("boards"):
         add("advisor", "ok", "boards: " + ", ".join(adv["boards"]))

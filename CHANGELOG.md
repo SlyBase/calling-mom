@@ -28,6 +28,7 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   A job created by an earlier version under the name `calling-mom-sweep` is not recognised any more: rename it
   (`hermes cron edit <id> --name "calling-mom: sweep - escalate parked cards, push metrics"`) or remove it before
   running `setup`, otherwise `setup` creates a second one.
+- Picking `*` (all boards) in `setup` now replaces single board names in the list instead of sitting next to them.
 - **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
   from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
   `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.
@@ -37,7 +38,7 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
 ## [1.3.0] - 2026-10-30
 
 ### Added
-- **Two tiers: mom and olymp** (the names changed during the 1.3.0 preview: `sibling` is now `mom`, the old `mom` is now `olymp`; `setup` rewrites old config). `mom.{model,provider}` is the cheap tier (the old top-level pair still
+- **Two tiers: mom and olymp**. `mom.{model,provider}` is the cheap tier (the old top-level pair still
   works). `olymp.{model,provider}` (empty = off) is the expensive tier. For `olymp.categories` (default
   `architecture`) the mom answers first and writes `ESCALATE: <reason>` only for a rare high-stakes case;
   only then olymp is asked. Olymp is limited by calls (`olymp.max_per_card` 1, `olymp.max_per_day` 6), exempt from the
