@@ -30,7 +30,6 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -122,8 +121,10 @@ _REFUTED = re.compile(
     r"does(n't| not) apply|is (wrong|incorrect)", re.I)
 _HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
-ADVISOR = "advisor"
+ADVISOR = "advisor"  # author of comments written by versions before 1.3.1; new ones carry the worker's profile
 _UNAVAILABLE = "[advisor unavailable]"
+# an advisor comment is recognised by its text, whoever signed it
+_IS_ADVICE = "author = 'advisor' OR body LIKE '[advisor unavailable]%' OR body LIKE '[%/%] run %'"
 COOLDOWN_S = 300  # a model that just failed is not asked again for this long (each dead call delays the worker)
 _down: dict = {}  # (provider, model) -> time of its last failure
 
@@ -596,8 +597,8 @@ def _advise(key, category, signal, note="") -> "str | None":
             opted_in = True
             # Get the latest operator comment (current subtask)
             latest_comment = conn.execute(
-                "SELECT body FROM task_comments WHERE task_id = ? AND author != ? ORDER BY created_at DESC LIMIT 1",
-                (task.id, ADVISOR),
+                f"SELECT body FROM task_comments WHERE task_id = ? AND NOT ({_IS_ADVICE}) ORDER BY created_at DESC LIMIT 1",
+                (task.id,),
             ).fetchone()
             latest_comment = latest_comment[0] if latest_comment else None
             # Get the previous run results (context for what was already done)
@@ -609,14 +610,14 @@ def _advise(key, category, signal, note="") -> "str | None":
                 ).fetchall()
             ]
             used = conn.execute(  # budgets live in the board: durable, visible, restart-proof
-                f"SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND {where}",
-                (task.id, ADVISOR, *params),
+                f"SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND {where}",
+                (task.id, *params),
             ).fetchone()[0]
             if used >= limit:
                 return None
             olymp_used = conn.execute(
-                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE '%, olymp)%'",
-                (task.id, ADVISOR),
+                "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND body LIKE '[%/%] run %, olymp)%'",
+                (task.id,),
             ).fetchone()[0]
         spent = _spent_today()
         if spent["usd"] >= adv["daily_usd_cap"] or spent["tokens"] >= adv["daily_token_cap"]:
@@ -663,13 +664,9 @@ def _advise(key, category, signal, note="") -> "str | None":
                        tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
-        with _connect() as conn:
-            cid = kb.add_comment(
-                conn, task.id, ADVISOR,
-                f"[{category}/{signal}] run {key[1] or '?'} · {res.model} ({route['provider']}{', olymp' if is_olymp else ''}): "
-                f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}",
-            )
-            _skip_relay(conn, task.id, cid)
+        _post_comment(task.id, f"[{category}/{signal}] run {key[1] or '?'} · {res.model} "
+                      f"({route['provider']}{', olymp' if is_olymp else ''}): "
+                      f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}")
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                    provider=route["provider"], olymp=is_olymp,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
@@ -692,29 +689,34 @@ def _report_unavailable(task_id, exc) -> None:
 
         _trace_row("advisor_error", task=task_id, error=type(exc).__name__)
         with _connect() as conn:
-            if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE ?",
-                            (task_id, ADVISOR, _UNAVAILABLE + "%")).fetchone():
+            if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ?",
+                            (task_id, _UNAVAILABLE + "%")).fetchone():
                 return
-            reason = redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
-            cid = kb.add_comment(conn, task_id, ADVISOR,
-                                 f"{_UNAVAILABLE} {reason}\nThe card continues without advice. Check the setup: hermes calling-mom doctor")
-            _skip_relay(conn, task_id, cid)
+        reason = redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
+        _post_comment(task_id, f"{_UNAVAILABLE} {reason}\nThe card continues without advice. "
+                               "Check the setup: hermes calling-mom doctor")
     except Exception as err:  # pragma: no cover - reporting must never break the worker
         logger.warning("calling-mom: could not report advisor failure: %s", err)
 
 
-def _skip_relay(conn, task_id, comment_id) -> None:
-    """The worker's comment bridge would re-send this comment as an 'operator' note, although the
-    advice is already in the tool result. Move its watermark past it, unless an unread note waits."""
-    # ponytail: private watermark of tools.kanban_tools; if it moves, advice is delivered twice again
-    bridge = sys.modules.get("tools.kanban_tools")
-    marks = getattr(bridge, "_comment_watermark", None)
-    if not isinstance(marks, dict) or task_id not in marks:
-        return  # not seeded yet: the first poll takes everything up to here as already known
-    unread = conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND id > ? AND id < ?",
-                          (task_id, marks[task_id], comment_id)).fetchone()
-    if not unread:
-        marks[task_id] = comment_id
+def _post_comment(task_id, body) -> bool:
+    """Write an advisor comment through the PUBLIC ``kanban_comment`` tool (``ctx.dispatch_tool``).
+
+    The tool signs with the worker's own profile, and Hermes' comment relay skips a worker's own comments,
+    so the advice (already in the tool result) is not delivered a second time as an "operator" note.
+    Fail-open: a missing tool or a failed write never costs the worker its advice."""
+    dispatch = getattr(_ctx, "dispatch_tool", None)
+    if dispatch is None:  # Hermes older than the plugin floor
+        return False
+    try:
+        out = json.loads(dispatch("kanban_comment", {"task_id": task_id, "body": body}) or "{}")
+    except Exception as exc:
+        logger.warning("calling-mom: advisor comment failed: %s", exc)
+        return False
+    if isinstance(out, dict) and out.get("error"):
+        logger.warning("calling-mom: advisor comment refused: %s", str(out["error"])[:200])
+        return False
+    return True
 
 
 _VERIFY_LINE = re.compile(r"(?im)^\s*verify:\s*(.+?)\s*$")

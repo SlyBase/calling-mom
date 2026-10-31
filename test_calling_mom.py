@@ -6,6 +6,7 @@
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,15 @@ def load_plugin():
 plugin = load_plugin()
 STRONG = plugin.settings()["model"]
 PROVIDER = plugin.settings()["provider"]
+
+
+ADVICE = re.compile(r"^\[(?:\w+/\w+\] run |advisor unavailable\])")
+
+
+def advice_comments(tid):
+    """Advisor comments of a card. Recognised by their text: the public kanban_comment tool writes them
+    under the worker's own profile, older versions wrote author `advisor`."""
+    return [c for c in with_conn(lambda conn: kb.list_comments(conn, tid)) if ADVICE.match(c.body or "")]
 
 
 def with_conn(fn):
@@ -483,9 +493,18 @@ class AdvisorTest(unittest.TestCase):
         os.environ["HERMES_KANBAN_BOARD"] = "t-board"
         self.llm = FakeLlm()
         plugin._down.clear()
-        plugin._ctx = NS(llm=self.llm)
+        self.dispatched = []
+        plugin._ctx = NS(llm=self.llm, dispatch_tool=self.dispatch_tool)
         self.tid = with_conn(lambda c: kb.create_task(c, title="fix the parser", body="Make tests pass.", assignee="worker"))
         os.environ["HERMES_KANBAN_TASK"] = self.tid
+
+    def dispatch_tool(self, name, args, **kw):
+        """Stands in for ctx.dispatch_tool: like the real kanban_comment tool it signs with the worker's profile."""
+        self.dispatched.append((name, dict(args)))
+        if name != "kanban_comment":
+            return json.dumps({"error": "unknown tool"})
+        with_conn(lambda c: kb.add_comment(c, args["task_id"], "worker", args["body"]))
+        return json.dumps({"ok": True})
 
     def tearDown(self):
         plugin.DEFAULTS.clear(); plugin.DEFAULTS.update(self.saved)
@@ -522,7 +541,7 @@ class AdvisorTest(unittest.TestCase):
             self.stuck(3)
         self.assertEqual(len(self.llm.calls), plugin.DEFAULTS["advisor"]["max_consults_per_card"])
         comments = with_conn(lambda c: kb.list_comments(c, self.tid))
-        self.assertEqual(sum(1 for x in comments if x.author == "advisor"), 3)
+        self.assertEqual(len(advice_comments(self.tid)), 3)
         self.assertIn("1800 in / 120 out", comments[-1].body)
 
     def test_category_picks_its_own_model(self):
@@ -707,8 +726,7 @@ class NoActionTest(AdvisorTest):
     def test_no_action_answer_is_dropped_silently(self):
         self.llm._res.text = "NO_ACTION"
         self.assertIsNone(self.stuck(3))
-        comments = with_conn(lambda c: kb.list_comments(c, self.tid))
-        self.assertFalse([x for x in comments if x.author == "advisor"])
+        self.assertEqual(advice_comments(self.tid), [])
         rows = [json.loads(x) for x in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
         self.assertTrue([r for r in rows if r.get("kind") == "advisor" and r.get("noop")])
 
@@ -720,32 +738,56 @@ class NoActionTest(AdvisorTest):
 
 
 class DeliveryTest(AdvisorTest):
-    """Audit: advice arrived twice (tool result + relayed as an 'operator' note) and outlived its run."""
+    """Advice is delivered once, through public Hermes surfaces only (catalog rule 9)."""
 
-    def setUp(self):
-        super().setUp()
-        from tools import kanban_tools
-        self.wm = kanban_tools._comment_watermark
-        self.wm.clear()
-
-    def last_comment_id(self):
-        return with_conn(lambda c: c.execute("SELECT MAX(id) FROM task_comments WHERE task_id=?", (self.tid,)).fetchone()[0])
-
-    def test_advice_is_not_relayed_again_as_an_operator_note(self):
-        self.wm[self.tid] = 0  # the worker's comment bridge has seeded its watermark
+    def test_advice_is_written_with_the_public_kanban_comment_tool(self):
         self.stuck(3)
-        self.assertEqual(self.wm[self.tid], self.last_comment_id())
+        name, args = self.dispatched[-1]
+        self.assertEqual((name, args["task_id"]), ("kanban_comment", self.tid))
+        self.assertTrue(args["body"].startswith("[error/same_error] run 1"))
+        self.assertEqual(len(advice_comments(self.tid)), 1)
 
-    def test_an_unread_operator_note_still_reaches_the_worker(self):
-        self.wm[self.tid] = 0
+    def test_the_plugin_never_touches_private_kanban_tool_state(self):
+        src = (PLUGIN_DIR / "__init__.py").read_text()
+        self.assertNotIn("_comment_watermark", src)
+        self.assertNotIn("tools.kanban_tools", src)
+
+    def test_a_comment_by_the_workers_own_profile_is_not_relayed_by_hermes(self):
+        """The relay skips the worker's own comments by author; that is what makes a watermark hack unnecessary."""
+        self.stuck(3)
+        self.assertEqual(advice_comments(self.tid)[0].author, "worker")
+
+    def test_failed_comment_write_still_delivers_the_advice(self):
+        plugin._ctx.dispatch_tool = lambda name, args, **kw: json.dumps({"error": "board locked"})
+        self.assertIn("[ADVISOR", self.stuck(3))
+
+    def test_a_raising_comment_write_still_delivers_the_advice(self):
+        def boom(name, args, **kw):
+            raise RuntimeError("down")
+        plugin._ctx.dispatch_tool = boom
+        self.assertIn("[ADVISOR", self.stuck(3))
+
+    def test_hermes_without_dispatch_tool_still_delivers_the_advice(self):
+        plugin._ctx = type(plugin._ctx)(llm=self.llm)
+        self.assertIn("[ADVISOR", self.stuck(3))
+
+    def test_comments_of_older_versions_still_count_against_the_budget(self):
+        for _ in range(plugin.DEFAULTS["advisor"]["max_consults_per_card"]):
+            with_conn(lambda c: kb.add_comment(c, self.tid, "advisor", "[error/same_error] run 1 · m (p): 1 in / 1 out\nold"))
+        self.assertIsNone(self.stuck(3))
+        self.assertEqual(self.llm.calls, [])
+
+    def test_the_latest_operator_note_ignores_advice_comments(self):
         with_conn(lambda c: kb.add_comment(c, self.tid, "user", "please also bump the version"))
         self.stuck(3)
-        self.assertEqual(self.wm[self.tid], 0)
+        plugin._trackers.clear()
+        self.stuck(3)                       # the first advice is now the newest comment
+        self.assertIn("please also bump the version", self.llm.calls[-1]["messages"][1]["content"])
 
     def test_comment_names_the_run_and_hides_a_zero_cost(self):
         self.llm._res.usage.cost_usd = 0.0
         self.stuck(3)
-        body = with_conn(lambda c: kb.list_comments(c, self.tid))[-1].body
+        body = advice_comments(self.tid)[-1].body
         self.assertIn("run 1", body)
         self.assertNotIn("$0.0000", body)
 
@@ -916,7 +958,7 @@ class TwoTierTest(AdvisorTest):
         return plugin.on_tool_result(tool_name="terminal", args={"command": cmd}, result="r", status="ok")
 
     def comments(self):
-        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
+        return [c.body for c in advice_comments(self.tid)]
 
     def test_routine_critical_change_is_answered_by_the_mom_alone(self):
         self.seq("Fine, nothing irreversible.")
@@ -1059,7 +1101,7 @@ class ProviderErrorTest(AdvisorTest):
     """A dead provider must not be silent: ONE visible comment per card, the worker is not disturbed."""
 
     def comments(self):
-        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid)) if c.author == "advisor"]
+        return [c.body for c in advice_comments(self.tid)]
 
     def test_failure_leaves_one_comment_and_does_not_touch_the_result(self):
         self.llm.boom = True

@@ -3,6 +3,19 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.3.1] - 2026-10-31
+
+Catalog-readiness: use only public Hermes surfaces for the advisor comment.
+
+### Changed
+- Advisor comments are written through the public `kanban_comment` tool (`ctx.dispatch_tool`) instead of the
+  board database, and the write into Hermes' private `tools.kanban_tools._comment_watermark` is gone (catalog
+  rule 9). The tool signs with the worker's own profile and Hermes' comment relay skips a worker's own comments,
+  so advice still reaches the worker once. Advisor comments are recognised by their text (`[category/signal] run`,
+  `[advisor unavailable]`); comments of older versions (author `advisor`) still count. A comment that cannot be
+  written never costs the worker its advice.
+- `plugin.yaml` declares `requires_hermes: ">=0.22"` (catalog rule 14).
+
 ## [1.3.0] - 2026-10-30
 
 ### Added
