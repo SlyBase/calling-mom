@@ -15,6 +15,11 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   `[advisor unavailable]`); comments of older versions (author `advisor`) still count. A comment that cannot be
   written never costs the worker its advice.
 - `plugin.yaml` declares `requires_hermes: ">=0.22"` (catalog rule 14).
+- **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
+  from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
+  `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.
+  If a Hermes update removes something, the plugin still loads, registers no hooks, logs the missing module once
+  and `hermes calling-mom doctor` says so, instead of failing at import time.
 
 ## [1.3.0] - 2026-10-30
 

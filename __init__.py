@@ -34,10 +34,15 @@ import time
 from collections import deque
 from pathlib import Path
 
-from hermes_cli import kanban_db as kb
-from hermes_cli import kanban_db_boards as kbb
-
 logger = logging.getLogger(__name__)
+
+try:
+    from . import _core  # the one door to Hermes internals
+except ImportError:  # loaded by path (tests, plugin doctor): no package context
+    _core_spec = importlib.util.spec_from_file_location("calling_mom_core", Path(__file__).with_name("_core.py"))
+    _core = importlib.util.module_from_spec(_core_spec)
+    _core_spec.loader.exec_module(_core)
+kb, kbb = _core.kb, _core.kbb
 
 try:
     from . import signals
@@ -158,13 +163,7 @@ def _merge(default, override):
 
 def settings() -> dict:
     """DEFAULTS overlaid with the profile's ``calling_mom`` block (type-guarded)."""
-    try:
-        from hermes_cli.config import load_config
-
-        raw = (load_config() or {}).get("calling_mom") or {}
-    except Exception as exc:  # pragma: no cover - config is best effort
-        logger.debug("calling-mom: config read failed: %s", exc)
-        raw = {}
+    raw = _core.load_config().get("calling_mom") or {}
     cfg = _merge(DEFAULTS, raw)
     mom = raw.get("mom") if isinstance(raw.get("mom"), dict) else {}
     if mom.get("model") and mom.get("provider"):  # the mom block names the cheap tier; a half pair is ignored
@@ -180,16 +179,12 @@ class _connect:
     """Board-pinned DB connection: enter the board scope, then open the DB."""
 
     def __init__(self, board=None):
-        from hermes_cli import kanban_db as kb
-
         self._stack = contextlib.ExitStack()
         if board:
             self._stack.enter_context(kb.scoped_current_board(board))
 
     def __enter__(self):
-        from hermes_cli import kanban_db_connect as kbc
-
-        return self._stack.enter_context(kbc.connect_closing())
+        return self._stack.enter_context(_core.kbc.connect_closing())
 
     def __exit__(self, *exc):
         return self._stack.__exit__(*exc)
@@ -198,8 +193,6 @@ class _connect:
 def _pin_strong(conn, task, why: str, reason: str = "other") -> None:
     """Pin the card to the strong model. ``reason`` feeds the escalation metric:
     ``crit`` (marker at claim), ``blocked`` (worker gave up), ``breaker`` (crash park)."""
-    from hermes_cli import kanban_db as kb
-
     cfg = settings()
     kb.set_model_override(conn, task.id, cfg["model"], provider=cfg["provider"])
     kb.add_comment(conn, task.id, AUTHOR, f"Escalated to {cfg['model']} — {why}.")
@@ -211,8 +204,6 @@ def on_claimed(task_id=None, board=None, **_):
     """Rule 2: pin ``[crit]`` cards to the strong model before the spawn."""
     if not _enabled() or not task_id:
         return
-    from hermes_cli import kanban_db as kb
-
     try:
         with _connect(board) as conn:
             task = kb.get_task(conn, task_id)
@@ -228,22 +219,15 @@ def on_claimed(task_id=None, board=None, **_):
 
 def _profile_runs_strong() -> bool:
     """True when this process's own profile already uses the strong model (e.g. the reviewer profile)."""
-    try:
-        from hermes_cli.config import load_config
-
-        model = (load_config() or {}).get("model") or {}
-        current = model.get("default") if isinstance(model, dict) else model
-        return current == settings()["model"]
-    except Exception:
-        return False
+    model = _core.load_config().get("model") or {}
+    current = model.get("default") if isinstance(model, dict) else model
+    return current == settings()["model"]
 
 
 def on_blocked(task_id=None, board=None, reason=None, **_):
     """The weak model gave up. Ladder: (optional) more thinking -> strong model -> human."""
     if not _enabled() or not task_id or _profile_runs_strong():
         return
-    from hermes_cli import kanban_db as kb
-
     try:
         with _connect(board) as conn:
             task = kb.get_task(conn, task_id)
@@ -323,8 +307,6 @@ def sweep(board=None) -> list:
     """
     if not _enabled():
         return []
-    from hermes_cli import kanban_db as kb
-
     done = []
     try:
         with _connect(board) as conn:
@@ -361,8 +343,6 @@ def sweep(board=None) -> list:
 
 def sweep_all() -> list:
     """Sweep every live board (entry point of the cron script)."""
-    from hermes_cli import kanban_db_boards as kbb
-
     escalated = []
     for meta in kbb.list_boards(include_archived=False):
         escalated += sweep(meta["slug"])
@@ -536,8 +516,6 @@ _GATE = ("\n\nYou are the FIRST reviewer; a far more expensive reviewer exists. 
 
 
 def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_runs=None) -> list:
-    from agent.redact import redact_for_egress
-
     lines = [f"- {s['tool']}({s['args']}) -> {'ok' if s['ok'] else 'ERROR'}: {s['text']}" for s in steps or ()]
     user = f"Task: {task.title}\n{(task.body or '')[:1500]}\n"
     # Add current subtask (latest operator comment)
@@ -551,7 +529,7 @@ def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_
     user += f"\nStuck signal: {signal}\nLast steps:\n" + "\n".join(lines)
     if note:
         user += f"\n\nDetails:\n{note}"
-    user = redact_for_egress(_URL_CREDS.sub(r"\1***@", user))  # Hermes' redactor misses scheme://user:pass@host
+    user = _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", user))  # Hermes' redactor misses scheme://user:pass@host
     if len(user) > limit:  # keep the task head and the most recent steps
         head = limit // 3
         user = user[:head] + "\n...\n" + user[-(limit - head - 5):]
@@ -565,8 +543,6 @@ def _advise(key, category, signal, note="") -> "str | None":
     adv = cfg["advisor"]
     if not adv["enabled"] or _ctx is None:
         return None
-    from hermes_cli import kanban_db as kb
-
     # model and provider only travel as a PAIR: a half pair would send one provider's model id to another
     ov = {k: v for k, v in (cfg["categories"].get(category) or {}).items() if k in ("model", "provider") and v}
     if len(ov) == 1:
@@ -685,14 +661,12 @@ def _report_unavailable(task_id, exc) -> None:
     """ONE visible comment per card when the advisor model cannot be reached (dead key, no login, ...).
     Without it the card just runs on without advice and nobody learns why."""
     try:
-        from agent.redact import redact_for_egress
-
         _trace_row("advisor_error", task=task_id, error=type(exc).__name__)
         with _connect() as conn:
             if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ?",
                             (task_id, _UNAVAILABLE + "%")).fetchone():
                 return
-        reason = redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
+        reason = _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
         _post_comment(task_id, f"{_UNAVAILABLE} {reason}\nThe card continues without advice. "
                                "Check the setup: hermes calling-mom doctor")
     except Exception as err:  # pragma: no cover - reporting must never break the worker
@@ -730,8 +704,6 @@ def _verify_gate(key):
     fixes it; after ``max_fix`` failures point to ``kanban_block`` (which escalates);
     two more failures later fail open so a broken check never traps a worker.
     """
-    from hermes_cli import kanban_db as kb
-
     with _connect() as conn:
         task = kb.get_task(conn, key[0])
     match = _VERIFY_LINE.search(task.body or "") if task else None
@@ -788,8 +760,6 @@ def _review_redirect(key, args):
     reviewer = cfg["reviewer"]
     if not reviewer or os.environ.get("HERMES_PROFILE") == reviewer or key in _redirected:
         return None
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.profiles import profile_exists
 
     with _connect() as conn:
         task = kb.get_task(conn, key[0])
@@ -797,7 +767,7 @@ def _review_redirect(key, args):
             return None
         if cfg["marker"].lower() not in f"{task.title or ''}\n{task.body or ''}".lower():
             return None
-        if not profile_exists(reviewer):
+        if not _core.profile_exists(reviewer):
             logger.warning("calling-mom: reviewer profile %r is not installed", reviewer)
             return None
         metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else None
@@ -967,6 +937,16 @@ def on_api_response(assistant_message=None, **_):
 def register(ctx) -> None:
     global _ctx
     _ctx = ctx
+    register_cli = getattr(ctx, "register_cli_command", None)
+    if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
+        register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
+                     setup_fn=cli.setup_parser,
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core),
+                     description="setup: choose mom/olymp from your providers. status: show setup and usage. "
+                                 "doctor: check the setup with one real call per model.")
+    if _core.ERROR:  # a Hermes update removed something we use: no hooks, but `doctor` still runs; say why once
+        logger.warning("calling-mom: not active, %s. Run: hermes calling-mom doctor", _core.ERROR)
+        return
     ctx.register_hook("kanban_task_claimed", on_claimed)
     ctx.register_hook("kanban_task_blocked", on_blocked)
     ctx.register_hook("transform_tool_result", on_tool_result)
@@ -986,13 +966,6 @@ def register(ctx) -> None:
     ctx.register_tool(name="second_opinion", toolset="calling-mom", schema=_SECOND_OPINION,
                       handler=handle_second_opinion, check_fn=lambda: bool(os.environ.get("HERMES_KANBAN_TASK")),
                       emoji="\U0001f9d0")
-    register_cli = getattr(ctx, "register_cli_command", None)
-    if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
-        register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
-                     setup_fn=cli.setup_parser,
-                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path),
-                     description="setup: choose mom/olymp from your providers. status: show setup and usage. "
-                                 "doctor: check the setup with one real call per model.")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
     cfg = settings()

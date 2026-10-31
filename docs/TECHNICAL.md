@@ -121,8 +121,10 @@ Needs a Hermes checkout/venv (the tests use the real `kanban_db`):
 
 ```bash
 python check.py        # tests + 100 % line coverage + optional drift check
-python -m unittest test_signals test_calling_mom test_metrics test_matrix test_cli
+python -m unittest test_signals test_calling_mom test_metrics test_matrix test_cli test_rules test_core
 ```
+
+Every import of Hermes internals (`hermes_cli`, `agent`, ...) lives in `_core.py`; `test_core.py` fails if another file adds one. Hermes has no public Kanban API for plugins yet, so this keeps a Hermes update to one place to fix.
 
 Tests write to a sandbox, never to your real log. Test-first: a new branch needs a test, `linecov.py` (stdlib only) fails the gate otherwise. `# pragma: no cover` on an `except` or a `def` line excludes that block, use it only for glue that needs a live Hermes.
 

@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
 
       - name: compile every module
-        run: python -m py_compile __init__.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py cli.py rules.py test_rules.py linecov.py check.py
+        run: python -m py_compile __init__.py _core.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py cli.py rules.py test_rules.py linecov.py check.py
 
       - name: plugin manifest is valid YAML with the required keys
         run: |

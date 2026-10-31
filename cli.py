@@ -243,7 +243,7 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
     add("hermes version", "ok" if version_ok(version) else "fail",
         f"{version}" if version_ok(version) else f"found {version!r}, need >= {minimum}")
     add("hermes internals", "ok" if internals else "fail",
-        "" if internals else "kanban_db / kanban_db_connect not importable: this Hermes is not supported")
+        "" if internals else "a Hermes module the plugin needs is missing or renamed: this Hermes is not supported")
     sp, sm = mom_pair(cm)
     mom_ok = bool(sp and sm)
     add("mom pair", "ok" if mom_ok else "fail",
@@ -353,42 +353,14 @@ def cmd_doctor(env) -> int:
 
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
-def make_env(spent, effective, log_path, ask=input, say=print):  # pragma: no cover - needs a live Hermes
-    from hermes_cli import config as hc
-
-    def load():
-        return hc.load_config()
-
+def make_env(spent, effective, log_path, core, ask=input, say=print):  # pragma: no cover - needs a live Hermes
     def providers():
-        try:
-            from hermes_cli.model_switch_providers import list_authenticated_providers
-            cfg = hc.load_config()
-            model = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
-            rows = list_authenticated_providers(current_provider=model.get("provider", ""),
-                                                user_providers=cfg.get("providers"), max_models=40)
-            return [{"slug": r["slug"], "name": r.get("name") or r["slug"], "models": list(r.get("models") or [])} for r in rows]
-        except Exception:
-            return []  # setup then asks you to type the pair
-
-    def boards():
-        try:
-            from hermes_cli.kanban_db_boards import list_boards
-            return [b.get("slug") or b.get("name") for b in list_boards(include_archived=False)]
-        except Exception:
-            return []
+        return core.list_providers(core.load_config())
 
     def probe(provider, model):
-        from agent.plugin_llm import PluginLlm
-        PluginLlm(plugin_id="calling-mom").complete(
-            [{"role": "user", "content": "Reply with the single word OK."}], provider=provider, model=model,
-            max_tokens=16, timeout=60, purpose="calling-mom-doctor")
+        core.probe_model(provider, model)
 
-    try:
-        from hermes_cli import __version__ as version
-        import hermes_cli.kanban_db, hermes_cli.kanban_db_connect  # noqa: F401
-        internals = True
-    except Exception:
-        version, internals = getattr(sys.modules.get("hermes_cli"), "__version__", "?"), False
+    version, internals = core.hermes_version(), core.ERROR is None
 
     def hermes_bin():
         return shutil.which("hermes") or str(Path(sys.executable).with_name("hermes"))
@@ -409,9 +381,9 @@ def make_env(spent, effective, log_path, ask=input, say=print):  # pragma: no co
                            capture_output=True, text=True, timeout=120)
         say("cron job created" if r.returncode == 0 else f"cron job NOT created: {(r.stderr or r.stdout).strip()[:200]}")
 
-    return Env(load=load, save=hc.save_config, providers=providers, boards=boards, spent=spent, probe=probe,
+    return Env(load=core.load_config, save=core.save_config, providers=providers, boards=core.list_board_slugs, spent=spent, probe=probe,
                version=str(version), internals=internals, ask=ask, say=say, cron=cron, sweeps=sweeps,
-               effective=lambda: {**hc.load_config(), "calling_mom": effective()},
+               effective=lambda: {**core.load_config(), "calling_mom": effective()},
                errors=lambda: count_errors(log_path()))
 
 
@@ -425,8 +397,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     parser.set_defaults(cm_cmd=None)
 
 
-def dispatch(args, spent, effective, log_path):  # pragma: no cover - argparse glue
-    env = make_env(spent, effective, log_path)
+def dispatch(args, spent, effective, log_path, core):  # pragma: no cover - argparse glue
+    env = make_env(spent, effective, log_path, core)
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes)

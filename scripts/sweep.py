@@ -34,10 +34,8 @@ for task_id in mod.sweep_all():
 
 cfg = mod.settings()
 if cfg["metrics"]["pushgateways"]:
-    from hermes_cli import kanban_db_boards as kbb
-
     metrics = load("calling_mom_metrics", "metrics.py")
-    boards = {m["slug"]: str(m["db_path"]) for m in kbb.list_boards(include_archived=False)}
+    boards = {m["slug"]: str(m["db_path"]) for m in mod.kbb.list_boards(include_archived=False)}
     adv = cfg["advisor"]
     text = metrics.render(
         rows=metrics.read_rows(mod._log_path()), spend=mod._spent_today(),

@@ -34,7 +34,7 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           git archive --format=zip --prefix="calling-mom/" --output="dist/calling-mom-${VER}.zip" HEAD \
-            __init__.py cli.py rules.py metrics.py signals.py plugin.yaml README.md LICENSE CHANGELOG.md SECURITY.md CONTRIBUTING.md docs assets scripts
+            __init__.py _core.py cli.py rules.py metrics.py signals.py plugin.yaml README.md LICENSE CHANGELOG.md SECURITY.md CONTRIBUTING.md docs assets scripts
           unzip -l "dist/calling-mom-${VER}.zip"
 
       - name: release notes from CHANGELOG
