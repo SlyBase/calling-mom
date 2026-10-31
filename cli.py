@@ -16,7 +16,6 @@ from typing import Callable, Optional
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
 CRON_NAME = "calling-mom: sweep - escalate parked cards, push metrics"
-CRON_NAMES = (CRON_NAME, "calling-mom-sweep")  # the second is the name of earlier versions: still ours
 # Starting points, not promises: model ids change. `setup` lists what is really configured.
 PRESETS = {
     "subscription": {"mom": ("claude-subscription-directsdk-experimental", "claude-sonnet-5-5"),
@@ -293,7 +292,7 @@ def version_ok(version) -> bool:
 
 
 def find_sweeps(homes) -> list:
-    """``[(home, job id, state)]`` of every ``calling-mom-sweep`` cron job in the given Hermes homes.
+    """``[(home, job id, state)]`` of every sweep cron job (``CRON_NAME``) in the given Hermes homes.
     Jobs live per home (root gateway, each profile): one home cannot see the others."""
     found = []
     for home in homes:
@@ -301,7 +300,7 @@ def find_sweeps(homes) -> list:
             jobs = json.loads((Path(home) / "cron" / "jobs.json").read_text()).get("jobs") or []
         except (OSError, ValueError, AttributeError):
             continue
-        found += [(str(home), j.get("id"), j.get("state") or "?") for j in jobs if j.get("name") in CRON_NAMES]
+        found += [(str(home), j.get("id"), j.get("state") or "?") for j in jobs if j.get("name") == CRON_NAME]
     return found
 
 

@@ -24,8 +24,10 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   values and the summary is shown, the flags are the consent in script mode. The sweep cron job is no longer
   asked about either: `setup` says it is creating it (skip with `--no-cron`; never a second one). `--yes` is
   accepted and does nothing. The job is now named `calling-mom: sweep - escalate parked cards, push metrics`, so
-  it is recognisable in `hermes cron list` (cron jobs have no owner field, the name is the link to the plugin);
-  jobs with the old name `calling-mom-sweep` are still recognised.
+  it is recognisable in `hermes cron list` (cron jobs have no owner field, the name is the link to the plugin).
+  A job created by an earlier version under the name `calling-mom-sweep` is not recognised any more: rename it
+  (`hermes cron edit <id> --name "calling-mom: sweep - escalate parked cards, push metrics"`) or remove it before
+  running `setup`, otherwise `setup` creates a second one.
 - **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
   from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
   `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.

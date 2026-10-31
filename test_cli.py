@@ -567,21 +567,15 @@ class FindSweepsTest(unittest.TestCase):
 
     def test_finds_sweep_jobs_in_every_home_and_ignores_the_rest(self):
         with tempfile.TemporaryDirectory() as root:
-            a = self.home(root, "a", [{"id": "1", "name": "calling-mom-sweep", "state": "scheduled"},
+            a = self.home(root, "a", [{"id": "1", "name": cli.CRON_NAME, "state": "scheduled"},
                                       {"id": "2", "name": "other", "state": "scheduled"}])
-            b = self.home(root, "b", [{"id": "3", "name": "calling-mom-sweep", "state": "paused"}])
+            b = self.home(root, "b", [{"id": "3", "name": cli.CRON_NAME, "state": "paused"}])
             found = cli.find_sweeps([a, b, str(Path(root) / "missing")])
         self.assertEqual(found, [(a, "1", "scheduled"), (b, "3", "paused")])
-
-    def test_the_new_descriptive_name_is_found_too(self):
-        with tempfile.TemporaryDirectory() as root:
-            a = self.home(root, "a", [{"id": "1", "name": cli.CRON_NAME, "state": "scheduled"}])
-            self.assertEqual(cli.find_sweeps([a]), [(a, "1", "scheduled")])
 
     def test_the_job_name_starts_with_the_plugin_name_and_says_what_it_does(self):
         self.assertTrue(cli.CRON_NAME.startswith("calling-mom: "))
         self.assertIn("sweep", cli.CRON_NAME)
-        self.assertNotEqual(cli.CRON_NAME, "calling-mom-sweep")
 
     def test_unreadable_job_files_are_skipped(self):
         with tempfile.TemporaryDirectory() as root:
