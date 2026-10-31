@@ -59,6 +59,20 @@ def list_board_slugs() -> list:
         return []
 
 
+def has_menu() -> bool:
+    try:
+        from hermes_cli.curses_ui import curses_radiolist  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def menu(title, labels, default, search=None):
+    """Hermes' own selection list: arrow keys, ``/`` filters (over ``search`` when given). Returns the row index."""
+    from hermes_cli.curses_ui import curses_radiolist
+    return curses_radiolist(title, labels, default, searchable=True, search_labels=search)
+
+
 def probe_model(provider, model) -> None:
     """One real call through Hermes' plugin LLM gate; raises when the pair does not answer."""
     from agent.plugin_llm import PluginLlm

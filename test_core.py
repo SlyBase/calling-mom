@@ -13,7 +13,8 @@ import test_calling_mom  # sets up the Hermes test home and loads the plugin the
 
 HERE = Path(__file__).resolve().parent
 GONE = {"hermes_cli.kanban_db_boards", "hermes_cli.config", "hermes_cli.profiles",
-        "hermes_cli.model_switch_providers", "agent.plugin_llm", "hermes_cli.__version__"}
+        "hermes_cli.model_switch_providers", "agent.plugin_llm", "hermes_cli.__version__",
+        "hermes_cli.curses_ui"}
 PRIVATE_ROOTS = ("hermes_cli", "agent", "tools", "gateway")
 
 
@@ -80,6 +81,7 @@ class MissingInternalsTest(unittest.TestCase):
         self.assertFalse(core.profile_exists("anyone"))
         self.assertEqual(core.list_providers({}), [])
         self.assertEqual(core.list_board_slugs(), [])
+        self.assertFalse(core.has_menu())
 
 
 class HelpersTest(unittest.TestCase):
@@ -90,6 +92,13 @@ class HelpersTest(unittest.TestCase):
         self.assertIsInstance(core.list_providers({}), list)
         self.assertIsInstance(core.list_board_slugs(), list)
         self.assertTrue(core.hermes_version())
+
+    def test_menu_is_available_and_callable(self):
+        core = load()
+        self.assertTrue(core.has_menu())
+        with mock.patch("hermes_cli.curses_ui.curses_radiolist", return_value=2) as radio:
+            self.assertEqual(core.menu("Mom", ["a", "b", "c"], 1), 2)
+        radio.assert_called_once_with("Mom", ["a", "b", "c"], 1, searchable=True, search_labels=None)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,12 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   `[advisor unavailable]`); comments of older versions (author `advisor`) still count. A comment that cannot be
   written never costs the worker its advice.
 - `plugin.yaml` declares `requires_hermes: ">=0.22"` (catalog rule 14).
+- **Easier setup.** `hermes calling-mom setup` now uses Hermes' own selection list (arrow keys, `/` filters by
+  name) and falls back to the numbered list without a terminal. When the *Advanced Delegation* plugin has model
+  routes (`delegation.backends.model_map`), `setup` offers them as the source for Mom and Olymp (values are copied
+  once, nothing is linked). New flags run it without any question: `--mom`, `--olymp` (`provider/model`,
+  `route:NAME`, `none`), `--boards`, `--cron/--no-cron`, `--yes`. Without a terminal and without the flags it
+  exits with code 2 instead of waiting for input.
 - **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
   from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
   `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.

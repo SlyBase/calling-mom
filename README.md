@@ -61,9 +61,21 @@ hermes calling-mom setup     # pick Mom and Olymp from the providers and models 
 hermes calling-mom doctor    # one real test call to each, tells you what is missing
 ```
 
-`setup` shows a numbered list of your configured providers and models, asks which board may use the helpers, and
-**asks before it writes anything**. Olymp stays off unless you choose one. In a hurry:
-`hermes calling-mom setup --preset subscription --yes`.
+`setup` shows a list of your configured providers and models (arrow keys; type `/` to filter by name), asks which
+board may use the helpers, and **asks before it writes anything**. Olymp stays off unless you choose one. If you
+use the *Advanced Delegation* plugin, `setup` also offers your model routes (`fast`, `deep`, ...) so you can take
+Mom or Olymp from one of them instead of picking provider and model again.
+
+No questions at all (scripts, provisioning, no terminal):
+
+```bash
+hermes calling-mom setup --mom openrouter/deepseek/deepseek-v4.1-flash --olymp none --boards '*' --yes
+hermes calling-mom setup --mom route:fast --olymp route:deep --yes --no-cron
+```
+
+`--mom` and `--olymp` take `provider/model` or `route:NAME`; `--olymp none` switches Olymp off, leaving it out keeps
+what is configured. Without a terminal, `setup` never waits: a missing flag ends it with exit code 2 and says what
+to pass. `hermes calling-mom setup --preset subscription --yes` still works too.
 
 | Command | What it does |
 |---|---|
