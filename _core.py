@@ -68,9 +68,11 @@ def has_menu() -> bool:
 
 
 def menu(title, labels, default, search=None):
-    """Hermes' own selection list: arrow keys, ``/`` filters (over ``search`` when given). Returns the row index."""
+    """Hermes' own selection list: arrow keys, ``/`` filters (over ``search`` when given). Returns the row index,
+    or None when the user pressed ESC or Ctrl+C."""
     from hermes_cli.curses_ui import curses_radiolist
-    return curses_radiolist(title, labels, default, searchable=True, search_labels=search)
+    index = curses_radiolist(title, labels, default, searchable=True, search_labels=search, cancel_returns=-1)
+    return None if index < 0 else index  # ESC and Ctrl+C: Hermes would otherwise hand back the default row
 
 
 def probe_model(provider, model) -> None:

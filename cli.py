@@ -26,6 +26,10 @@ PRESETS = {
 
 # ---------------------------------------------------------------- interactive list
 
+class SetupCancelled(Exception):
+    """ESC in a menu, Ctrl+C or end of input: stop everything, write nothing."""
+
+
 class SetupError(ValueError):
     """A setup flag or answer that cannot be used; the message says what to pass instead."""
 
@@ -44,11 +48,25 @@ def routes_from(cfg):
     return usable, unusable
 
 
+def delegation_hint(cfg) -> str:
+    """Why no delegation routes are offered, when the Advanced Delegation plugin is on. Empty = nothing to say."""
+    if "advanced-delegation" not in (_get(cfg, "plugins.enabled", []) or []):
+        return ""
+    usable, unusable = routes_from(cfg)
+    if usable:
+        return ""
+    if unusable:
+        return (f"Advanced Delegation is on, but its route(s) {', '.join(unusable)} have no provider, so they cannot be "
+                "offered here (we need provider and model). Add a provider with: hermes delegation config")
+    return ("Advanced Delegation is installed but has no model routes yet, so there is nothing to offer here. "
+            "Create them with: hermes delegation config   (then run setup again)")
+
+
 def pick(prompt, options, ask, say, default=0, none_label=None, other=True, choose=None, search=None):
     """Choose one of ``options`` = [(label, value)].
 
     With ``choose`` (a menu: arrow keys, ``/`` filters) the menu owns the screen and returns a row index
-    (None = cancelled = the default). Without it: a numbered list. Enter = default, ``o`` = type a value
+    (None = cancelled: ESC or Ctrl+C). Without it: a numbered list. Enter = default, ``o`` = type a value
     yourself, last number = ``none_label`` (returns None). Three invalid answers fall back to the default.
     ``search`` = short text per option that the menu's filter matches (a long label would match nearly anything)."""
     if choose:
@@ -56,7 +74,8 @@ def pick(prompt, options, ask, say, default=0, none_label=None, other=True, choo
         labels = [label for label, _ in options] + extra
         start = len(options) if default == "none" else default
         index = choose(prompt, labels, start, **({"search": list(search) + extra} if search else {}))
-        index = start if index is None else index
+        if index is None:
+            raise SetupCancelled()
         if index < len(options):
             return options[index][1]
         return None if none_label and index == len(options) else ask("value > ").strip()
@@ -414,6 +433,9 @@ def _plan(env, cfg, preset, mom, olymp, boards):
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
                          "optionally --olymp, --boards and --cron/--no-cron.")
+    hint = delegation_hint(cfg)
+    if hint:
+        env.say(hint)
     return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes)
 
 
@@ -424,6 +446,9 @@ def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cr
     except SetupError as exc:
         env.say(str(exc))
         return 2
+    except (SetupCancelled, KeyboardInterrupt, EOFError):
+        env.say("\nCancelled. Nothing was written.")
+        return 1
     env.say("\nWriting to your Hermes config:")
     for line in summary:
         env.say("  " + line)

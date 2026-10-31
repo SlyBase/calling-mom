@@ -98,7 +98,12 @@ class HelpersTest(unittest.TestCase):
         self.assertTrue(core.has_menu())
         with mock.patch("hermes_cli.curses_ui.curses_radiolist", return_value=2) as radio:
             self.assertEqual(core.menu("Mom", ["a", "b", "c"], 1), 2)
-        radio.assert_called_once_with("Mom", ["a", "b", "c"], 1, searchable=True, search_labels=None)
+        radio.assert_called_once_with("Mom", ["a", "b", "c"], 1, searchable=True, search_labels=None, cancel_returns=-1)
+
+    def test_esc_and_ctrl_c_come_back_as_none_not_as_the_default(self):
+        core = load()
+        with mock.patch("hermes_cli.curses_ui.curses_radiolist", return_value=-1):
+            self.assertIsNone(core.menu("Mom", ["a", "b"], 1))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+# A newer push replaces the pull-request run still going for the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -76,6 +83,10 @@ jobs:
     # The real gate: the plugin against Hermes main. A red run
     # after a green history usually means "Hermes moved": fix the plugin or raise the minimum version.
     name: full suite against Hermes main
+    # Slow (about 2-3 minutes), so it runs where it decides something: on main, by hand, and on pull requests
+    # that are NOT drafts. Work in a draft PR (only the 10 s static job runs); mark it ready right before the
+    # merge and this job runs then.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

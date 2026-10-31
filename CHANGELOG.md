@@ -29,6 +29,13 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   (`hermes cron edit <id> --name "calling-mom: sweep - escalate parked cards, push metrics"`) or remove it before
   running `setup`, otherwise `setup` creates a second one.
 - Picking `*` (all boards) in `setup` now replaces single board names in the list instead of sitting next to them.
+- **CI is faster where it matters.** The slow full suite against Hermes main now runs on `main`, by hand
+  (`workflow_dispatch`) and on pull requests that are not drafts; a draft PR only runs the 10-second static
+  checks, and a newer push cancels the run still going. `check.py` runs the test suite once (under the coverage
+  tracer, which also reports failures) instead of twice.
+- `setup` stops for good on ESC, Ctrl+C or end of input ("Cancelled. Nothing was written.", exit code 1); before,
+  the menu handed back its default row and the questions went on. When the Advanced Delegation plugin is enabled
+  but has no usable routes, `setup` says why nothing is offered and how to create routes.
 - **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
   from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
   `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.

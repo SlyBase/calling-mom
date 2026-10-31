@@ -123,11 +123,10 @@ class ChooseTest(unittest.TestCase):
         cli.setup({}, LISTING, [], Script().ask, Script().say, choose=choose, routes=routes)
         self.assertEqual(seen["Mom: which route?"], ["fast", "deep"])
 
-    def test_cancelled_menu_takes_the_default(self):
+    def test_cancelling_the_menu_aborts_instead_of_taking_the_default(self):
         s = Script()
-        self.assertEqual(cli.pick("P", self.OPTS, s.ask, s.say, default=2, choose=lambda t, l, d: None), "c")
-        self.assertIsNone(cli.pick("P", self.OPTS, s.ask, s.say, default="none", none_label="skip", choose=lambda t, l, d: None))
-
+        with self.assertRaises(cli.SetupCancelled):
+            cli.pick("P", self.OPTS, s.ask, s.say, default=2, choose=lambda t, l, d: None)
 
 class FlagsTest(unittest.TestCase):
     ROUTES = cli.routes_from(ROUTES_CFG)[0]
@@ -297,6 +296,60 @@ class SetupMenuTest(unittest.TestCase):
         upd, _ = cli.setup({}, LISTING, [], s.ask, s.say, choose=lambda t, l, d: next(picks, 0))
         self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-opus-5-5"))
         self.assertEqual(s.said.count("Please enter one of the numbers."), 0)
+
+
+class CancelTest(unittest.TestCase):
+    """ESC / Ctrl+C / end of input stop the setup: nothing is written, nothing else is created."""
+
+    def run_cancelled(self, ask=None, choose=None):
+        s, saved, created = Script("1", "1", "3", "1"), {}, []
+        env = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=ask or s.ask,
+                      say=s.say, cron=lambda: created.append(1), sweeps=lambda: [], choose=choose)
+        return cli.cmd_setup(env), saved, created, s
+
+    def test_esc_in_a_menu_stops_the_whole_setup(self):
+        rc, saved, created, s = self.run_cancelled(choose=lambda t, labels, d: None)
+        self.assertEqual((rc, saved, created), (1, {}, []))
+        self.assertIn("Cancelled", s.text)
+
+    def test_esc_on_a_later_question_still_writes_nothing(self):
+        answers = iter([0, 0, 2, None])               # mom provider/model, olymp "none", then ESC on the board question
+        rc, saved, created, _ = self.run_cancelled(choose=lambda t, l, d: next(answers))
+        self.assertEqual((rc, saved, created), (1, {}, []))
+
+    def test_ctrl_c_and_end_of_input_stop_it_too(self):
+        for exc in (KeyboardInterrupt, EOFError):
+            def ask(prompt=""):
+                raise exc()
+            rc, saved, created, s = self.run_cancelled(ask=ask)
+            self.assertEqual((rc, saved, created), (1, {}, []), exc.__name__)
+            self.assertIn("Cancelled", s.text)
+
+
+class DelegationHintTest(unittest.TestCase):
+    ON = {"plugins": {"enabled": ["advanced-delegation"]}}
+
+    def test_plugin_on_without_routes_says_how_to_create_them(self):
+        hint = cli.delegation_hint(self.ON)
+        self.assertIn("hermes delegation config", hint)
+
+    def test_routes_without_a_provider_are_named(self):
+        cfg = {**self.ON, "delegation": {"backends": {"model_map": {"options": [{"name": "local", "model": "q", "base_url": "http://x"}]}}}}
+        self.assertIn("local", cli.delegation_hint(cfg))
+
+    def test_no_hint_when_routes_exist_or_the_plugin_is_off(self):
+        self.assertEqual(cli.delegation_hint({**ROUTES_CFG, **self.ON}), "")
+        self.assertEqual(cli.delegation_hint({}), "")
+        self.assertEqual(cli.delegation_hint({"plugins": {"enabled": ["other"]}}), "")
+
+    def test_setup_prints_the_hint_before_asking(self):
+        s = Script("1", "1", "3", "1")
+        env = cli.Env(load=lambda: dict(self.ON), save=lambda c: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: None, sweeps=lambda: [])
+        cli.cmd_setup(env)
+        self.assertLess(s.text.index("hermes delegation config"), s.text.index("which provider"))
 
 
 class AutomaticSetupTest(unittest.TestCase):
