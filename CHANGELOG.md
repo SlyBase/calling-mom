@@ -3,10 +3,49 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.3.1] - 2026-10-31
+
+Catalog-readiness: use only public Hermes surfaces for the advisor comment.
+
+### Changed
+- Advisor comments are written through the public `kanban_comment` tool (`ctx.dispatch_tool`) instead of the
+  board database, and the write into Hermes' private `tools.kanban_tools._comment_watermark` is gone (catalog
+  rule 9). The tool signs with the worker's own profile and Hermes' comment relay skips a worker's own comments,
+  so advice still reaches the worker once. Advisor comments are recognised by their text (`[category/signal] run`,
+  `[advisor unavailable]`); comments of older versions (author `advisor`) still count. A comment that cannot be
+  written never costs the worker its advice.
+- `plugin.yaml` declares `requires_hermes: ">=0.22"` (catalog rule 14).
+- **Easier setup.** `hermes calling-mom setup` now uses Hermes' own selection list (arrow keys, `/` filters by
+  name) and falls back to the numbered list without a terminal. When the *Advanced Delegation* plugin has model
+  routes (`delegation.backends.model_map`), `setup` offers them as the source for Mom and Olymp (values are copied
+  once, nothing is linked). New flags run it without any question: `--mom`, `--olymp` (`provider/model`,
+  `route:NAME`, `none`), `--boards`, `--cron/--no-cron`. Without a terminal and without the flags it exits with
+  code 2 instead of waiting for input. The final "Write it? [y/N]" question is gone: you have just chosen the
+  values and the summary is shown, the flags are the consent in script mode. The sweep cron job is no longer
+  asked about either: `setup` says it is creating it (skip with `--no-cron`; never a second one). `--yes` is
+  accepted and does nothing. The job is now named `calling-mom: sweep - escalate parked cards, push metrics`, so
+  it is recognisable in `hermes cron list` (cron jobs have no owner field, the name is the link to the plugin).
+  A job created by an earlier version under the name `calling-mom-sweep` is not recognised any more: rename it
+  (`hermes cron edit <id> --name "calling-mom: sweep - escalate parked cards, push metrics"`) or remove it before
+  running `setup`, otherwise `setup` creates a second one.
+- Picking `*` (all boards) in `setup` now replaces single board names in the list instead of sitting next to them.
+- **CI is faster where it matters.** The slow full suite against Hermes main now runs on `main`, by hand
+  (`workflow_dispatch`) and on pull requests that are not drafts; a draft PR only runs the 10-second static
+  checks, and a newer push cancels the run still going. `check.py` runs the test suite once (under the coverage
+  tracer, which also reports failures) instead of twice.
+- `setup` stops for good on ESC, Ctrl+C or end of input ("Cancelled. Nothing was written.", exit code 1); before,
+  the menu handed back its default row and the questions went on. When the Advanced Delegation plugin is enabled
+  but has no usable routes, `setup` says why nothing is offered and how to create routes.
+- **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
+  from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
+  `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.
+  If a Hermes update removes something, the plugin still loads, registers no hooks, logs the missing module once
+  and `hermes calling-mom doctor` says so, instead of failing at import time.
+
 ## [1.3.0] - 2026-10-30
 
 ### Added
-- **Two tiers: mom and olymp** (the names changed during the 1.3.0 preview: `sibling` is now `mom`, the old `mom` is now `olymp`; `setup` rewrites old config). `mom.{model,provider}` is the cheap tier (the old top-level pair still
+- **Two tiers: mom and olymp**. `mom.{model,provider}` is the cheap tier (the old top-level pair still
   works). `olymp.{model,provider}` (empty = off) is the expensive tier. For `olymp.categories` (default
   `architecture`) the mom answers first and writes `ESCALATE: <reason>` only for a rare high-stakes case;
   only then olymp is asked. Olymp is limited by calls (`olymp.max_per_card` 1, `olymp.max_per_day` 6), exempt from the

@@ -69,7 +69,103 @@ class PickTest(unittest.TestCase):
         self.assertIn("skip", s.text)
 
 
+ROUTES_CFG = {"delegation": {"backends": {"model_map": {"options": [
+    {"name": "fast", "description": "Cheap and quick", "provider": "openrouter", "model": "x/y"},
+    {"name": "deep", "description": "Careful", "provider": SUB, "model": "claude-opus-5-5"},
+    {"name": "local", "description": "On this machine", "base_url": "http://localhost:8080/v1", "model": "qwen"},
+    "junk", {"name": "", "provider": "p", "model": "m"},
+]}}}}
+
+
+class RoutesTest(unittest.TestCase):
+    def test_routes_with_provider_and_model_are_usable(self):
+        usable, unusable = cli.routes_from(ROUTES_CFG)
+        self.assertEqual([r["name"] for r in usable], ["fast", "deep"])
+        self.assertEqual(unusable, ["local"])
+
+    def test_no_delegation_block_means_no_routes(self):
+        for cfg in ({}, {"delegation": "x"}, {"delegation": {"backends": {"model_map": {"options": "x"}}}}):
+            self.assertEqual(cli.routes_from(cfg), ([], []))
+
+
+class ChooseTest(unittest.TestCase):
+    """A menu callback (arrow keys, / filter) replaces the numbered list; None = cancelled."""
+    OPTS = [("A", "a"), ("B", "b"), ("C", "c")]
+
+    def test_menu_index_selects_the_option(self):
+        s = Script()
+        seen = []
+        value = cli.pick("Pick", self.OPTS, s.ask, s.say, other=False, choose=lambda t, labels, d: seen.append((t, labels, d)) or 1)
+        self.assertEqual(value, "b")
+        self.assertEqual(seen, [("Pick", ["A", "B", "C"], 0)])
+        self.assertEqual(s.said, [])                       # nothing printed or asked: the menu owns the screen
+
+    def test_none_and_other_entries_are_menu_rows(self):
+        s = Script("typed")
+        labels = []
+        pick = lambda idx: cli.pick("P", self.OPTS, s.ask, s.say, none_label="skip", choose=lambda t, l, d: labels.extend(l) or idx)
+        self.assertIsNone(pick(3))
+        self.assertEqual(labels, ["A", "B", "C", "skip", "other (type it)"])
+        self.assertEqual(pick(4), "typed")
+
+    def test_search_text_is_passed_on_with_the_extra_rows(self):
+        seen = []
+        cli.pick("P", self.OPTS, Script().ask, Script().say, none_label="skip", choose=lambda t, l, d, search=None: seen.append(search) or 0,
+                 search=["a1", "b1", "c1"])
+        self.assertEqual(seen, [["a1", "b1", "c1", "skip", "other (type it)"]])
+
+    def test_route_menu_filters_by_route_name_only(self):
+        routes = cli.routes_from(ROUTES_CFG)[0]
+        seen = {}
+        def choose(title, labels, default, search=None):
+            seen[title] = search
+            return 0
+        cli.setup({}, LISTING, [], Script().ask, Script().say, choose=choose, routes=routes)
+        self.assertEqual(seen["Mom: which route?"], ["fast", "deep"])
+
+    def test_cancelling_the_menu_aborts_instead_of_taking_the_default(self):
+        s = Script()
+        with self.assertRaises(cli.SetupCancelled):
+            cli.pick("P", self.OPTS, s.ask, s.say, default=2, choose=lambda t, l, d: None)
+
+class FlagsTest(unittest.TestCase):
+    ROUTES = cli.routes_from(ROUTES_CFG)[0]
+
+    def test_provider_slash_model_splits_at_the_first_slash(self):
+        self.assertEqual(cli.parse_pair("openrouter/deepseek/deepseek-v4.1-flash", self.ROUTES), ("openrouter", "deepseek/deepseek-v4.1-flash"))
+
+    def test_route_name_takes_the_values_of_the_route(self):
+        self.assertEqual(cli.parse_pair("route:deep", self.ROUTES), (SUB, "claude-opus-5-5"))
+
+    def test_bad_values_raise_with_a_clear_message(self):
+        for bad, text in (("nonsense", "provider/model"), ("/m", "provider/model"), ("p/", "provider/model"),
+                          ("route:nope", "fast, deep")):
+            with self.assertRaises(cli.SetupError, msg=bad) as cm:
+                cli.parse_pair(bad, self.ROUTES)
+            self.assertIn(text, str(cm.exception))
+
+    def test_olymp_none_switches_it_off_and_absent_keeps_the_current_one(self):
+        cfg = {"calling_mom": {"olymp": {"provider": SUB, "model": "claude-opus-5-5"}}}
+        self.assertIsNone(cli.resolve("a/b", "none", cfg, self.ROUTES)[1])
+        self.assertEqual(cli.resolve("a/b", None, cfg, self.ROUTES)[1], (SUB, "claude-opus-5-5"))
+        self.assertIsNone(cli.resolve("a/b", None, {}, self.ROUTES)[1])
+
+    def test_mom_cannot_be_none(self):
+        with self.assertRaises(cli.SetupError):
+            cli.resolve("none", None, {}, self.ROUTES)
+
+    def test_boards_flag(self):
+        self.assertEqual(cli.parse_boards("a, b"), ["a", "b"])
+        self.assertEqual(cli.parse_boards("*"), ["*"])
+
+
 class UpdatesTest(unittest.TestCase):
+    def test_star_means_all_boards_and_replaces_single_names(self):
+        cfg = {"calling_mom": {"advisor": {"boards": ["default", "coding"]}}}
+        self.assertEqual(cli.updates((SUB, "m"), None, ["*"], cfg)["calling_mom.advisor.boards"], ["*"])
+        cfg = {"calling_mom": {"advisor": {"boards": ["*"]}}}
+        self.assertEqual(cli.updates((SUB, "m"), None, ["coding"], cfg)["calling_mom.advisor.boards"], ["*"])
+
     def test_mom_and_olymp_pairs_and_allowlists(self):
         upd = cli.updates((SUB, "claude-sonnet-5-5"), (SUB, "claude-opus-5-5"), ["coding"], {})
         self.assertEqual(upd["calling_mom.mom.model"], "claude-sonnet-5-5")
@@ -99,13 +195,6 @@ class UpdatesTest(unittest.TestCase):
         self.assertEqual(upd["calling_mom.olymp.model"], "")
         self.assertEqual(upd["calling_mom.olymp.provider"], "")
         self.assertNotIn("claude-opus-5-5", upd["plugins.entries.calling-mom.llm.allowed_models"])
-
-    def test_setup_removes_the_pre_release_sibling_block(self):
-        cfg = {"calling_mom": {"sibling": {"model": "a", "provider": "b"}, "mom": {"model": "old-expensive", "provider": "p"}}}
-        out = cli.apply_updates(cfg, cli.updates((SUB, "claude-sonnet-5-5"), None, [], cfg))
-        self.assertNotIn("sibling", out["calling_mom"])
-        self.assertEqual(out["calling_mom"]["mom"]["model"], "claude-sonnet-5-5")   # the old expensive entry is replaced
-        self.assertEqual(out["calling_mom"]["olymp"]["model"], "")
 
     def test_apply_creates_nested_keys_and_keeps_the_rest(self):
         cfg = {"keep": 1, "calling_mom": {"marker": "[crit]"}}
@@ -171,6 +260,180 @@ class SetupFlowTest(unittest.TestCase):
         self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), ("my-provider", "my/model"))
 
 
+class SetupMenuTest(unittest.TestCase):
+    def test_route_source_is_offered_only_when_routes_exist(self):
+        s = Script("1", "1", "3", "3")                      # no routes: first question is the provider
+        cli.setup({}, LISTING, [], s.ask, s.say)
+        self.assertNotIn("delegation route", s.text)
+
+    def test_mom_can_come_from_a_delegation_route(self):
+        routes = cli.routes_from(ROUTES_CFG)[0]
+        # mom: source 1 (route), route 1 (fast); olymp: source 1 (route), route 2 (deep); boards: all
+        s = Script("1", "1", "1", "2", "2")
+        upd, _ = cli.setup({}, LISTING, ["default"], s.ask, s.say, routes=routes)
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), ("openrouter", "x/y"))
+        self.assertEqual((upd["calling_mom.olymp.provider"], upd["calling_mom.olymp.model"]), (SUB, "claude-opus-5-5"))
+        self.assertIn("Cheap and quick", s.text)
+
+    def test_choosing_by_hand_still_works_next_to_routes(self):
+        routes = cli.routes_from(ROUTES_CFG)[0]
+        s = Script("2", "2", "1", "3", "3", "3")             # mom: by hand, provider 2, model 1; olymp: none; boards: all
+        upd, _ = cli.setup({}, LISTING, [], s.ask, s.say, routes=routes)
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-sonnet-5-5"))
+
+    def test_menu_lists_every_model_not_just_the_first_25(self):
+        many = [{"slug": "p", "name": "P", "models": [f"m{i}" for i in range(40)]}]
+        shown = []
+        def choose(title, labels, default):
+            shown.append(labels)
+            return 0
+        cli.setup({}, many, [], Script().ask, Script().say, choose=choose)
+        self.assertTrue(any(len(labels) > 25 for labels in shown))
+
+    def test_menu_selection_drives_setup_without_typing(self):
+        picks = iter([1, 1, 2])                              # mom: provider 2, model 2; olymp: row 3 = "no olymp"
+        s = Script()
+        upd, _ = cli.setup({}, LISTING, [], s.ask, s.say, choose=lambda t, l, d: next(picks, 0))
+        self.assertEqual((upd["calling_mom.mom.provider"], upd["calling_mom.mom.model"]), (SUB, "claude-opus-5-5"))
+        self.assertEqual(s.said.count("Please enter one of the numbers."), 0)
+
+
+class CancelTest(unittest.TestCase):
+    """ESC / Ctrl+C / end of input stop the setup: nothing is written, nothing else is created."""
+
+    def run_cancelled(self, ask=None, choose=None):
+        s, saved, created = Script("1", "1", "3", "1"), {}, []
+        env = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=ask or s.ask,
+                      say=s.say, cron=lambda: created.append(1), sweeps=lambda: [], choose=choose)
+        return cli.cmd_setup(env), saved, created, s
+
+    def test_esc_in_a_menu_stops_the_whole_setup(self):
+        rc, saved, created, s = self.run_cancelled(choose=lambda t, labels, d: None)
+        self.assertEqual((rc, saved, created), (1, {}, []))
+        self.assertIn("Cancelled", s.text)
+
+    def test_esc_on_a_later_question_still_writes_nothing(self):
+        answers = iter([0, 0, 2, None])               # mom provider/model, olymp "none", then ESC on the board question
+        rc, saved, created, _ = self.run_cancelled(choose=lambda t, l, d: next(answers))
+        self.assertEqual((rc, saved, created), (1, {}, []))
+
+    def test_ctrl_c_and_end_of_input_stop_it_too(self):
+        for exc in (KeyboardInterrupt, EOFError):
+            def ask(prompt=""):
+                raise exc()
+            rc, saved, created, s = self.run_cancelled(ask=ask)
+            self.assertEqual((rc, saved, created), (1, {}, []), exc.__name__)
+            self.assertIn("Cancelled", s.text)
+
+
+class DelegationHintTest(unittest.TestCase):
+    ON = {"plugins": {"enabled": ["advanced-delegation"]}}
+
+    def test_plugin_on_without_routes_says_how_to_create_them(self):
+        hint = cli.delegation_hint(self.ON)
+        self.assertIn("hermes delegation config", hint)
+
+    def test_routes_without_a_provider_are_named(self):
+        cfg = {**self.ON, "delegation": {"backends": {"model_map": {"options": [{"name": "local", "model": "q", "base_url": "http://x"}]}}}}
+        self.assertIn("local", cli.delegation_hint(cfg))
+
+    def test_no_hint_when_routes_exist_or_the_plugin_is_off(self):
+        self.assertEqual(cli.delegation_hint({**ROUTES_CFG, **self.ON}), "")
+        self.assertEqual(cli.delegation_hint({}), "")
+        self.assertEqual(cli.delegation_hint({"plugins": {"enabled": ["other"]}}), "")
+
+    def test_setup_prints_the_hint_before_asking(self):
+        s = Script("1", "1", "3", "1")
+        env = cli.Env(load=lambda: dict(self.ON), save=lambda c: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: None, sweeps=lambda: [])
+        cli.cmd_setup(env)
+        self.assertLess(s.text.index("hermes delegation config"), s.text.index("which provider"))
+
+
+class AutomaticSetupTest(unittest.TestCase):
+    def env(self, saved, cfg=None, interactive=True, sweeps=(), created=None, routes=None):
+        s = Script()
+        e = cli.Env(load=lambda: cfg or {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default", "coding"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                    cron=lambda: (created if created is not None else []).append(1), sweeps=lambda: list(sweeps),
+                    routes=lambda: cli.routes_from(cfg or {})[0] if routes is None else routes, interactive=interactive)
+        return e, s
+
+    def test_flags_set_everything_without_a_single_question(self):
+        saved, created = {}, []
+        e, s = self.env(saved, created=created, interactive=False)
+        rc = cli.cmd_setup(e, mom="openrouter/x/y", olymp="none", boards="default", yes=True, cron=True)
+        self.assertEqual(rc, 0)
+        cm = saved["calling_mom"]
+        self.assertEqual((cm["mom"]["provider"], cm["mom"]["model"]), ("openrouter", "x/y"))
+        self.assertEqual(cm["advisor"]["boards"], ["default"])
+        self.assertEqual(created, [1])
+        self.assertNotIn(">", "".join(x for x in s.said if x.endswith("> ")))   # no prompt was shown
+
+    def test_route_flag_reads_the_delegation_routes(self):
+        saved = {}
+        e, _ = self.env(saved, cfg=dict(ROUTES_CFG), interactive=False)
+        self.assertEqual(cli.cmd_setup(e, mom="route:fast", olymp="route:deep", boards="*", yes=True, cron=False), 0)
+        self.assertEqual(saved["calling_mom"]["olymp"]["model"], "claude-opus-5-5")
+
+    def test_no_cron_flag_skips_the_job_and_cron_default_follows_yes(self):
+        for cron, expected in ((False, []), (None, [1])):
+            created = []
+            e, _ = self.env({}, created=created, interactive=False)
+            cli.cmd_setup(e, mom="a/b", boards="*", yes=True, cron=cron)
+            self.assertEqual(created, expected)
+
+    def test_without_boards_flag_existing_boards_stay_and_a_fresh_setup_allows_all(self):
+        saved = {}
+        e, _ = self.env(saved, cfg={"calling_mom": {"advisor": {"boards": ["coding"]}}}, interactive=False)
+        cli.cmd_setup(e, mom="a/b", yes=True, cron=False)
+        self.assertEqual(saved["calling_mom"]["advisor"]["boards"], ["coding"])
+        saved.clear()
+        e, _ = self.env(saved, interactive=False)
+        cli.cmd_setup(e, mom="a/b", yes=True, cron=False)
+        self.assertEqual(saved["calling_mom"]["advisor"]["boards"], ["*"])
+
+    def test_bad_flag_value_exits_with_2_and_writes_nothing(self):
+        saved = {}
+        e, s = self.env(saved, interactive=False)
+        self.assertEqual(cli.cmd_setup(e, mom="nonsense", yes=True), 2)
+        self.assertEqual(saved, {})
+        self.assertIn("provider/model", s.text)
+
+    def test_without_a_terminal_and_without_flags_it_stops_instead_of_waiting(self):
+        saved = {}
+        e, s = self.env(saved, interactive=False)
+        self.assertEqual(cli.cmd_setup(e), 2)
+        self.assertIn("--mom", s.text)
+        self.assertEqual(saved, {})
+
+    def test_flags_are_the_consent_so_no_yes_is_needed_without_a_terminal(self):
+        saved, created = {}, []
+        e, s = self.env(saved, interactive=False, created=created)
+        self.assertEqual(cli.cmd_setup(e, mom="a/b", boards="*"), 0)
+        self.assertEqual(saved["calling_mom"]["mom"]["model"], "b")
+        self.assertEqual(created, [1])          # no terminal: nobody to ask, so the cron default applies
+
+    def test_olymp_or_boards_without_mom_are_refused(self):
+        for kw in ({"olymp": "a/b"}, {"boards": "*"}):
+            e, s = self.env({}, interactive=False)
+            self.assertEqual(cli.cmd_setup(e, yes=True, **kw), 2)
+            self.assertIn("need --mom", s.text)
+
+    def test_unknown_preset_exits_with_2(self):
+        e, s = self.env({}, interactive=False)
+        self.assertEqual(cli.cmd_setup(e, preset="nope", yes=True), 2)
+        self.assertIn("unknown preset", s.text)
+
+    def test_preset_without_a_terminal_works_with_boards_flag(self):
+        saved = {}
+        e, _ = self.env(saved, interactive=False)
+        self.assertEqual(cli.cmd_setup(e, preset="subscription", boards="*", yes=True, cron=False), 0)
+        self.assertEqual(saved["calling_mom"]["olymp"]["model"], "claude-opus-5-5")
+
+
 class StatusTest(unittest.TestCase):
     CFG = {
         "mom": {"model": "claude-sonnet-5-5", "provider": SUB},
@@ -200,10 +463,6 @@ class StatusTest(unittest.TestCase):
     def test_no_error_line_without_errors(self):
         text = "\n".join(cli.status_lines(self.CFG, {"usd": 0, "tokens": 0, "olymp": 0}, (0, None)))
         self.assertNotIn("errors", text)
-
-    def test_leftover_sibling_block_is_flagged_in_status(self):
-        cfg = {**self.CFG, "sibling": {"model": "a", "provider": "b"}}
-        self.assertIn("renamed", "\n".join(cli.status_lines(cfg, {"usd": 0, "tokens": 0, "olymp": 0})))
 
     def test_olymp_off_is_said_plainly(self):
         cfg = {**self.CFG, "olymp": {"model": "", "provider": "", "max_per_card": 1, "max_per_day": 6}}
@@ -309,16 +568,6 @@ class DoctorTest(unittest.TestCase):
     def test_only_a_paused_job_is_a_warning(self):
         self.assertEqual(self.by_name(self.run_doctor(sweeps=[("/h", "p", "paused")]))["sweep cron"][0], "warn")
 
-    def test_leftover_sibling_block_is_a_warning_that_explains_the_rename(self):
-        cfg = self.cfg(sibling={"model": "a", "provider": "b"})
-        s, d = self.by_name(self.run_doctor(cfg))["old names"]
-        self.assertEqual(s, "warn")
-        self.assertIn("renamed", d)
-        self.assertIn("setup", d)
-
-    def test_no_old_names_no_extra_check(self):
-        self.assertNotIn("old names", self.by_name(self.run_doctor()))
-
     def test_exit_code_counts_failures_only(self):
         self.assertEqual(cli.exit_code([("a", "ok", ""), ("b", "warn", "")]), 0)
         self.assertEqual(cli.exit_code([("a", "ok", ""), ("b", "fail", "")]), 1)
@@ -356,11 +605,15 @@ class FindSweepsTest(unittest.TestCase):
 
     def test_finds_sweep_jobs_in_every_home_and_ignores_the_rest(self):
         with tempfile.TemporaryDirectory() as root:
-            a = self.home(root, "a", [{"id": "1", "name": "calling-mom-sweep", "state": "scheduled"},
+            a = self.home(root, "a", [{"id": "1", "name": cli.CRON_NAME, "state": "scheduled"},
                                       {"id": "2", "name": "other", "state": "scheduled"}])
-            b = self.home(root, "b", [{"id": "3", "name": "calling-mom-sweep", "state": "paused"}])
+            b = self.home(root, "b", [{"id": "3", "name": cli.CRON_NAME, "state": "paused"}])
             found = cli.find_sweeps([a, b, str(Path(root) / "missing")])
         self.assertEqual(found, [(a, "1", "scheduled"), (b, "3", "paused")])
+
+    def test_the_job_name_starts_with_the_plugin_name_and_says_what_it_does(self):
+        self.assertTrue(cli.CRON_NAME.startswith("calling-mom: "))
+        self.assertIn("sweep", cli.CRON_NAME)
 
     def test_unreadable_job_files_are_skipped(self):
         with tempfile.TemporaryDirectory() as root:
@@ -403,14 +656,36 @@ class CommandWiringTest(unittest.TestCase):
         self.assertIn("already exists", s.text)
         self.assertIn("2d66", s.text)
 
-    def test_setup_without_confirmation_does_not_write(self):
-        s = Script("1", "1", "3", "1", "n")
+    def test_the_cron_job_is_created_and_announced_without_a_question(self):
+        s = Script("1", "1", "3", "1")
+        created = []
+        env = cli.Env(load=lambda: {}, save=lambda cfg: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: created.append(1), sweeps=lambda: [])
+        self.assertEqual(cli.cmd_setup(env), 0)
+        self.assertEqual(created, [1])
+        self.assertNotIn("[Y/n]", s.text)
+        self.assertIn("Creating the sweep cron job", s.text)
+        self.assertIn("--no-cron", s.text)
+
+    def test_no_cron_flag_says_nothing_is_created(self):
+        s = Script("1", "1", "3", "1")
+        created = []
+        env = cli.Env(load=lambda: {}, save=lambda cfg: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: created.append(1), sweeps=lambda: [])
+        cli.cmd_setup(env, cron=False)
+        self.assertEqual(created, [])
+
+    def test_what_you_picked_is_written_without_asking_again(self):
+        s = Script("1", "1", "3", "1")
         saved = {}
         env = cli.Env(load=lambda: {}, save=lambda cfg: saved.update(cfg), providers=lambda: LISTING,
                       boards=lambda: ["default"], spent=lambda: {}, probe=lambda p, m: None, version="0.22.5",
                       internals=True, ask=s.ask, say=s.say, cron=lambda: None, sweeps=lambda: [("/h", "j1", "scheduled")])
-        self.assertEqual(cli.cmd_setup(env, preset=None, yes=False), 1)
-        self.assertEqual(saved, {})
+        self.assertEqual(cli.cmd_setup(env, preset=None, yes=False), 0)
+        self.assertEqual(saved["calling_mom"]["mom"]["provider"], "openrouter")
+        self.assertNotIn("Write it?", s.text)
 
     def test_doctor_returns_one_on_a_failed_check(self):
         s = Script()

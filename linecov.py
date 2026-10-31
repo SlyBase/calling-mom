@@ -42,13 +42,23 @@ def executable_lines(path):
 NAMES = {p.name: p for p in targets}
 
 
-def tracer(frame, event, arg):
-    if event == "line":
-        fn = frame.f_code.co_filename
+_target_of = {}  # filename -> our target file, or None
+
+
+def _target(fn):
+    if fn not in _target_of:
         t = NAMES.get(os.path.basename(fn))
         # same basename in another package (hermes_cli/__init__.py) must not count as ours
-        if t is not None and os.path.dirname(os.path.realpath(fn)) == str(PLUGIN):
-            hit[t].add(frame.f_lineno)
+        _target_of[fn] = t if t is not None and os.path.dirname(os.path.realpath(fn)) == str(PLUGIN) else None
+    return _target_of[fn]
+
+
+def tracer(frame, event, arg):
+    t = _target(frame.f_code.co_filename)
+    if t is None:
+        return None  # not our file: no line events for this frame (this is what keeps the run fast)
+    if event == "line":
+        hit[t].add(frame.f_lineno)
     return tracer
 
 
@@ -63,7 +73,10 @@ def measure(mods):
         res = unittest.TextTestRunner(stream=buf, verbosity=0).run(suite)
     finally:
         sys.settrace(None)
+    failed = len(res.failures) + len(res.errors)
     print("ran", res.testsRun, "tests | failures", len(res.failures), "| errors", len(res.errors))
+    if failed:
+        print(buf.getvalue())
     total = covered = missing = 0
     for p in sorted(targets):
         ex = executable_lines(p)
@@ -77,13 +90,13 @@ def measure(mods):
             for ln in miss:
                 print("  %4d| %s" % (ln, src[ln - 1].strip()[:100]))
     print("\nTOTAL %d/%d (%.1f%%)" % (covered, total, 100.0 * covered / max(1, total)))
-    return covered, total, missing
+    return covered, total, missing, failed
 
 
 def main(mods):
-    covered, total, missing = measure(mods)
-    return 0 if missing == 0 else 1
+    covered, total, missing, failed = measure(mods)
+    return 0 if missing == 0 and not failed else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules"]))
+    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules", "test_core"]))

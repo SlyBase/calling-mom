@@ -5,7 +5,7 @@ breaker parks emit no block hook. Silent unless it acted. The Pushgateway push i
 
 Install (profile scripts dir, then schedule):
     cp scripts/sweep.py "$HERMES_HOME/scripts/calling_mom_sweep.py"
-    hermes cron create "every 1m" --name calling-mom-sweep --no-agent \
+    hermes cron create "every 1m" --name "calling-mom: sweep - escalate parked cards, push metrics" --no-agent \
         --script calling_mom_sweep.py --interpreter <hermes venv python> --deliver local
 
 Set CALLING_MOM_DIR when the plugin does not live in $HERMES_HOME/plugins/calling-mom.
@@ -34,10 +34,8 @@ for task_id in mod.sweep_all():
 
 cfg = mod.settings()
 if cfg["metrics"]["pushgateways"]:
-    from hermes_cli import kanban_db_boards as kbb
-
     metrics = load("calling_mom_metrics", "metrics.py")
-    boards = {m["slug"]: str(m["db_path"]) for m in kbb.list_boards(include_archived=False)}
+    boards = {m["slug"]: str(m["db_path"]) for m in mod.kbb.list_boards(include_archived=False)}
     adv = cfg["advisor"]
     text = metrics.render(
         rows=metrics.read_rows(mod._log_path()), spend=mod._spent_today(),
