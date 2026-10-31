@@ -573,6 +573,16 @@ class FindSweepsTest(unittest.TestCase):
             found = cli.find_sweeps([a, b, str(Path(root) / "missing")])
         self.assertEqual(found, [(a, "1", "scheduled"), (b, "3", "paused")])
 
+    def test_the_new_descriptive_name_is_found_too(self):
+        with tempfile.TemporaryDirectory() as root:
+            a = self.home(root, "a", [{"id": "1", "name": cli.CRON_NAME, "state": "scheduled"}])
+            self.assertEqual(cli.find_sweeps([a]), [(a, "1", "scheduled")])
+
+    def test_the_job_name_starts_with_the_plugin_name_and_says_what_it_does(self):
+        self.assertTrue(cli.CRON_NAME.startswith("calling-mom: "))
+        self.assertIn("sweep", cli.CRON_NAME)
+        self.assertNotEqual(cli.CRON_NAME, "calling-mom-sweep")
+
     def test_unreadable_job_files_are_skipped(self):
         with tempfile.TemporaryDirectory() as root:
             d = Path(root) / "h" / "cron"
@@ -613,6 +623,27 @@ class CommandWiringTest(unittest.TestCase):
         self.assertEqual(created, [])
         self.assertIn("already exists", s.text)
         self.assertIn("2d66", s.text)
+
+    def test_the_cron_job_is_created_and_announced_without_a_question(self):
+        s = Script("1", "1", "3", "1")
+        created = []
+        env = cli.Env(load=lambda: {}, save=lambda cfg: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: created.append(1), sweeps=lambda: [])
+        self.assertEqual(cli.cmd_setup(env), 0)
+        self.assertEqual(created, [1])
+        self.assertNotIn("[Y/n]", s.text)
+        self.assertIn("Creating the sweep cron job", s.text)
+        self.assertIn("--no-cron", s.text)
+
+    def test_no_cron_flag_says_nothing_is_created(self):
+        s = Script("1", "1", "3", "1")
+        created = []
+        env = cli.Env(load=lambda: {}, save=lambda cfg: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: created.append(1), sweeps=lambda: [])
+        cli.cmd_setup(env, cron=False)
+        self.assertEqual(created, [])
 
     def test_what_you_picked_is_written_without_asking_again(self):
         s = Script("1", "1", "3", "1")

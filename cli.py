@@ -15,7 +15,8 @@ from typing import Callable, Optional
 
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
-CRON_NAME = "calling-mom-sweep"
+CRON_NAME = "calling-mom: sweep - escalate parked cards, push metrics"
+CRON_NAMES = (CRON_NAME, "calling-mom-sweep")  # the second is the name of earlier versions: still ours
 # Starting points, not promises: model ids change. `setup` lists what is really configured.
 PRESETS = {
     "subscription": {"mom": ("claude-subscription-directsdk-experimental", "claude-sonnet-5-5"),
@@ -300,7 +301,7 @@ def find_sweeps(homes) -> list:
             jobs = json.loads((Path(home) / "cron" / "jobs.json").read_text()).get("jobs") or []
         except (OSError, ValueError, AttributeError):
             continue
-        found += [(str(home), j.get("id"), j.get("state") or "?") for j in jobs if j.get("name") == CRON_NAME]
+        found += [(str(home), j.get("id"), j.get("state") or "?") for j in jobs if j.get("name") in CRON_NAMES]
     return found
 
 
@@ -438,7 +439,11 @@ def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cr
     if existing:  # jobs are per Hermes home: look everywhere, never create a second one
         env.say("A sweep cron job already exists: " + ", ".join(f"{i} ({h}, {st})" for h, i, st in existing)
                 + ". Not creating another.")
-    elif cron is True or (cron is None and (yes or not env.interactive or env.ask("Create the 1-minute sweep cron job (catches crash-parked cards, pushes metrics)? [Y/n] > ").strip().lower() in ("", "y", "yes"))):
+    elif cron is False:
+        env.say("No sweep cron job created (--no-cron).")
+    else:
+        env.say(f"Creating the sweep cron job '{CRON_NAME}' (every minute: escalates cards the crash breaker parked, "
+                "pushes metrics). Skip it with --no-cron.")
         env.cron()
     env.say("Next: hermes calling-mom doctor   (makes one real call to each model)")
     return 0
@@ -506,8 +511,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     s.add_argument("--olymp", metavar="PROVIDER/MODEL", help="the expensive model, route:NAME, or none (default: keep the current one)")
     s.add_argument("--boards", metavar="A,B", help="boards that may use the advisor, or * (default: keep, else all)")
     s.add_argument("--cron", action=argparse.BooleanOptionalAction, default=None,
-                   help="create the sweep cron job (default: with --yes yes, otherwise ask)")
-    s.add_argument("--yes", action="store_true", help="also create the sweep cron job without asking")
+                   help="create the sweep cron job (default: yes, unless one exists)")
+    s.add_argument("--yes", action="store_true", help="accepted for scripts; setup never asks before writing")
     sub.add_parser("status", help="show the effective setup and today's usage")
     sub.add_parser("doctor", help="check the setup and make one real call to each model")
     parser.set_defaults(cm_cmd=None)

@@ -5,7 +5,7 @@ breaker parks emit no block hook. Silent unless it acted. The Pushgateway push i
 
 Install (profile scripts dir, then schedule):
     cp scripts/sweep.py "$HERMES_HOME/scripts/calling_mom_sweep.py"
-    hermes cron create "every 1m" --name calling-mom-sweep --no-agent \
+    hermes cron create "every 1m" --name "calling-mom: sweep - escalate parked cards, push metrics" --no-agent \
         --script calling_mom_sweep.py --interpreter <hermes venv python> --deliver local
 
 Set CALLING_MOM_DIR when the plugin does not live in $HERMES_HOME/plugins/calling-mom.

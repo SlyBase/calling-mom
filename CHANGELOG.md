@@ -21,8 +21,11 @@ Catalog-readiness: use only public Hermes surfaces for the advisor comment.
   once, nothing is linked). New flags run it without any question: `--mom`, `--olymp` (`provider/model`,
   `route:NAME`, `none`), `--boards`, `--cron/--no-cron`. Without a terminal and without the flags it exits with
   code 2 instead of waiting for input. The final "Write it? [y/N]" question is gone: you have just chosen the
-  values and the summary is shown, the flags are the consent in script mode; `--yes` now only means "create the
-  sweep cron job without asking".
+  values and the summary is shown, the flags are the consent in script mode. The sweep cron job is no longer
+  asked about either: `setup` says it is creating it (skip with `--no-cron`; never a second one). `--yes` is
+  accepted and does nothing. The job is now named `calling-mom: sweep - escalate parked cards, push metrics`, so
+  it is recognisable in `hermes cron list` (cron jobs have no owner field, the name is the link to the plugin);
+  jobs with the old name `calling-mom-sweep` are still recognised.
 - **One door to Hermes internals.** Hermes offers plugins no public Kanban API yet (pin a card to a model, unblock
   from a hook, read boards and events, egress redaction), so those private imports now live in a single file,
   `_core.py`, and a test fails if any other plugin file imports `hermes_cli`, `agent`, `tools` or `gateway`.
