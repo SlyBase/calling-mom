@@ -14,7 +14,6 @@ from collections import Counter
 _CATEGORIES = ("error", "loop", "validation", "architecture", "completion")
 _VERDICTS = ("followed", "rejected")
 _SIGNALS = ("same_error", "loop", "malformed", "steps")
-_RUNGS = ("effort",)
 _ESCALATION_REASONS = ("crit", "blocked", "breaker")
 
 _FAMILIES = {  # name -> (type, help)
@@ -29,7 +28,6 @@ _FAMILIES = {  # name -> (type, help)
     "calling_mom_verify_total": ("counter", "verify: gate runs by result."),
     "calling_mom_verify_ignored_total": ("counter", "verify: lines that were not run, by reason."),
     "calling_mom_review_redirects_total": ("counter", "Completions handed to the reviewer profile."),
-    "calling_mom_ladder_total": ("counter", "Free-rung retries (more reasoning effort) by rung."),
     "calling_mom_escalations_total": ("counter", "Cards pinned to the strong model, by reason (crit|blocked|breaker)."),
     "calling_mom_gave_up_age_seconds": ("gauge", "Age of the newest gave_up event per board (breaker park), seconds."),
     "calling_mom_spend_today_usd": ("gauge", "Advisor spend today (UTC), USD."),
@@ -64,8 +62,6 @@ def render(rows, spend, caps, boards, now) -> str:
         signals.update(r.get("signals") or [])
     verify = [r for r in rows if r.get("kind") == "verify"]
     ignored = Counter(r.get("why") or "unknown" for r in rows if r.get("kind") == "verify_ignored")
-    rungs = Counter({k: 0 for k in _RUNGS})
-    rungs.update(r.get("rung") or "unknown" for r in rows if r.get("kind") == "ladder")
     # initialised, not just counted: the series must exist from the first push, otherwise
     # `increase()` stays empty and the "parked but not escalated" alert can never fire
     escalations = Counter({r: 0 for r in _ESCALATION_REASONS})
@@ -102,8 +98,6 @@ def render(rows, spend, caps, boards, now) -> str:
             _sample("calling_mom_verify_ignored_total", n, why=why))
     samples["calling_mom_review_redirects_total"].append(
         _sample("calling_mom_review_redirects_total", kinds.get("review_redirect", 0)))
-    for rung in sorted(rungs):
-        samples["calling_mom_ladder_total"].append(_sample("calling_mom_ladder_total", rungs[rung], rung=rung))
     for reason, n in sorted(escalations.items()):
         samples["calling_mom_escalations_total"].append(
             _sample("calling_mom_escalations_total", n, reason=reason))

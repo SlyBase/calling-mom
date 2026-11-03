@@ -5,6 +5,7 @@ OpenAI Codex dangerous-command rules (forced rm, sudo/env/bash -c wrappers) and 
 """
 import importlib.util
 import re
+import time
 import unittest
 from pathlib import Path
 
@@ -102,6 +103,22 @@ class RuleMatrixTest(unittest.TestCase):
     def test_every_default_pattern_compiles(self):
         for pattern in rules.CRITICAL_COMMANDS + rules.WATCH_COMMANDS + rules.CRITICAL_FILES:
             re.compile(pattern)
+
+    def test_long_lines_are_classified_fast(self):
+        """Unbounded `.*` gaps went cubic on one long line (12 KB of `git push ` took many seconds)."""
+        words = ["git push ", "git commit ", "gh api ", "kubectl create ", "kubectl -n a ", "gsutil ", "gcloud ",
+                 "docker compose down ", "curl -X GET ", "curl ", "route53 ", "aws ", "git ", "ssh -o x "]
+        for word in words:
+            for label, text in (("one line", word * (12000 // len(word))), ("many lines", (word + "x\n") * (12000 // len(word)))):
+                with self.subTest(word=word, shape=label):
+                    started = time.perf_counter()
+                    rules.classify(text)
+                    self.assertLess(time.perf_counter() - started, 0.05)
+
+    def test_a_gap_is_bounded_not_unlimited(self):
+        near, far = "git push origin " + "x" * 100 + " --force", "git push origin " + "x" * 400 + " --force"
+        self.assertEqual(rules.classify(near), "critical")
+        self.assertIsNone(rules.classify(far))   # ponytail: ceiling of 256 characters between the words
 
     def test_files(self):
         for path in ("infra/main.tf", "db/migrations/001.sql", "Dockerfile", "docker-compose.yml",
