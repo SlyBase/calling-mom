@@ -3,6 +3,24 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.3.2] - 2026-11-03
+
+Review fixes for the Hermes plugin catalog (NousResearch/hermes-agent#147276).
+
+### Removed
+- The optional ladder rung `ladder.effort_first` (retry once with more reasoning effort before the strong model). It
+  needed a raw `UPDATE tasks SET block_recurrences = 0` on Hermes' Kanban table. The plugin no longer writes that table
+  directly: a card that gave up is pinned to the strong model once, and the board's own recurrence breaker decides what
+  happens after that. The metric `calling_mom_ladder_total` is gone with it. The setting was off by default; a leftover
+  `calling_mom.ladder` key in `config.yaml` is ignored.
+
+### Fixed
+- Unbounded `.*` gaps in the default risk list made one long line very slow (about 10 s for 4 KB of `git push `).
+  Every gap is now at most 256 characters, stays on one line and stops at the next copy of its own command word, so
+  matching time grows linearly. At most the first 4000 characters of a command are classified. Ceiling: a risky
+  command whose words are more than 256 characters apart, or that starts after character 4000, is not flagged.
+  A timing test (12 KB, single line and multi-line, under 50 ms) guards this.
+
 ## [1.3.1] - 2026-10-31
 
 Catalog-readiness: use only public Hermes surfaces for the advisor comment.

@@ -76,7 +76,6 @@ DEFAULTS = {
         "trusted_creators": ["user"],  # only cards created by these are honoured
         "allow": ["python3", "python", "pytest", "test", "true", "false", "make", "ruff", "uv", "node", "npm", "go", "cargo"],
     },
-    "ladder": {"effort_first": False, "effort": "high"},  # free rung: same model, more thinking, before another model
     "review": {"marker": "[review]", "reviewer": "reviewer"},  # [review] cards finish via the reviewer profile ("" = off)
     "metrics": {"pushgateways": [], "instance": "hermes"},  # Pushgateway base URLs, tried in order ([] = off)
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
@@ -124,7 +123,6 @@ _awaiting_reply: set = set()  # (task, run) that got advice; the next worker rep
 _REFUTED = re.compile(
     r"disprov|refut|ruled out|widerleg|not the (cause|issue|problem)|already (resolved|fixed|verified|done)|"
     r"does(n't| not) apply|is (wrong|incorrect)", re.I)
-_HIGH_EFFORT = {"high", "xhigh", "max", "ultra"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"  # author of comments written by versions before 1.3.1; new ones carry the worker's profile
 _UNAVAILABLE = "[advisor unavailable]"
@@ -225,7 +223,7 @@ def _profile_runs_strong() -> bool:
 
 
 def on_blocked(task_id=None, board=None, reason=None, **_):
-    """The weak model gave up. Ladder: (optional) more thinking -> strong model -> human."""
+    """The weak model gave up: the strong model gets one attempt, then the board (and a human) take over."""
     if not _enabled() or not task_id or _profile_runs_strong():
         return
     try:
@@ -238,17 +236,7 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
             if task.model_override == settings()["model"]:
                 return  # the strong model already had its attempt
             why = f"blocked ({reason.strip()[:200]})" if reason and reason.strip() else "blocked"
-            ladder = settings()["ladder"]
-            if ladder["effort_first"] and (task.reasoning_effort or "") not in _HIGH_EFFORT:
-                kb.set_reasoning_effort(conn, task_id, ladder["effort"])
-                kb.add_comment(conn, task_id, AUTHOR, f"Retry with reasoning effort {ladder['effort']} on the same model — {why}.")
-                _trace_row("ladder", task=task_id, rung="effort")
-                # ponytail: the board would route the 2nd same-kind block to triage and skip the strong rung.
-                # The ladder bounds the loop itself (effort high, then model pinned), so reset this card's counter.
-                with kb.write_txn(conn):
-                    conn.execute("UPDATE tasks SET block_recurrences = 0 WHERE id = ?", (task_id,))
-            else:
-                _pin_strong(conn, task, why, reason="blocked")
+            _pin_strong(conn, task, why, reason="blocked")
             kb.unblock_task(conn, task_id)
     except Exception as exc:  # pragma: no cover - never break the board
         logger.warning("calling-mom: block hook failed for %s: %s", task_id, exc)
@@ -817,7 +805,7 @@ def _architecture_hit(key, tool_name, args):
         body = str(args.get("content") or args.get("new_string") or "")[:800]
         tier, note = ("critical" if rules.is_critical_file(target, cfg.get("patterns") or []) else None), f"File: {target}\n{body}"
     elif tool_name in ("terminal", "execute_code"):  # execute_code runs shell commands too
-        target = str(args.get("command") or args.get("code") or "")
+        target = str(args.get("command") or args.get("code") or "")[:4000]  # ponytail: ceiling; a hit past 4000 characters is missed
         tier = rules.classify(target, extra=cfg.get("commands_extra") or [], critical=cfg.get("commands") or [],
                               watch=cfg.get("watch") or [])
         note = f"Command: {target[:400]}"

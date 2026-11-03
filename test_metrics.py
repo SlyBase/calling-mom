@@ -34,7 +34,6 @@ ROWS = [
     {"kind": "verify", "ok": False, "fails": 1},
     {"kind": "verify_ignored", "why": "untrusted creator"},
     {"kind": "review_redirect", "reviewer": "reviewer"},
-    {"kind": "ladder", "rung": "effort"},
 ]
 
 
@@ -90,10 +89,10 @@ class RenderTest(unittest.TestCase):
         self.assertIn('calling_mom_verify_total{result="fail"} 1', out)
         self.assertIn('calling_mom_verify_ignored_total{why="untrusted creator"} 1', out)
 
-    def test_review_and_ladder(self):
+    def test_review_redirects(self):
         out = lines(self.render())
         self.assertIn("calling_mom_review_redirects_total 1", out)
-        self.assertIn('calling_mom_ladder_total{rung="effort"} 1', out)
+        self.assertNotIn("calling_mom_ladder_total", "\n".join(out))
 
     def test_escalation_series_exists_even_without_escalations(self):
         """Without a zero-initialised series an `increase()` alert can never fire."""

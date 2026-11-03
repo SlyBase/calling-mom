@@ -35,7 +35,6 @@ plugins:
 | `categories.<name>` | inherit | Per category (`error`, `loop`, `validation`, `architecture`) its own `model` AND `provider`. |
 | `verify.*` | see below | `timeout_s`, `max_fix`, `trusted_creators ["user"]`, `allow`. |
 | `review.*` | `[review]` / `reviewer` | Marker and reviewer profile (`""` = off). |
-| `ladder.effort_first` | `false` | Free rung before the mom. |
 | `metrics.pushgateways` | `[]` | Pushgateway URLs, tried in order. |
 
 Kill switch: `CALLING_MOM=off` in the environment.
@@ -79,7 +78,7 @@ Card text can come from mail or web content, so treat it as untrusted.
 
 ## Metrics
 
-`metrics.py` renders Prometheus text from the plugin log, the spend ledger and read-only board DBs. The sweep PUTs it to `/metrics/job/calling_mom/instance/<instance>` on the first reachable Pushgateway. Families: `calling_mom_events_total`, `_advisor_calls_total`, `_advisor_errors_total` (dead key, no login), `_olymp_calls_total`, `_advisor_tokens_total`, `_advisor_cost_usd_total`, `_advice_feedback_total{verdict}`, `_stuck_signals_total`, `_verify_total`, `_verify_ignored_total`, `_review_redirects_total`, `_ladder_total`, `_escalations_total{reason}`, `_gave_up_age_seconds{board}`, `_spend_today_{usd,tokens}`, `_spend_cap_{usd,tokens}`, `_cards{board,state}`, `_last_push_timestamp_seconds`.
+`metrics.py` renders Prometheus text from the plugin log, the spend ledger and read-only board DBs. The sweep PUTs it to `/metrics/job/calling_mom/instance/<instance>` on the first reachable Pushgateway. Families: `calling_mom_events_total`, `_advisor_calls_total`, `_advisor_errors_total` (dead key, no login), `_olymp_calls_total`, `_advisor_tokens_total`, `_advisor_cost_usd_total`, `_advice_feedback_total{verdict}`, `_stuck_signals_total`, `_verify_total`, `_verify_ignored_total`, `_review_redirects_total`, `_escalations_total{reason}`, `_gave_up_age_seconds{board}`, `_spend_today_{usd,tokens}`, `_spend_cap_{usd,tokens}`, `_cards{board,state}`, `_last_push_timestamp_seconds`.
 
 Two of them exist for alerting:
 
@@ -97,7 +96,7 @@ The observation log, sweep watermark and spend ledger live under the installatio
 
 ## What we measured, and what we did not
 
-24 runs (6 hidden-test coding tasks x 4 arms: local, local + high reasoning effort, local + advisor, strong model). **All 24 were correct.** The local model solved every task alone, so this set shows **no case for escalation**: it is too easy to find the capability boundary. `ladder.effort_first` stays off because high effort was slower for no gain. Build a harder set (multi-file, ambiguous spec) before tuning any threshold.
+24 runs (6 hidden-test coding tasks x 4 arms: local, local + high reasoning effort, local + advisor, strong model). **All 24 were correct.** The local model solved every task alone, so this set shows **no case for escalation**: it is too easy to find the capability boundary. The free rung "more reasoning effort first" was removed in 1.3.2: it needed a write into Hermes' Kanban table, and high effort was slower for no gain. Build a harder set (multi-file, ambiguous spec) before tuning any threshold.
 
 Two-tier routing was exercised live with real models (mom and olymp on a subscription): routine and even severe incidents were answered by the mom alone and olymp was never asked; the olymp leg was proven with a forced `ESCALATE`. **No natural `ESCALATE` has been observed yet**, so how often a weaker mom escalates is unmeasured.
 

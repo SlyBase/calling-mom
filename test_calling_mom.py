@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -689,6 +690,17 @@ class CriticalDefaultsTest(AdvisorTest):
 
     def test_execute_code_is_checked_like_terminal(self):
         self.assertIn("[ADVISOR", self.run_cmd("gh pr merge 1", tool="execute_code") or "")
+
+    def test_only_the_first_4000_characters_are_classified(self):
+        pad = "echo " + "x" * 4100
+        self.assertIsNone(self.run_cmd(pad + "; gh pr merge 1"))   # ponytail: ceiling, a hit past 4000 characters is missed
+        self.assertIn("[ADVISOR", self.run_cmd("gh pr merge 1; " + pad) or "")
+
+    def test_a_huge_single_line_command_is_classified_fast(self):
+        for command in ("git push " * 1400, ("git push origin feat/x\n" * 500)):
+            started = time.perf_counter()
+            self.assertIsNone(self.run_cmd(command))
+            self.assertLess(time.perf_counter() - started, 0.5)   # whole hook, not just the regex
 
 
 class CompletionCheckTest(AdvisorTest):
@@ -1395,51 +1407,31 @@ class VerifySecurityTest(unittest.TestCase):
         self.assertIsNone(self.gate())   # exit 0 -> the token was not visible
 
 
-class LadderTest(unittest.TestCase):
-    """Step C1: optional free rung - raise the reasoning effort of the same model before paying for another one."""
+class BlockedCardTest(unittest.TestCase):
+    """A card the weak model gave up on is pinned to the strong model once; the board's own breaker does the rest."""
 
     def setUp(self):
         os.environ["CALLING_MOM"] = "on"
-        self.saved = {k: dict(v) if isinstance(v, dict) else v for k, v in plugin.DEFAULTS.items()}
-        plugin.DEFAULTS["ladder"]["effort_first"] = True
-
-    def tearDown(self):
-        plugin.DEFAULTS.clear(); plugin.DEFAULTS.update(self.saved)
 
     def give_up(self, tid, reason="stuck"):
         with_conn(lambda c: kb.block_task(c, tid, reason=reason, kind="capability"))
         plugin.on_blocked(task_id=tid, board=None, reason=reason)
 
-    def test_first_give_up_raises_effort_not_the_model(self):
+    def test_first_give_up_pins_the_strong_model(self):
         tid = with_conn(lambda c: kb.create_task(c, title="hard", assignee="worker"))
         self.give_up(tid)
         t = self_task(tid)
-        self.assertEqual((t.reasoning_effort, t.model_override, t.status), ("high", None, "ready"))
+        self.assertEqual((t.reasoning_effort, t.model_override, t.status), (None, STRONG, "ready"))
 
-    def test_second_give_up_goes_to_the_strong_model(self):
+    def test_second_give_up_is_left_to_the_board_and_a_human(self):
         tid = with_conn(lambda c: kb.create_task(c, title="hard 2", assignee="worker"))
         self.give_up(tid); self.give_up(tid, "still stuck")
         t = self_task(tid)
-        self.assertEqual((t.reasoning_effort, t.model_override, t.status), ("high", STRONG, "ready"))
-
-    def test_third_give_up_is_left_to_the_board_and_a_human(self):
-        tid = with_conn(lambda c: kb.create_task(c, title="hard 5", assignee="worker"))
-        self.give_up(tid); self.give_up(tid, "again"); self.give_up(tid, "and again")
-        t = self_task(tid)
         self.assertEqual(t.model_override, STRONG)
-        self.assertIn(t.status, {"blocked", "triage"})   # no fourth rung
+        self.assertIn(t.status, {"blocked", "triage"})   # the strong model had its attempt
 
-    def test_card_already_on_high_effort_skips_the_free_rung(self):
-        tid = with_conn(lambda c: kb.create_task(c, title="hard 3", assignee="worker", reasoning_effort="high"))
-        self.give_up(tid)
-        self.assertEqual(self_task(tid).model_override, STRONG)
-
-    def test_default_is_off_and_keeps_the_old_behaviour(self):
-        plugin.DEFAULTS["ladder"]["effort_first"] = False
-        tid = with_conn(lambda c: kb.create_task(c, title="hard 4", assignee="worker"))
-        self.give_up(tid)
-        t = self_task(tid)
-        self.assertEqual((t.reasoning_effort, t.model_override), (None, STRONG))
+    def test_the_plugin_never_writes_the_board_tables_directly(self):
+        self.assertNotIn("UPDATE tasks", Path(plugin.__file__).read_text())
 
     def test_a_profile_that_already_runs_the_strong_model_is_not_re_pinned(self):
         import hermes_cli.config as cfg
