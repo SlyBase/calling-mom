@@ -1960,3 +1960,312 @@ class GitWorkspaceTest(AsyncVerifyTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreflightTest(AdvisorFixture, unittest.TestCase):
+    """WP2: Mom looks at a critical command before it runs. HOLD blocks and persists, everything else fails open."""
+
+    CMD = "git push --force origin main"
+
+    def setUp(self):
+        super().setUp()
+        self._state = os.environ.get("CALLING_MOM_STATE")
+        os.environ["CALLING_MOM_STATE"] = str(Path(tempfile.mkdtemp()) / "state.json")
+        self.llm = FakeLlm(text="GO", cost=0.001)
+        plugin._ctx.llm = self.llm
+
+    def tearDown(self):
+        super().tearDown()
+        if self._state is None:
+            os.environ.pop("CALLING_MOM_STATE", None)
+        else:
+            os.environ["CALLING_MOM_STATE"] = self._state
+
+    def run_cmd(self, command=None, tool="terminal"):
+        args = {"command": command or self.CMD} if tool == "terminal" else {"code": command or self.CMD}
+        return plugin.on_pre_tool(tool_name=tool, args=args)
+
+    def hold_with(self, text="HOLD: it rewrites shared history. Instead: push a branch and open a PR."):
+        self.llm.text = text
+        self.llm._res.text = text
+
+    def rows(self, kind="preflight"):
+        path = Path(os.environ["CALLING_MOM_LOG"])
+        rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in rows if r.get("kind") == kind]
+
+    def comments(self):
+        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid))]
+
+    # --- GO ---------------------------------------------------------------------------------------------
+
+    def test_go_allows_the_command_and_logs_a_prose_free_row(self):
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(len(self.llm.calls), 1)
+        (row,) = self.rows()
+        self.assertEqual(row["verdict"], "go")
+        self.assertEqual(row["task"], self.tid)
+        self.assertEqual(row["cmd_hash"], plugin.cmd_hash(self.CMD))
+        self.assertEqual(row["model"], STRONG)
+        self.assertNotIn("origin", json.dumps(row))
+
+    def test_the_question_carries_the_card_and_the_command_and_asks_for_go_or_hold(self):
+        self.run_cmd()
+        system, user = (m["content"] for m in self.llm.calls[0]["messages"])
+        self.assertIn("HOLD:", system)
+        self.assertIn("fix the parser", user)
+        self.assertIn(self.CMD, user)
+
+    def test_the_question_carries_the_last_steps(self):
+        plugin._history[plugin._worker_key()] = [
+            {"tool": "terminal", "args": "{\"command\": \"ls\"}", "ok": True, "text": "ok"}
+        ]
+        self.run_cmd()
+        user = self.llm.calls[0]["messages"][1]["content"]
+        self.assertIn("Last steps:", user)
+        self.assertIn("terminal", user)
+
+    def test_execute_code_is_checked_like_a_terminal(self):
+        self.run_cmd(tool="execute_code")
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_the_prompt_is_redacted(self):
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        self.run_cmd(f"git push --force https://{token}@github.com/o/r main")
+        self.assertNotIn(token, "\n".join(m["content"] for m in self.llm.calls[0]["messages"]))
+
+    # --- HOLD -------------------------------------------------------------------------------------------
+
+    def test_hold_blocks_with_reason_and_alternative_and_posts_the_card_comment(self):
+        self.hold_with()
+        out = self.run_cmd()
+        self.assertEqual(out["action"], "block")
+        self.assertIn("calling-mom pre-flight HOLD: it rewrites shared history", out["message"])
+        self.assertIn("Instead: push a branch and open a PR", out["message"])
+        self.assertIn("stays blocked on this card", out["message"])
+        self.assertIn("kanban_block(kind='needs_input')", out["message"])
+        self.assertTrue(any(c.startswith("[pre-flight] HOLD: it rewrites shared history") for c in self.comments()))
+        self.assertEqual(self.rows()[0]["verdict"], "hold")
+
+    def test_hold_is_persisted_under_task_and_command_hash(self):
+        self.hold_with()
+        self.run_cmd()
+        hold = plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD))
+        self.assertEqual(hold["board"], "t-board")
+        self.assertIn("rewrites shared history", hold["reason"])
+        self.assertEqual([h["cmd_hash"] for h in plugin.holds_for(self.tid)], [plugin.cmd_hash(self.CMD)])
+
+    def test_identical_retry_is_held_without_a_model_call(self):
+        self.hold_with()
+        self.run_cmd()
+        again = self.run_cmd("git  push --force   origin main\n")  # same command, other whitespace
+        self.assertEqual(again["action"], "block")
+        self.assertIn("rewrites shared history", again["message"])
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual([r["verdict"] for r in self.rows()], ["hold", "held_again"])
+
+    def test_the_hold_survives_a_new_run_of_the_card(self):
+        self.hold_with()
+        self.run_cmd()
+        os.environ["HERMES_KANBAN_RUN_ID"] = "2"
+        plugin._history.clear()
+        self.assertEqual(self.run_cmd()["action"], "block")
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_a_different_critical_command_is_asked_again(self):
+        self.hold_with()
+        self.run_cmd()
+        self.assertEqual(self.run_cmd("git push --force origin release")["action"], "block")
+        self.assertEqual(len(self.llm.calls), 2)
+
+    def test_a_hold_of_one_card_does_not_hold_another(self):
+        self.hold_with()
+        self.run_cmd()
+        other = with_conn(lambda c: kb.create_task(c, title="other card", assignee="worker"))
+        os.environ["HERMES_KANBAN_TASK"] = other
+        self.llm.text = self.llm._res.text = "GO"
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(len(self.llm.calls), 2)
+
+    def test_a_hold_without_an_alternative_still_holds(self):
+        self.hold_with("HOLD: this deletes the remote branch")
+        out = self.run_cmd()
+        self.assertEqual(out["action"], "block")
+        self.assertIn("this deletes the remote branch", out["message"])
+        self.assertIn("Instead:", out["message"])
+
+    # --- release ----------------------------------------------------------------------------------------
+
+    def test_an_allowance_lets_the_held_command_run_once(self):
+        self.hold_with()
+        self.run_cmd()
+        h = plugin.cmd_hash(self.CMD)
+        self.assertTrue(plugin.allow_once("t-board", self.tid, h, by="cli"))
+        self.assertIsNone(self.run_cmd())                     # allowed, no model call
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual([r["verdict"] for r in self.rows()], ["hold", "allowed"])
+        self.assertEqual(self.rows()[1]["reason"], "allowance")
+        self.assertIsNone(plugin.active_hold(self.tid, h))    # consumed
+        self.run_cmd()                                         # the next identical command is asked again
+        self.assertEqual(len(self.llm.calls), 2)
+
+    def test_an_allowance_needs_a_hold(self):
+        self.assertFalse(plugin.allow_once("t-board", self.tid, plugin.cmd_hash(self.CMD), by="cli"))
+        self.run_cmd()
+        self.assertEqual(len(self.llm.calls), 1)               # nothing was pre-approved
+
+    def test_consuming_no_allowance_is_a_noop(self):
+        plugin._consume_allowance(self.tid, "nope")            # nothing to remove: stays empty
+        self.assertIsNone(plugin.active_hold(self.tid, "nope"))
+
+    def test_olymp_and_the_worker_have_no_way_to_release(self):
+        self.hold_with()
+        self.run_cmd()
+        for _ in range(3):
+            self.assertEqual(self.run_cmd()["action"], "block")
+        self.assertEqual(len(self.llm.calls), 1)
+
+    # --- fail open --------------------------------------------------------------------------------------
+
+    def test_a_slow_mom_is_allowed_within_the_deadline(self):
+        class Slow(FakeLlm):
+            def complete(self, messages, **kw):
+                time.sleep(2)
+                return super().complete(messages, **kw)
+        plugin._ctx.llm = Slow(text="HOLD: x. Instead: y.")
+        plugin.DEFAULTS["preflight"]["timeout_s"] = 0.2
+        t0 = time.monotonic()
+        self.assertIsNone(self.run_cmd())
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual((self.rows()[0]["verdict"], self.rows()[0]["reason"]), ("allowed", "timeout"))
+        self.assertIsNone(plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD)))
+
+    def test_the_deadline_is_40_percent_of_the_hook_budget(self):
+        class Slow(FakeLlm):
+            def complete(self, messages, **kw):
+                time.sleep(3)
+                return super().complete(messages, **kw)
+        plugin._ctx.llm = Slow()
+        real = plugin._core.hook_budget
+        plugin._core.hook_budget = lambda: 2.0
+        try:
+            t0 = time.monotonic()
+            self.assertIsNone(self.run_cmd())
+        finally:
+            plugin._core.hook_budget = real
+        self.assertLess(time.monotonic() - t0, 1.2)           # 0.4 x 2 s, plus slack; timeout_s is 12
+        self.assertEqual(self.rows()[0]["reason"], "timeout")
+
+    def test_a_provider_error_is_allowed(self):
+        self.llm.boom = True
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual((self.rows()[0]["verdict"], self.rows()[0]["reason"]), ("allowed", "down"))
+
+    def test_a_model_that_just_failed_is_not_asked_again(self):
+        self.llm.boom = True
+        self.run_cmd()
+        self.run_cmd("git push --force origin other")
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual([r["reason"] for r in self.rows()], ["down", "down"])
+
+    def test_an_unparseable_answer_is_allowed(self):
+        self.hold_with("I am not sure, maybe?")
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual((self.rows()[0]["verdict"], self.rows()[0]["reason"]), ("allowed", "parse"))
+        self.assertIsNone(plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD)))
+
+    def test_an_empty_answer_is_allowed(self):
+        self.hold_with("")
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.rows()[0]["reason"], "parse")
+
+    def test_go_with_extra_words_is_not_a_go(self):
+        self.hold_with("GO ahead but HOLD on")
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.rows()[0]["reason"], "parse")
+
+    def test_the_per_card_cap_allows_and_stops_asking(self):
+        plugin.DEFAULTS["preflight"]["max_per_card"] = 2
+        for i in range(4):
+            self.assertIsNone(self.run_cmd(f"git push --force origin b{i}"))
+        self.assertEqual(len(self.llm.calls), 2)
+        self.assertEqual([r.get("reason") for r in self.rows()], [None, None, "cap", "cap"])
+        self.assertEqual([r["verdict"] for r in self.rows()], ["go", "go", "allowed", "allowed"])
+
+    def test_the_cap_does_not_release_an_existing_hold(self):
+        plugin.DEFAULTS["preflight"]["max_per_card"] = 1
+        self.hold_with()
+        self.run_cmd()
+        self.assertEqual(self.run_cmd()["action"], "block")
+
+    def test_the_daily_spend_cap_allows(self):
+        plugin.DEFAULTS["advisor"]["daily_usd_cap"] = 0.0005
+        self.run_cmd()                                         # costs 0.001: cap reached
+        self.assertIsNone(self.run_cmd("git push --force origin b2"))
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual(self.rows()[1]["reason"], "cap")
+
+    def test_the_spend_is_counted(self):
+        self.run_cmd()
+        self.assertAlmostEqual(plugin._spent_today()["usd"], 0.001)
+
+    def test_a_corrupt_state_file_means_no_holds(self):
+        plugin._holds_path().parent.mkdir(parents=True, exist_ok=True)
+        plugin._holds_path().write_text("{not json")
+        self.assertIsNone(plugin.active_hold(self.tid, "abc"))
+        self.assertIsNone(self.run_cmd())
+
+    # --- never -----------------------------------------------------------------------------------------
+
+    def test_local_only_cards_are_never_asked_and_never_held(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="[local-only] prod push", assignee="worker"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+        self.assertEqual((self.rows()[0]["verdict"], self.rows()[0]["reason"]), ("skipped", "local_only"))
+
+    def test_a_non_critical_command_is_not_asked(self):
+        for cmd in ("ls -la", "git push origin feat/x", "pytest -q"):
+            self.assertIsNone(self.run_cmd(cmd))
+        self.assertEqual(self.llm.calls, [])
+        self.assertEqual(self.rows(), [])
+
+    def test_other_tools_are_not_asked(self):
+        self.assertIsNone(plugin.on_pre_tool(tool_name="read_file", args={"path": "/a"}))
+        self.assertIsNone(plugin.on_pre_tool(tool_name="terminal", args={}))
+        self.assertEqual(self.llm.calls, [])
+
+    def test_outside_a_kanban_worker_nothing_happens(self):
+        os.environ.pop("HERMES_KANBAN_TASK")
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_a_board_that_did_not_opt_in_is_not_asked(self):
+        os.environ["HERMES_KANBAN_BOARD"] = "other-board"
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_it_is_active_only_where_the_advisor_is(self):
+        plugin.DEFAULTS["advisor"]["enabled"] = False
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_it_has_its_own_switch(self):
+        plugin.DEFAULTS["preflight"]["enabled"] = False
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_the_kill_switch_wins(self):
+        os.environ["CALLING_MOM"] = "off"
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_a_card_that_does_not_exist_is_ignored(self):
+        os.environ["HERMES_KANBAN_TASK"] = "t_missing"
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_a_card_without_model_context_still_works_without_a_comment_tool(self):
+        plugin._ctx.dispatch_tool = None                       # Hermes older than the plugin floor
+        self.hold_with()
+        self.assertEqual(self.run_cmd()["action"], "block")

@@ -32,6 +32,7 @@ plugins:
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. (The dashboard field `completion_contract: local-only` is a different thing: the board default.) |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only). |
+| `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
 | `categories.<name>` | inherit | Per category (`error`, `loop`, `validation`, `architecture`) its own `model` AND `provider`. |
 | `verify.*` | see below | `timeout_s 600`, `max_fix`, `trusted_creators ["user"]`, `allow`. The command runs in the background, see "Hook deadlines". |
 | `review.*` | `[review]` / `reviewer` | Marker and reviewer profile (`""` = off). |
@@ -72,6 +73,7 @@ Card text can come from mail or web content, so treat it as untrusted.
 
 - **`verify:`** runs only for cards created by `verify.trusted_creators`, never through a shell (`shlex`), only commands whose first word is in `verify.allow`, with a reduced environment. `python3 -c` is still arbitrary code: the creator check is the real control. Ignored lines are logged as `verify_ignored`.
 - **Advisor** is opt-in per board or card. Context is redacted with Hermes' `redact_for_egress`. Board tool results (`kanban_*`) are filtered out of the context. Daily USD and token caps apply.
+- **Pre-flight** is active only where the advisor is (board opt-in or card marker) and never on `[local-only]` cards. The card and the command are redacted with `redact_for_egress` before the question leaves. A HOLD is a persistent block that only a human release lifts; a model never releases its own hold. The log stores only the command hash, not the command.
 - **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content.
 - The plugin never edits Hermes config.
 
@@ -100,9 +102,15 @@ value through `_core.hook_budget()` (1..600 s) and keeps every synchronous wait 
   during the run, in a workspace without git, is not seen.
 - **The prompt tip** (`SECOND-OPINION`, `verify:`) is added to Kanban worker sessions only (`HERMES_KANBAN_TASK`).
 - **Untyped blocks** are escalated only on cards with an assignee; a card nobody works on is a human to-do.
+- **Pre-flight is bounded and fail-open.** A critical command gets ONE synchronous question, on its own thread, with
+  a deadline of `min(preflight.timeout_s, 0.4 x budget)` (default 12 s). A timeout, a down provider, an unparseable
+  answer or the per-card cap (`preflight.max_per_card`) lets the command run and the post-hoc review happens as before.
+  A HOLD persists in the plugin state (task, normalized command hash) and blocks later runs of the card without a
+  model call; only a human release removes it (WP3/WP4).
 
 New log rows: `verify` has `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ms` and `exit`;
-`advice_late` has `signal` and `ms`. Metrics count only finished verify rows.
+`advice_late` has `signal` and `ms`; `preflight` has `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`),
+`reason` (`timeout`, `down`, `parse`, `cap`, `allowance`, `local_only`) and `cmd_hash`. Metrics count only finished verify rows.
 
 ## Metrics
 

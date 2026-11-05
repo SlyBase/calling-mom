@@ -109,6 +109,19 @@ When Olymp answered, the comment says so: `claude-opus-5-5 (claude-subscription-
 If a helper cannot be reached (dead key, not logged in) you get **one** comment, never silence:
 `[advisor unavailable] ... Check the setup: hermes calling-mom doctor`.
 
+**Before** a command that the risk list marks critical (force push, branch delete, `terraform apply`, `kubectl
+delete`, `DROP TABLE`, a broad `rm -rf`, ...) a Kanban worker may run, Mom looks at it once. If she says hold,
+the card gets:
+
+```
+[pre-flight] HOLD: it rewrites shared history. Instead: push a branch and open a PR.
+This exact command stays blocked on this card until a human allows it.
+```
+
+and the command does not run. The exact command stays blocked on this card (also in a later run) until a human
+releases it; a timeout, a down provider, an unparseable answer or the per-card cap lets the command run and the
+post-hoc review happens as before.
+
 ## Your money and your data
 
 - **Nothing leaves your machine until you say so.** Helpers are off until you enable them and name a board (or put `[advisor]` on a card).

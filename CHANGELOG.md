@@ -5,6 +5,18 @@ versioning: [SemVer](https://semver.org/).
 
 ## [1.4.0] - unreleased
 
+### Added
+- **Pre-flight: a critical command is asked before it runs.** Before a Kanban worker runs a command that the risk
+  list marks critical (force push, branch delete, release or tag publish, `terraform apply`, `kubectl delete`,
+  `DROP TABLE`, a broad `rm -rf`, the rest of `CRITICAL_COMMANDS`), `pre_tool_call` asks Mom once (one synchronous
+  call, deadline `min(preflight.timeout_s, 0.4 x hook budget)`, default 12 s), active only where the advisor is and
+  never on `[local-only]` cards, non-critical commands, or outside Kanban workers. **GO** allows the command.
+  **HOLD** blocks it with the reason and a safer alternative, posts the card comment `[pre-flight] HOLD: ...`, and
+  persists the hold (task, normalized command hash) so a later run of the card is held without another model call.
+  Only a human release lifts a hold (WP3/WP4); a timeout, a down provider, an unparseable answer or the cap
+  (`preflight.max_per_card`, default 4) lets the command run and the 1.3 post-hoc review runs as today.
+  Config: `calling_mom.preflight: {enabled: true, timeout_s: 12, max_per_card: 4}`.
+
 ### Fixed
 - No hook reaches Hermes' hook timeout any more (`plugins.hook_callback_timeout`, default 30 s). Before, a slow
   Mom (40 s), Mom plus Olymp (about 80 s) or a `verify:` command (120 s) inside `pre_tool_call` could time out; a

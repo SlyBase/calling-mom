@@ -89,6 +89,11 @@ DEFAULTS = {
         "max_consults_per_card": 3, "max_output_tokens": 700,
         "context_chars": 6000, "daily_usd_cap": 2.0, "daily_token_cap": 200000, "timeout_s": 40,
     },
+    "preflight": {  # before a critical command runs, one short question to the strong model
+        "enabled": True,  # its own switch; active only where the advisor is active (board opt-in or marker)
+        "timeout_s": 12,  # the synchronous call deadline; the effective deadline is min(timeout_s, 0.4 x hook budget)
+        "max_per_card": 4,  # model calls per card (per run); past it, critical commands are allowed
+    },
     # "olymp" tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
     # every category then uses the "mom" (top-level model/provider). A per-category entry below still wins.
     # The mom answers first and says ESCALATE only for a rare high-stakes case; then (and only then) olymp is asked.
@@ -404,7 +409,8 @@ def on_dispatch_tick(board=None, **_):
 
 
 def on_pre_tool(tool_name="", args=None, **_):
-    """pre_tool_call: ``[crit]`` cards get the strong model at creation; completion is gated by ``verify:``."""
+    """pre_tool_call: ``[crit]`` cards get the strong model at creation; completion is gated by ``verify:``;
+    a critical command is asked before it runs (pre-flight)."""
     if not _enabled():
         return None
     t0 = time.monotonic()  # this hook is bounded by Hermes and fails closed: stay under 40 % of its timeout
@@ -422,6 +428,12 @@ def on_pre_tool(tool_name="", args=None, **_):
             return _review_redirect(key, args or {}) or _completion_check(key, args or {}, t0)
         except Exception as exc:  # pragma: no cover - a broken check must not trap the worker
             logger.warning("calling-mom: verify/review gate failed: %s", exc)
+            return None
+    if tool_name in ("terminal", "execute_code"):
+        try:
+            return _preflight_check(tool_name, args or {}, t0)
+        except Exception as exc:  # pragma: no cover - a broken check must not trap the worker
+            logger.warning("calling-mom: pre-flight failed: %s", exc)
             return None
     if tool_name != "kanban_create":
         return None
@@ -754,6 +766,207 @@ def _post_comment(task_id, body) -> bool:
 
 _VERIFY_LINE = re.compile(r"(?im)^\s*verify:\s*(.+?)\s*$")
 _GATED = {"kanban_complete", "kanban_request_review"}
+
+
+# --- pre-flight (WP2): a critical command is asked before it runs -------------------------------------------
+_preflight_calls: dict = {}  # task_id -> model calls spent on pre-flight (per card, the cap is per card)
+
+
+def _holds_path() -> Path:
+    """State file for holds and allowances (``CALLING_MOM_STATE`` override; the sweep watermark shares it)."""
+    return _state_path()
+
+
+def _load_holds() -> dict:
+    try:
+        data = json.loads(_holds_path().read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_hash(command) -> str:
+    """Hash of the normalized command: whitespace folded, so the same command is recognized under other spacing."""
+    return hashlib.sha256(" ".join(str(command or "").split()).encode("utf-8")).hexdigest()
+
+
+def active_hold(task_id, cmd_hash) -> "dict | None":
+    """The active hold for (task, command), or None. A human release (WP3/WP4) removes it; Mom never does."""
+    return (((_load_holds().get("holds") or {}).get(task_id) or {}).get(cmd_hash))
+
+
+def holds_for(task_id) -> list:
+    """All active holds of a card (one entry per held command)."""
+    entries = (_load_holds().get("holds") or {}).get(task_id) or {}
+    return [dict(v, cmd_hash=h) for h, v in entries.items()]
+
+
+def allow_once(board, task_id, cmd_hash, *, by) -> bool:
+    """Record a human release (``by`` = who allowed) for a held command. Consumes the hold: the command
+    is decided, it is not asked again. Returns False when there is no hold to release (WP3's
+    ``answer_card(allow_once=True)`` and the WP4 button call this)."""
+    data = _load_holds()
+    if (data.get("holds") or {}).get(task_id, {}).get(cmd_hash) is None:
+        return False
+    data.setdefault("allowances", {}).setdefault(task_id, {})[cmd_hash] = {"board": board, "by": by, "ts": int(time.time())}
+    _holds_path().parent.mkdir(parents=True, exist_ok=True)
+    _holds_path().write_text(json.dumps(data))
+    return True
+
+
+def _consume_allowance(task_id, cmd_hash) -> None:
+    """Remove a used allowance AND its hold (the release is one-shot); the next identical command is asked again."""
+    data = _load_holds()
+    if not (data.get("allowances") or {}).get(task_id, {}).get(cmd_hash):
+        return
+    del data["allowances"][task_id][cmd_hash]
+    if not data["allowances"].get(task_id):
+        del data["allowances"][task_id]
+    holds = data.get("holds") or {}
+    if holds.get(task_id, {}).get(cmd_hash):
+        del holds[task_id][cmd_hash]
+        if not holds.get(task_id):
+            del holds[task_id]
+    data["holds"] = holds
+    _holds_path().parent.mkdir(parents=True, exist_ok=True)
+    _holds_path().write_text(json.dumps(data))
+
+
+def _record_hold(task_id, cmd_hash, reason, alternative) -> dict:
+    """Persist the hold under (task, command hash) so a later run of the card is held without a model call."""
+    data = _load_holds()
+    entry = {
+        "board": os.environ.get("HERMES_KANBAN_BOARD", ""),
+        "reason": reason, "alternative": alternative, "ts": int(time.time()),
+    }
+    data.setdefault("holds", {}).setdefault(task_id, {})[cmd_hash] = entry
+    _holds_path().parent.mkdir(parents=True, exist_ok=True)
+    _holds_path().write_text(json.dumps(data))
+    return entry
+
+
+def _pf_block(hold) -> dict:
+    reason = hold.get("reason") or "the reviewer said hold"
+    alternative = (hold.get("alternative") or "").strip() or "run a safer equivalent"
+    return {
+        "action": "block",
+        "message": f"calling-mom pre-flight HOLD: {reason}. Instead: {alternative}. "
+                   "This exact command stays blocked on this card. Change the approach, or call "
+                   "kanban_block(kind='needs_input') if a person must decide.",
+    }
+
+
+def _pf_parse(text):
+    """``"go"``; ``("hold", reason, alternative)``; None (unparseable, fail-open)."""
+    t = (text or "").strip()
+    if t.upper() == "GO":
+        return "go"
+    m = re.match(r"^HOLD:\s*(.+?)(?:\.?\s+Instead:\s*(.+))?\.?\s*$", t, re.S | re.I)
+    if not m:
+        return None
+    return ("hold", m.group(1).strip().rstrip("."), (m.group(2) or "").strip())
+
+
+def _pf_messages(task, command) -> list:
+    lines = [f"- {s['tool']}({s['args']}) -> {'ok' if s['ok'] else 'ERROR'}"
+             for s in _history.get(_worker_key()) or ()]
+    user = f"Task: {task.title}\n{(task.body or '')[:800]}\n\nCommand about to run:\n{command}\n"
+    if lines:
+        user += "Last steps:\n" + "\n".join(lines) + "\n"
+    user = _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", user))
+    system = ("You are a safety reviewer of a command a weaker agent is about to run. "
+              "Reply exactly GO when the command is safe to run in this context, "
+              "or exactly 'HOLD: <reason>. Instead: <safer alternative>' when it is not.")
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _preflight_check(tool_name, args, t0) -> "dict | None":
+    """One critical command on an opted-in Kanban card -> one synchronous question to Mom (fail-open).
+
+    GO allows. HOLD blocks, posts the card comment and persists the hold (task, command hash).
+    Timeout, provider down, unparseable answer or a cap: allow, and the 1.3 post-hoc review runs as today.
+    """
+    cfg = settings()
+    pf = cfg["preflight"]
+    if not pf["enabled"] or not cfg["advisor"]["enabled"]:
+        return None
+    key = _worker_key()
+    if not key:
+        return None
+    command = str(args.get("command") or args.get("code") or "")
+    arch = cfg["categories"].get("architecture") or {}
+    if not command or rules.classify(command, extra=arch.get("commands_extra") or [],
+                                    critical=arch.get("commands") or [], watch=arch.get("watch") or []) != "critical":
+        return None
+    h = cmd_hash(command)
+    try:
+        with _connect() as conn:
+            task = kb.get_task(conn, key[0])
+    except Exception:  # pragma: no cover - a broken board must not trap the worker
+        return None
+    if task is None:
+        return None
+    if _is_local_only(task):
+        _trace_row("preflight", task=key[0], verdict="skipped", reason="local_only", cmd_hash=h)
+        return None
+    if not _advisor_opted_in(task):
+        return None
+    data = _load_holds()
+    if (data.get("allowances") or {}).get(key[0], {}).get(h):
+        _consume_allowance(key[0], h)
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="allowance", cmd_hash=h)
+        return None
+    hold = active_hold(key[0], h)
+    if hold:
+        _trace_row("preflight", task=key[0], verdict="held_again", cmd_hash=h)
+        return _pf_block(hold)
+    if _preflight_calls.get(key[0], 0) >= pf["max_per_card"]:
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="cap", cmd_hash=h)
+        return None
+    spent = _spent_today()
+    if spent["usd"] >= cfg["advisor"]["daily_usd_cap"] or spent["tokens"] >= cfg["advisor"]["daily_token_cap"]:
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="cap", cmd_hash=h)
+        return None
+    deadline = min(pf["timeout_s"], 0.4 * _core.hook_budget())
+    pair = (cfg["provider"], cfg["model"])
+    if time.time() - _down.get(pair, 0) < COOLDOWN_S:  # a model that just failed is not asked again
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="down", cmd_hash=h)
+        return None
+    done, box = threading.Event(), {}
+
+    def work():
+        try:
+            box["res"] = _ctx.llm.complete(_pf_messages(task, command), provider=cfg["provider"],
+                                          model=cfg["model"], max_tokens=48, timeout=deadline,
+                                          purpose="kanban-preflight")
+        except Exception as exc:
+            box["err"] = exc
+        done.set()
+
+    threading.Thread(target=work, name="calling-mom-preflight", daemon=True).start()
+    if not done.wait(max(deadline, 0.001)):
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="timeout", cmd_hash=h)
+        return None
+    if "err" in box:
+        _down[pair] = time.time()
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="down", cmd_hash=h)
+        return None
+    res = box["res"]
+    _add_spend(res.usage.cost_usd or 0.0, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
+    _preflight_calls[key[0]] = _preflight_calls.get(key[0], 0) + 1
+    verdict = _pf_parse(res.text)
+    if verdict == "go":
+        _trace_row("preflight", task=key[0], verdict="go", cmd_hash=h, model=cfg["model"])
+        return None
+    if not isinstance(verdict, tuple):
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="parse", cmd_hash=h)
+        return None
+    _, reason, alternative = verdict
+    hold = _record_hold(key[0], h, reason, alternative)
+    _post_comment(task.id, f"[pre-flight] HOLD: {reason}. Instead: {alternative or 'run a safer equivalent'}. "
+                           "This exact command stays blocked on this card until a human allows it.")
+    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=cfg["model"])
+    return _pf_block(hold)
 
 
 class _Verify:
