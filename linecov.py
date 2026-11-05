@@ -10,6 +10,7 @@ import dis
 import io
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -67,12 +68,14 @@ def measure(mods):
     sys.path.insert(0, str(PLUGIN))
     os.chdir(PLUGIN)
     sys.settrace(tracer)
+    threading.settrace(tracer)  # the advice and verify threads run plugin code too
     try:
         suite = unittest.defaultTestLoader.loadTestsFromNames(mods)
         buf = io.StringIO()
         res = unittest.TextTestRunner(stream=buf, verbosity=0).run(suite)
     finally:
         sys.settrace(None)
+        threading.settrace(None)
     failed = len(res.failures) + len(res.errors)
     print("ran", res.testsRun, "tests | failures", len(res.failures), "| errors", len(res.errors))
     if failed:

@@ -37,9 +37,9 @@ so the plugin watches for **signals** instead.
 | It says **"done"** | the main model | A check: does the result match what the card asked? Missing parts go back once. |
 | Card marker **`[crit]`** | you | The card runs on Mom's model from the start. |
 | Card marker **`[review]`** | you | A separate reviewer reads the result. |
-| A **`verify: <command>`** line on the card | you | The command must pass before the card can finish. No model needed. |
+| A **`verify: <command>`** line on the card | you | The command must pass before the card can finish. No model needed. It runs in the background (up to 10 minutes); the worker is told to call `kanban_complete` again until the result is in. |
 
-Mom's answer appears **in the card** as a comment and is shown to the main model, which keeps working.
+Mom's answer appears **in the card** as a comment and is shown to the main model, which keeps working. If Mom is slow, the worker is never held up: her answer goes to the card when it arrives and reaches the main model with its next tool result, marked `[late advice]`.
 
 ## When is Olymp called?
 

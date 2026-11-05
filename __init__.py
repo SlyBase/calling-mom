@@ -23,13 +23,16 @@ Kill switch: ``CALLING_MOM=off`` in the environment.
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import json
 import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -72,7 +75,7 @@ DEFAULTS = {
     "observe": True,  # log stuck signals (hashes only) to logs/calling-mom.jsonl
     "limits": {"same_error": 3, "loop": 3, "malformed": 3, "steps": 40},
     "verify": {  # card line `verify: <cmd>` gates kanban_complete. Card text is untrusted input:
-        "timeout_s": 120, "tail_chars": 1500, "max_fix": 3,
+        "timeout_s": 600, "tail_chars": 1500, "max_fix": 3,
         "trusted_creators": ["user"],  # only cards created by these are honoured
         "allow": ["python3", "python", "pytest", "test", "true", "false", "make", "ruff", "uv", "node", "npm", "go", "cargo"],
     },
@@ -120,6 +123,12 @@ _arch_seen: set = set()  # (task, run, path-or-command) already reviewed
 _redirected: set = set()  # (task, run) whose completion was already handed to the reviewer
 _completion_checked: set = set()  # (task, run) whose completion summary was already checked
 _awaiting_reply: set = set()  # (task, run) that got advice; the next worker reply says if it helped
+_lock = threading.Lock()
+_inflight: dict = {}  # (task, run) -> advice call on its background thread (at most one per run)
+_late: dict = {}  # (task, run) -> advice that missed its tool result, delivered with the next one
+_verify_runs: dict = {}  # (task, run) -> the current verify command (see _Verify)
+_edits: dict = {}  # (task, run) -> file-editing tool calls so far (workspace state outside git)
+_EDIT_TOOLS = {"write_file", "patch"}
 _REFUTED = re.compile(
     r"disprov|refut|ruled out|widerleg|not the (cause|issue|problem)|already (resolved|fixed|verified|done)|"
     r"does(n't| not) apply|is (wrong|incorrect)", re.I)
@@ -231,8 +240,8 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
             task = kb.get_task(conn, task_id)
             if task is None or task.status != "blocked" or _is_local_only(task):
                 return
-            if task.block_kind not in ESCALATABLE_KINDS:
-                return
+            if task.block_kind not in ESCALATABLE_KINDS or (task.block_kind is None and not task.assignee):
+                return  # an untyped block on a card nobody works on is a human to-do, not a give-up
             if task.model_override == settings()["model"]:
                 return  # the strong model already had its attempt
             why = f"blocked ({reason.strip()[:200]})" if reason and reason.strip() else "blocked"
@@ -398,13 +407,19 @@ def on_pre_tool(tool_name="", args=None, **_):
     """pre_tool_call: ``[crit]`` cards get the strong model at creation; completion is gated by ``verify:``."""
     if not _enabled():
         return None
+    t0 = time.monotonic()  # this hook is bounded by Hermes and fails closed: stay under 40 % of its timeout
+    if tool_name in _EDIT_TOOLS:
+        key = _worker_key()
+        if key:
+            _edits[key] = _edits.get(key, 0) + 1
+        return None
     if tool_name in _GATED:
         key = _worker_key()
         try:
-            blocked = _verify_gate(key) if key else None
+            blocked = _verify_gate(key, tool_name, t0) if key else None
             if blocked or not key or tool_name != "kanban_complete":
                 return blocked
-            return _review_redirect(key, args or {}) or _completion_check(key, args or {})
+            return _review_redirect(key, args or {}) or _completion_check(key, args or {}, t0)
         except Exception as exc:  # pragma: no cover - a broken check must not trap the worker
             logger.warning("calling-mom: verify/review gate failed: %s", exc)
             return None
@@ -634,7 +649,6 @@ def _advise(key, category, signal, note="") -> "str | None":
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                    provider=route["provider"], olymp=is_olymp,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
-        _awaiting_reply.add(key)
         return f"[ADVISOR {res.model}] {text}"
     except _CoolingDown:
         return None
@@ -643,6 +657,63 @@ def _advise(key, category, signal, note="") -> "str | None":
         if opted_in:
             _report_unavailable(task.id, exc)
         return None
+
+
+def _budget() -> float:
+    return _core.hook_budget()
+
+
+def _left(t0) -> float:
+    """Seconds a bounded hook may still spend: it never uses more than 40 % of Hermes' hook timeout."""
+    return max(0.0, 0.4 * _budget() - (time.monotonic() - t0))
+
+
+def _advise_soon(key, category, signal, note="", t0=None) -> "str | None":
+    """``_advise`` off the hot path: it runs on its own thread, one per run, and the caller waits at most
+    ``min(8 s, 0.25 x budget)`` (and never past its own 40 %). Not ready in time -> None now, and the advice
+    goes to the card at once and to the worker with its next tool result (``_take_late``)."""
+    started = time.monotonic()
+    t0 = started if t0 is None else t0
+    done, box = threading.Event(), {}
+    with _lock:
+        if key in _inflight:
+            return None
+        _inflight[key] = done
+
+    def work():
+        try:
+            text = _advise(key, category, signal, note)
+        except Exception as exc:  # pragma: no cover - _advise is fail-open itself
+            logger.warning("calling-mom: advice thread failed: %s", exc)
+            text = None
+        with _lock:
+            if text and box.get("abandoned"):
+                _late.setdefault(key, []).append((text, signal, started))
+            box["text"] = text
+            _inflight.pop(key, None)
+            done.set()  # inside the lock: the caller decides "ready or abandoned" under the same lock
+
+    threading.Thread(target=work, name="calling-mom-advice", daemon=True).start()
+    done.wait(min(8.0, 0.25 * _budget(), _left(t0)))
+    with _lock:
+        if not done.is_set():
+            box["abandoned"] = True
+            return None
+    if box["text"]:
+        _awaiting_reply.add(key)
+    return box["text"]
+
+
+def _take_late(key) -> "str | None":
+    """Advice that arrived after its tool result left: hand it over with this one, exactly once."""
+    with _lock:
+        items = _late.pop(key, None)
+    if not items:
+        return None
+    for _, signal, started in items:
+        _trace_row("advice_late", task=key[0], run=key[1], signal=signal, ms=int((time.monotonic() - started) * 1000))
+    _awaiting_reply.add(key)
+    return "\n\n".join(f"[late advice] {text}" for text, _, _ in items)
 
 
 def _report_unavailable(task_id, exc) -> None:
@@ -685,13 +756,78 @@ _VERIFY_LINE = re.compile(r"(?im)^\s*verify:\s*(.+?)\s*$")
 _GATED = {"kanban_complete", "kanban_request_review"}
 
 
-def _verify_gate(key):
+class _Verify:
+    """One run of the card's ``verify:`` command on a background thread."""
+
+    def __init__(self, command, argv, workspace, edits):
+        self.command, self.argv, self.workspace, self.edits = command, argv, workspace, edits
+        self.done, self.proc, self.state = threading.Event(), None, None
+        self.ok = self.code = self.out = self.ms = self.verdict = None
+        self.reported = False
+
+    def start(self, timeout):
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "HOME": self.workspace or "/tmp"}
+        threading.Thread(target=self._run, args=(env, timeout), name="calling-mom-verify", daemon=True).start()
+
+    def _run(self, env, timeout):
+        began = time.monotonic()
+        try:
+            # own process group: a timeout or a stale result kills the whole tree, not just the child
+            self.proc = subprocess.Popen(self.argv, cwd=self.workspace, env=env, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                out, err = self.proc.communicate(timeout=timeout)
+                self.ok, self.code, self.out = self.proc.returncode == 0, self.proc.returncode, (out or "") + (err or "")
+                self.verdict = "pass" if self.ok else "fail"
+            except subprocess.TimeoutExpired:
+                self.kill()
+                self.proc.communicate()
+                self.ok, self.code, self.out, self.verdict = False, None, f"timed out after {timeout}s", "timeout"
+        except OSError as exc:
+            self.ok, self.code, self.out, self.verdict = False, None, f"could not start: {exc}", "fail"
+        finally:
+            self.ms = int((time.monotonic() - began) * 1000)
+            try:
+                self.state = _workspace_state(self.workspace, self.edits)[0]  # artifacts the command wrote belong to this state
+            finally:
+                self.done.set()
+
+    def kill(self):
+        if self.proc is not None and self.proc.poll() is None:  # never signal a pid that may be reused
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.proc.pid, signal.SIGKILL)
+
+    def current(self, workspace_state) -> bool:
+        """The result still describes the workspace: no edit since the start, and (in git) nothing changed since the end."""
+        git, edits = workspace_state
+        return edits == self.edits and (not self.done.is_set() or git == self.state)
+
+
+def _workspace_state(workspace, edits):
+    """``(git_state, edits)``. In a git workspace ``git_state`` is HEAD plus a hash of ``git status --porcelain``,
+    otherwise None and only the count of file-editing tool calls tells whether the workspace moved."""
+    if not workspace:
+        return None, edits
+    try:
+        run = lambda *a: subprocess.run(["git", *a], cwd=workspace, capture_output=True, text=True, timeout=5,
+                                        check=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}).stdout
+        head, status = run("rev-parse", "HEAD").strip(), run("status", "--porcelain")
+    except (OSError, subprocess.SubprocessError):  # not a git repo, no commit yet, git missing
+        return None, edits
+    return f"{head}:{hashlib.sha256(status.encode()).hexdigest()}", edits
+
+
+def _verify_gate(key, tool="kanban_complete", t0=None):
     """Run the card's ``verify:`` command before the worker may complete the card.
 
-    Objective check, zero model tokens. Fail -> block with the output tail so the worker
-    fixes it; after ``max_fix`` failures point to ``kanban_block`` (which escalates);
-    two more failures later fail open so a broken check never traps a worker.
+    Objective check, zero model tokens. The command runs on a background thread (this hook is bounded by
+    Hermes): the call that starts it, and every later one, waits up to 0.3 x the hook budget for the result
+    and blocks with "verify running" until there is one. Fail -> block with the output tail so the worker
+    fixes it; after ``max_fix`` failures point to ``kanban_block`` (which escalates); two more failures
+    later fail open so a broken check never traps a worker. A result counts only for the workspace state
+    it ran on: an edit makes it stale and the next call runs the command again.
     """
+    t0 = time.monotonic() if t0 is None else t0
     with _connect() as conn:
         task = kb.get_task(conn, key[0])
     match = _VERIFY_LINE.search(task.body or "") if task else None
@@ -712,25 +848,34 @@ def _verify_gate(key):
         _trace_row("verify_ignored", task=key[0], why=why, creator=task.created_by)
         return None
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE") or None
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "HOME": workspace or "/tmp"}
-    try:
-        proc = subprocess.run(
-            argv, cwd=workspace, env=env, capture_output=True, text=True, timeout=cfg["timeout_s"],
-        )
-        ok, code, out = proc.returncode == 0, proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    except subprocess.TimeoutExpired:
-        ok, code, out = False, None, f"timed out after {cfg['timeout_s']}s"
-    except OSError as exc:
-        ok, code, out = False, None, f"could not start: {exc}"
-    fails = _verify_fails.get(key, 0) + (0 if ok else 1)
-    _verify_fails[key] = fails
-    _trace_row("verify", task=key[0], ok=ok, fails=fails, exit=code)
-    if ok or fails > cfg["max_fix"] + 2:
+    now = _workspace_state(workspace, _edits.get(key, 0))
+    run = _verify_runs.get(key)
+    if run is not None and not (run.command == command and run.current(now)):
+        run.kill()
+        _trace_row("verify", task=key[0], run=key[1], state="stale")
+        run = None
+    if run is None:
+        run = _verify_runs[key] = _Verify(command, argv, workspace, now[1])
+        _trace_row("verify", task=key[0], run=key[1], state="started")
+        run.start(cfg["timeout_s"])
+    wait = min(0.3 * _budget(), _left(t0))
+    if not run.done.wait(wait):
+        return {"action": "block", "message": (
+            f"verify running: `{command}`. Do not edit files. Call {tool} again; "
+            f"each call waits up to {max(1, round(0.3 * _budget()))} s.")}
+    if run.reported:  # a pass already seen for exactly this workspace state
         return None
-    reason = f"exit {code}" if code is not None else "timed out"
-    tail = out[-cfg["tail_chars"]:].strip()
+    run.reported = True
+    fails = _verify_fails.get(key, 0) + (0 if run.ok else 1)
+    _verify_fails[key] = fails
+    _trace_row("verify", task=key[0], run=key[1], state=run.verdict, ok=run.ok, fails=fails, exit=run.code, ms=run.ms)
+    if run.ok or fails > cfg["max_fix"] + 2:
+        return None
+    del _verify_runs[key]  # the next call runs the command again
+    reason = f"exit {run.code}" if run.code is not None else "timed out"
+    tail = run.out[-cfg["tail_chars"]:].strip()
     msg = f"Verification failed ({reason}) for `{command}`. Fix this before completing:\n{tail}"
-    advice = _advise(key, "validation", "verify_failed", note=f"verify command: {command}\n{tail}") if fails >= 2 else None
+    advice = _advise_soon(key, "validation", "verify_failed", f"verify command: {command}\n{tail}", t0) if fails >= 2 else None
     if advice:
         msg += f"\n\n{advice}"
     if fails > cfg["max_fix"]:
@@ -776,14 +921,14 @@ def _review_redirect(key, args):
     }
 
 
-def _completion_check(key, args):
+def _completion_check(key, args, t0=None):
     """Once per run: does the completion summary deliver what the card asks? A gap blocks the
     first ``kanban_complete`` only, so a wrong verdict costs one turn, never the card."""
     if key in _completion_checked:
         return None
     _completion_checked.add(key)
     summary = str(args.get("summary") or "")[:1500]
-    advice = _advise(key, "completion", "completion", note=f"Completion summary of the agent:\n{summary}")
+    advice = _advise_soon(key, "completion", "completion", f"Completion summary of the agent:\n{summary}", t0)
     verdict = (advice or "").split("] ", 1)[-1].strip()
     if not verdict.upper().startswith("GAP"):
         return None
@@ -831,6 +976,7 @@ def handle_second_opinion(args, **_):
     advice = _advise(key, "architecture", "second_opinion", note=note) if _enabled() else None
     if not advice:
         return json.dumps({"error": "second opinion unavailable (disabled, budget used, local-only card, or provider error)"})
+    _awaiting_reply.add(key)
     return json.dumps({"opinion": advice.split("] ", 1)[-1]})
 
 
@@ -866,6 +1012,20 @@ def _worker_key():
     return (task, os.environ.get("HERMES_KANBAN_RUN_ID", "")) if task else None
 
 
+def _fresh_advice(key, cfg, tool_name, args, result, status, event) -> "str | None":
+    """The advice this tool result calls for, if it comes in time (else it is delivered later, see ``_advise_soon``)."""
+    if not (cfg["advisor"]["enabled"] and isinstance(result, str)):
+        return None
+    if tool_name == "kanban_comment":
+        m = re.match(r"(?is)\s*second[- ]opinion:\s*(.+)", str((args or {}).get("body") or ""))
+        if m:
+            return _advise_soon(key, "architecture", "second_opinion", f"Question: {m.group(1).strip()[:1500]}")
+    if event["signals"] and event["signals"][0] in _CATEGORY:  # flux_stall is monitoring-only, no escalation
+        return _advise_soon(key, _CATEGORY[event["signals"][0]], event["signals"][0])
+    hit = _architecture_hit(key, tool_name, args) if status != "error" else None
+    return _advise_soon(key, hit[0], hit[1], hit[2]) if hit else None
+
+
 def on_tool_result(tool_name="", args=None, result=None, status=None, error_type=None, error_message=None, **_):
     """Observe every tool result of a kanban worker; with the advisor on, append advice when stuck."""
     key = _worker_key()
@@ -887,25 +1047,10 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
-        question = None
-        if tool_name == "kanban_comment" and isinstance(result, str):
-            m = re.match(r"(?is)\s*second[- ]opinion:\s*(.+)", str((args or {}).get("body") or ""))
-            if m and cfg["advisor"]["enabled"]:
-                question = m.group(1).strip()
-                advice = _advise(key, "architecture", "second_opinion", note=f"Question: {question[:1500]}")
-                if advice:
-                    return f"{result}\n\n{advice}"
-        if question is None and event["signals"] and cfg["advisor"]["enabled"] and isinstance(result, str):
-            signal = event["signals"][0]
-            if signal in _CATEGORY:  # flux_stall is monitoring-only, no escalation
-                advice = _advise(key, _CATEGORY[signal], signal)
-                if advice:
-                    return f"{result}\n\n{advice}"
-        if question is None and cfg["advisor"]["enabled"] and isinstance(result, str) and status != "error":
-            hit = _architecture_hit(key, tool_name, args)
-            advice = _advise(key, hit[0], hit[1], note=hit[2]) if hit else None
-            if advice:
-                return f"{result}\n\n{advice}"
+        advice = _fresh_advice(key, cfg, tool_name, args, result, status, event)
+        late = _take_late(key) if isinstance(result, str) else None
+        if advice or late:
+            return "\n\n".join(part for part in (result, late, advice) if part)
     except Exception as exc:  # pragma: no cover - observing must never break a worker
         logger.warning("calling-mom: observe failed: %s", exc)
     return None
@@ -920,6 +1065,18 @@ def on_api_response(assistant_message=None, **_):
     _awaiting_reply.discard(key)
     # ponytail: keyword heuristic; a wrong label only skews the ratio, it never changes the run
     _trace_row("advice_feedback", task=key[0], verdict="rejected" if _REFUTED.search(content[:2000]) else "followed")
+
+
+_TIP = (
+    "Stuck or unsure about a critical decision? Write a kanban_comment whose text starts with "
+    "`SECOND-OPINION: ` and your question; a stronger model answers in the tool result. "
+    "A `verify: <command>` line in the card body is run before you may complete: fix failures first."
+)
+
+
+def _prompt_section(_session=None) -> str:
+    """The tip is for Kanban workers; a chat session gets nothing."""
+    return _TIP if os.environ.get("HERMES_KANBAN_TASK") else ""
 
 
 def register(ctx) -> None:
@@ -943,14 +1100,7 @@ def register(ctx) -> None:
     # Own toolset: "kanban" is a fixed list, so a tool registered there never reaches the model.
     _prompt = getattr(ctx, "register_system_prompt_section", None)
     if _prompt is not None:
-        _prompt(
-        id="calling-mom",
-        content=(
-            "Stuck or unsure about a critical decision? Write a kanban_comment whose text starts with "
-            "`SECOND-OPINION: ` and your question; a stronger model answers in the tool result. "
-            "A `verify: <command>` line in the card body is run before you may complete: fix failures first."
-        ),
-        )
+        _prompt(id="calling-mom", content=_prompt_section)
     ctx.register_tool(name="second_opinion", toolset="calling-mom", schema=_SECOND_OPINION,
                       handler=handle_second_opinion, check_fn=lambda: bool(os.environ.get("HERMES_KANBAN_TASK")),
                       emoji="\U0001f9d0")
