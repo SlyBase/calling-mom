@@ -6,6 +6,14 @@ versioning: [SemVer](https://semver.org/).
 ## [1.4.0] - unreleased
 
 ### Added
+- **Demo kit** (`scripts/demo.py --assignee <profile> [--board B] [--reset]`): four cards on a board of their own, in a
+  scratch folder with a bare **local** git remote, that make every rung fire: the same failing command three times and
+  Mom's tip, a question Mom answers, a rewrite of shared history that pre-flight holds, and a `verify:` card. It
+  watches the log and prints when each trigger fired. `--reset` removes everything it made.
+- **README rewrite**: the ladder (worker, Mom, Olymp, you) and the tagline first, a one-minute quick start, "What you
+  will see" with screenshots (`assets/screenshots/`), real numbers from the author's log, the updated "Your money and
+  your data". `docs/TECHNICAL.md`: "New in 1.4 at a glance" (options, record kinds, the hook budget rule) and "Demo
+  kit". `SECURITY.md`: a table of every data flow.
 - **Pre-flight: a critical command is asked before it runs.** Before a Kanban worker runs a command that the risk
   list marks critical (force push, branch delete, release or tag publish, `terraform apply`, `kubectl delete`,
   `DROP TABLE`, a broad `rm -rf`, the rest of `CRITICAL_COMMANDS`), `pre_tool_call` asks Mom once (one synchronous

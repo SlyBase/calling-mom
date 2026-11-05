@@ -6,22 +6,97 @@
 
 [![ci](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml)
 
-**Let a cheap model run your Kanban board. It calls mom when it needs help, and Olymp only when it really matters.**
+**Your attention is the most expensive model in the stack. Calling mom calls it last.**
 
-A [Hermes](https://hermes-agent.nousresearch.com) plugin. Your everyday model (a local model, DeepSeek, Sonnet) does the work.
-When it gets stuck or is about to do something risky, a stronger model looks over its shoulder. You pay for the big model
-only in the rare moments it is worth it.
+A [Hermes](https://hermes-agent.nousresearch.com) plugin for Kanban. A cheap model works your cards. When it is stuck
+or about to do something risky, a better model steps in. Only what neither can settle reaches you.
 
-## Who is who
+```
+worker  ->  Mom  ->  Olymp  ->  you
+cheap       good     strong      your time
+always      often    rarely      last
+```
 
-| | What it is | How often it is asked |
+| Rung | Who | What it does |
 |---|---|---|
-| **Your main model** | The model that works the cards. | All the time. It is the worker. |
-| **Mom** | Your everyday helper. A good, affordable model (for example Sonnet or DeepSeek). | Often: whenever the main model is stuck, unsure, or about to do something risky. |
-| **Olymp** | The expensive heavyweight (for example Opus). | Rarely. Only when Mom herself says "this one is too big for me". |
+| **Worker** | Your everyday model (a local model, DeepSeek, Sonnet). | Works the cards. |
+| **Mom** | A good, affordable model. | Gives a tip when the worker is stuck. Checks a risky command **before** it runs. Answers the worker's questions. Checks "done". |
+| **Olymp** | The strongest, most expensive model. | Asked only when Mom says "this one is too big for me". Hard limit: 1 per card, 6 per day. |
+| **You** | A person. | Gets a four-line brief when no model should decide. One click answers it. |
 
-The main model never decides for itself that it needs help. A weak model cannot tell when it is out of its depth,
-so the plugin watches for **signals** instead.
+The worker never has to know that it needs help. A weak model cannot tell when it is out of its depth. So the plugin
+watches for **signals** instead.
+
+## Quick start (one minute)
+
+[Install in one click](hermes://plugin/install?repo=SlyBase/calling-mom&enable=1). GitHub does not turn custom links into
+links, so if it does not open, paste `hermes://plugin/install?repo=SlyBase/calling-mom&enable=1` into your browser. Or by hand:
+
+```bash
+hermes plugins install SlyBase/calling-mom
+hermes plugins enable calling-mom
+hermes calling-mom setup     # pick Mom and Olymp from the providers you already have; name a board
+hermes calling-mom doctor    # one real test call to each, tells you what is missing
+```
+
+Then watch every rung fire. The demo has a board of its own and a scratch folder with a **local** bare git remote. It never
+touches a real remote. When `setup` asks for a board, name `calling-mom-demo` and say yes to answers (or pass
+`--boards calling-mom-demo --answer`):
+
+```bash
+python ~/.hermes/plugins/calling-mom/scripts/demo.py --assignee <your-worker-profile>
+```
+
+It makes four cards and prints a timeline:
+
+| Card | What happens |
+|---|---|
+| Flaky build | The worker runs the same failing command three times. Mom gives a tip. The worker fixes it. |
+| Greeting | The worker asks which config file to change. Mom answers. The card continues. |
+| Release notes | The worker has to replace `main` on a shared remote. Mom says **HOLD** before the command runs. The worker pushes a branch instead. |
+| Notes | A card with a `verify:` line. The command must pass before the card can finish. |
+
+In two test runs in a row, with a local 27B model as the worker, all four fired within 8 minutes. A model decides
+whether a card gets stuck and whether Mom says HOLD, so a run can miss one: the script says `NOT FIRED`. Run it again.
+Use a worker profile you can throw away: when Hermes blocked a force push, one test worker tried to loosen its own
+approval setting (Mom's HOLD stopped the retry, and the worker undid the change).
+`python .../demo.py --assignee <profile> --reset` removes everything the demo made.
+
+## What you will see
+
+**The Calling mom page** in Hermes Desktop: the ladder with the numbers of the last 7 days, a *Needs you* list, and recent activity.
+
+![The Calling mom page: the ladder worker, Mom, Olymp, you with counts](assets/screenshots/calling-mom-page.png)
+
+**Badges on Kanban cards**: `mom`, `olymp`, `held`, `for you`, `verified`, `verify failed`. At most two per card.
+
+![A Kanban board with calling-mom badges on its cards](assets/screenshots/card-badges.png)
+
+**Needs you**: a brief with a recommendation. **Accept recommendation** answers it and the card continues.
+
+![The Needs you list with a brief and the Accept recommendation button](assets/screenshots/needs-you.png)
+
+**A HOLD on a card**: Mom stopped a command before it ran. That exact command stays blocked until a person allows it.
+
+![A card with a pre-flight HOLD comment](assets/screenshots/hold-on-card.png)
+
+## Numbers so far
+
+From the real log of the author's own install. It covers 9 days, so the sample is small:
+
+```
+Calling mom, last 90 days
+Worker  2204 tool calls in 44 runs, 29 stuck signals; 0 API calls, 0 tokens in / 0 out
+Mom     51 calls: 1 question answered, 3 pre-flight checks (0 holds), 1 verify passed / 0 failed, tips followed 27 / rejected 0
+Olymp   0 calls
+You     1 brief, 1 answer (median 1 min), 0 holds released
+Cost    Mom no price reported (111,725 in / 18,828 out tokens), Olymp 0 calls
+```
+
+The worker followed 27 of Mom's tips and rejected none. Olymp was never needed. One question reached a person, and it took a
+minute to answer. The worker token numbers read 0 because the log was written by an older version. When Mom reports a
+price, the report also shows what running every call on Mom would have cost.
+Your own numbers: `hermes calling-mom report` (`--days 7`, `--board X`, `--json`).
 
 ## When is Mom called?
 
@@ -104,18 +179,11 @@ Turn it off with `calling_mom.answer.precedents: false`. It only matters where a
 Everything else, including routine `ssh` calls and ordinary reviews, is settled by Mom. If Olymp is down or the limit is
 reached, the card simply carries on without his advice. (Advice arrives right after the command ran: it warns, it cannot undo.)
 
-## Quick start
-
-```bash
-hermes plugins install SlyBase/calling-mom
-hermes plugins enable calling-mom
-hermes calling-mom setup     # pick Mom and Olymp from the providers and models you already have
-hermes calling-mom doctor    # one real test call to each, tells you what is missing
-```
+## Setup and commands
 
 `setup` shows a list of your configured providers and models (arrow keys; type `/` to filter by name), asks which
-board may use the helpers, and writes exactly what you picked (it shows the summary first). Olymp stays off unless you choose one. Already
-use *Advanced Delegation*? See [below](#optional-reuse-your-advanced-delegation-models).
+board may use the helpers, and writes exactly what you picked (it shows the summary first). Olymp stays off unless you choose one.
+Already use *Advanced Delegation*? See [below](#optional-reuse-your-advanced-delegation-models).
 
 No questions at all (scripts, provisioning, no terminal):
 
@@ -153,7 +221,7 @@ Mom or Olymp (run `setup` again for that). A route needs both a provider and a m
 | `hermes calling-mom precedents [forget <id> \| clear]` | The answers of yours that Mom may reuse (see [Your answers become Mom's rules](#your-answers-become-moms-rules)). |
 | `hermes calling-mom answer <task>` | Answers a card that carries Mom's `[for you]` brief or a pre-flight HOLD: `--accept`, `--text "..."` or `--allow-once` (`--board` if it is not the current board). |
 
-## What you will see in a card
+## What a card looks like
 
 ```
 [architecture/critical_change] run 68 · claude-sonnet-5-5 (claude-subscription-directsdk-experimental): 2719 in / 780 out
@@ -220,13 +288,16 @@ write is your click on a button, see [SECURITY.md](SECURITY.md).
 
 - **Nothing leaves your machine until you say so.** Helpers are off until you enable them and name a board (or put `[advisor]` on a card).
 - **`[local-only]` on a card always wins**: nothing from that card is sent anywhere.
-- **Answers are a separate switch** (`calling_mom.answer`, off by default). With it on, Mom answers worker questions and unblocks cards on the listed boards; the question, the card text and the last comments are sent to her model (redacted). Questions about secrets, money, legal matters, personal data or publishing, and critical commands never get an answer from her.
+- **What Mom sees.** For advice: the card text, the last tool steps and the signal. For a pre-flight check: the card title, the first 800 characters of its text and the one command. For a worker question (answers on): the question, the card text and the last comments. Everything is redacted first. The log keeps hashes, never the command.
+- **Answers are a separate switch** (`calling_mom.answer`, off by default). With it on, Mom answers worker questions and unblocks cards on the listed boards. Questions about secrets, money, legal matters, personal data or publishing, and critical commands never get an answer from her. A pre-flight HOLD can be released only by a person.
 - **Your answers are kept as text.** With answers on, your reply to one of Mom's briefs is stored (redacted, 500 characters each) in `logs/calling-mom-precedents.jsonl` and shown to Mom for similar questions. It is the only place the plugin keeps prose. See and delete it with `hermes calling-mom precedents`; turn it off with `answer.precedents: false`.
+- **The Desktop page and the report stay on your machine.** They read the plugin log and your boards through your own gateway. The only write is your click on a button.
+- **The demo is local.** It uses a scratch folder and a bare git remote inside it, never a real remote.
 - Secrets (tokens, keys, passwords, credentials in URLs) are **blanked out** before anything is sent.
 - Olymp is limited by **number of calls**, so a subscription never surprises you. Mom has a daily dollar and token cap.
-- The plugin never changes your config by itself. Only `setup` does, and only with the values you picked.
+- The plugin never changes your config by itself. Only `setup` does, and only with the values you picked. It has no telemetry.
 
-More in [SECURITY.md](SECURITY.md).
+Every data flow is listed in [SECURITY.md](SECURITY.md).
 
 ## Minimal configuration
 
@@ -253,7 +324,9 @@ Kill switch: set `CALLING_MOM=off`. Every other option is in the [technical refe
 
 ## More
 
-- [Technical reference](docs/TECHNICAL.md): all options, metrics, how the risk list was built, what was measured, development and release
+- [Technical reference](docs/TECHNICAL.md): all options, record kinds, the hook budget rule, the demo kit, metrics, how the risk list was built, what was measured, development and release
 - [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
+
+The idea behind the ladder comes from DeepSeek Harness's [*Exploring Super-agent Design*](https://x.com/DeepSeekHarness/article/2116857257245987236): Calling mom is its watchdog and two-stage filter, for Hermes Kanban.
 
 MIT licensed.

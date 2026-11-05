@@ -22,4 +22,28 @@ The plugin runs inside a Hermes Kanban worker and talks to LLM providers. Assets
 | **Observation log** | A log is a data store. | (Precedents are a separate, disclosed file, see above.) It stores hashes, counts, token numbers and tool names, no content. `hermes calling-mom report` and `GET /summary` only count these rows. |
 | **Config** | A plugin that edits config is a risk. | Only the commands you run yourself (`setup`) write config, with the values you picked. Hooks never do. |
 
+## Data flows
+
+Every flow that carries data out of the process or into a file, in 1.4. "Remote" means a model provider you configured
+for Mom or Olymp. Each prompt passes Hermes' `redact_for_egress` and the URL-credential scrub first. `[local-only]` on a
+card stops every flow marked "remote" for that card.
+
+| Flow | Leaves the machine? | What is sent or stored | Switch |
+|---|---|---|---|
+| Advice on a stuck signal, a risky command, a completion check, `SECOND-OPINION:` | Remote: Mom, and Olymp after `ESCALATE` | Card text, the last tool steps, the signal. Redacted, cut to `advisor.context_chars`. | `advisor.enabled` + a board or `[advisor]` on the card |
+| Late advice | No | The answer, written as a card comment and added to the worker's next tool result. | follows the advisor |
+| Pre-flight check | Remote: Mom | The card title and the first 800 characters of its text, the command, the last tool steps. The log keeps only the command hash. | `preflight.enabled` (needs the advisor) |
+| Pre-flight HOLD | No | A card comment with Mom's reason, and a stored block (task, command hash) in the plugin state. A person releases it. | follows pre-flight |
+| Worker question | Remote: Mom, then Olymp if she escalates | The question, the card text and the last comments. Never for `[local-only]`, `[human]`, credentials, money, legal, personal data, publishing, critical commands or a held card (a brief at most). | `answer.enabled` + `answer.boards` |
+| Brief and answer | No | A `[for you]` brief and your `[you via calling-mom]` answer, as card comments. | follows answers |
+| Precedents | No (it reaches Mom only inside a later question prompt, redacted) | Your answer and the question, as text, 500 characters each, in `logs/calling-mom-precedents.jsonl`. | `answer.precedents`; `hermes calling-mom precedents` lists and deletes |
+| `verify:` command | No | Runs a command from the card on this machine. Only for cards by `verify.trusted_creators`, first word in `verify.allow`. The log keeps the state, the exit code and the time. | `verify.*` |
+| Observation log | No | Hashes, counts, tool names, token numbers (`worker_usage`), verdicts. No prompt, no command, no text. Trimmed at 5 MB. | `observe` |
+| Attention report and `GET /summary` | No | A count over the log rows and a read-only list of cards of opted-in boards. | none (read only) |
+| Desktop page | No (your own gateway) | Reads the log and the boards; one write, `POST /answer`, when you press a button. | install the Desktop half or not |
+| Metrics push | Your Pushgateway | Counts and ages only (see the metric families). | `metrics.pushgateways` |
+| Demo kit (`scripts/demo.py`) | No | Four cards on a board of its own and a scratch folder with a bare **local** git remote. It refuses to run if `origin` is not a folder under the scratch root, and deletes only a folder that carries its marker file. Its cards send data to Mom like any other card on an opted-in board. | run it or not |
+
+The plugin sends nothing to any server of its own. It has no telemetry.
+
 Out of scope: the security of Hermes itself and of the providers you configure.
