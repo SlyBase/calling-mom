@@ -82,6 +82,7 @@ DEFAULTS = {
     "review": {"marker": "[review]", "reviewer": "reviewer"},  # [review] cards finish via the reviewer profile ("" = off)
     "metrics": {"pushgateways": [], "instance": "hermes"},  # Pushgateway base URLs, tried in order ([] = off)
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
+    "human_marker": "[human]",  # such cards are for a person: Mom never answers their questions
     "advisor": {  # one short question to the strong model at the point where the worker is stuck
         "enabled": False,  # master switch; even when on, nothing is sent unless a board or card opts in:
         "boards": [],  # board slugs that opt in ("*" = all); a card with `marker` in title/body opts in itself
@@ -93,6 +94,10 @@ DEFAULTS = {
         "enabled": True,  # its own switch; active only where the advisor is active (board opt-in or marker)
         "timeout_s": 12,  # the synchronous call deadline; the effective deadline is min(timeout_s, 0.4 x hook budget)
         "max_per_card": 4,  # model calls per card (per run); past it, critical commands are allowed
+    },
+    "answer": {  # a worker question (kanban_block kind needs_input) reaches Mom before it reaches you. Off until setup asks.
+        "enabled": False,  # master switch; Mom answers only on the listed boards ("*" = all)
+        "boards": [], "max_per_card": 2,
     },
     # "olymp" tier: a very strong (expensive) model, asked only for the listed categories. Empty model = off:
     # every category then uses the "mom" (top-level model/provider). A per-category entry below still wins.
@@ -219,7 +224,10 @@ def on_claimed(task_id=None, board=None, **_):
     try:
         with _connect(board) as conn:
             task = kb.get_task(conn, task_id)
-            if task is None or task.model_override or _is_local_only(task):
+            if task is None:
+                return
+            _note_card_answer(conn, task, board)
+            if task.model_override or _is_local_only(task):
                 return
             marker = settings()["marker"].lower()
             text = f"{task.title or ''}\n{task.body or ''}".lower()
@@ -785,6 +793,11 @@ def _load_holds() -> dict:
         return {}
 
 
+def _write_state(data) -> None:
+    _holds_path().parent.mkdir(parents=True, exist_ok=True)
+    _holds_path().write_text(json.dumps(data))
+
+
 def cmd_hash(command) -> str:
     """Hash of the normalized command: whitespace folded, so the same command is recognized under other spacing."""
     return hashlib.sha256(" ".join(str(command or "").split()).encode("utf-8")).hexdigest()
@@ -809,9 +822,11 @@ def allow_once(board, task_id, cmd_hash, *, by) -> bool:
     if (data.get("holds") or {}).get(task_id, {}).get(cmd_hash) is None:
         return False
     data.setdefault("allowances", {}).setdefault(task_id, {})[cmd_hash] = {"board": board, "by": by, "ts": int(time.time())}
-    _holds_path().parent.mkdir(parents=True, exist_ok=True)
-    _holds_path().write_text(json.dumps(data))
+    _write_state(data)
     return True
+
+
+_release_hold = allow_once  # answer_card's own `allow_once` flag shadows the name
 
 
 def _consume_allowance(task_id, cmd_hash) -> None:
@@ -828,8 +843,7 @@ def _consume_allowance(task_id, cmd_hash) -> None:
         if not holds.get(task_id):
             del holds[task_id]
     data["holds"] = holds
-    _holds_path().parent.mkdir(parents=True, exist_ok=True)
-    _holds_path().write_text(json.dumps(data))
+    _write_state(data)
 
 
 def _record_hold(task_id, cmd_hash, reason, alternative) -> dict:
@@ -840,9 +854,50 @@ def _record_hold(task_id, cmd_hash, reason, alternative) -> dict:
         "reason": reason, "alternative": alternative, "ts": int(time.time()),
     }
     data.setdefault("holds", {}).setdefault(task_id, {})[cmd_hash] = entry
-    _holds_path().parent.mkdir(parents=True, exist_ok=True)
-    _holds_path().write_text(json.dumps(data))
+    _write_state(data)
     return entry
+
+
+class _Timeout(Exception):
+    """A model call that is still running at its deadline."""
+
+
+def _complete_within(route, msgs, max_tokens, timeout, purpose):
+    """One ``ctx.llm`` call that returns or raises within ``timeout`` seconds, even when the provider ignores its own
+    timeout: it runs on a daemon thread. Raises ``_Timeout`` at the deadline, the provider's error otherwise."""
+    done, box = threading.Event(), {}
+
+    def work():
+        try:
+            box["res"] = _ctx.llm.complete(msgs, provider=route["provider"], model=route["model"],
+                                           max_tokens=max_tokens, timeout=timeout, purpose=purpose)
+        except Exception as exc:
+            box["err"] = exc
+        done.set()
+
+    threading.Thread(target=work, name=f"calling-mom-{purpose}", daemon=True).start()
+    if not done.wait(max(timeout, 0.001)):
+        raise _Timeout()
+    if "err" in box:
+        raise box["err"]
+    return box["res"]
+
+
+def _ask_model(route, msgs, max_tokens, timeout, purpose):
+    """``_complete_within`` plus the cooldown: a model that just failed is not asked again for ``COOLDOWN_S``
+    (``_CoolingDown``). A provider error starts the cooldown, a timeout does not."""
+    pair = (route["provider"], route["model"])
+    if time.time() - _down.get(pair, 0) < COOLDOWN_S:
+        raise _CoolingDown()
+    try:
+        out = _complete_within(route, msgs, max_tokens, timeout, purpose)
+    except _Timeout:
+        raise
+    except Exception:
+        _down[pair] = time.time()
+        raise
+    _down.pop(pair, None)
+    return out
 
 
 def _pf_block(hold) -> dict:
@@ -928,30 +983,15 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
         _trace_row("preflight", task=key[0], verdict="allowed", reason="cap", cmd_hash=h)
         return None
     deadline = min(pf["timeout_s"], 0.4 * _core.hook_budget())
-    pair = (cfg["provider"], cfg["model"])
-    if time.time() - _down.get(pair, 0) < COOLDOWN_S:  # a model that just failed is not asked again
-        _trace_row("preflight", task=key[0], verdict="allowed", reason="down", cmd_hash=h)
-        return None
-    done, box = threading.Event(), {}
-
-    def work():
-        try:
-            box["res"] = _ctx.llm.complete(_pf_messages(task, command), provider=cfg["provider"],
-                                          model=cfg["model"], max_tokens=48, timeout=deadline,
-                                          purpose="kanban-preflight")
-        except Exception as exc:
-            box["err"] = exc
-        done.set()
-
-    threading.Thread(target=work, name="calling-mom-preflight", daemon=True).start()
-    if not done.wait(max(deadline, 0.001)):
+    try:
+        res = _ask_model({"provider": cfg["provider"], "model": cfg["model"]}, _pf_messages(task, command),
+                         48, deadline, "kanban-preflight")
+    except _Timeout:
         _trace_row("preflight", task=key[0], verdict="allowed", reason="timeout", cmd_hash=h)
         return None
-    if "err" in box:
-        _down[pair] = time.time()
+    except Exception:  # a provider error, or a model that failed a moment ago (_CoolingDown)
         _trace_row("preflight", task=key[0], verdict="allowed", reason="down", cmd_hash=h)
         return None
-    res = box["res"]
     _add_spend(res.usage.cost_usd or 0.0, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
     _preflight_calls[key[0]] = _preflight_calls.get(key[0], 0) + 1
     verdict = _pf_parse(res.text)
@@ -967,6 +1007,258 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
                            "This exact command stays blocked on this card until a human allows it.")
     _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=cfg["model"])
     return _pf_block(hold)
+
+
+# --- questions (WP3): Mom answers a worker's question before it reaches a person -----------------------------
+_ANSWERED = ("[mom answered]", "[olymp answered]")  # card comment prefixes the Desktop half keys on
+_FOR_YOU = "[for you]"
+_YOU = "[you via calling-mom]"
+_BRIEF = re.compile(r"Question:\s*(\S.*?)\s*Options:\s*(\S.*?)\s*Recommendation:\s*(\S.*?)\s*If nobody answers:\s*(\S.*)", re.S | re.I)
+_RECOMMENDATION = re.compile(r"(?m)^Recommendation:\s*(.+?)\s*$")
+_OLYMP_COMMENT = "[%/%] run %, olymp)%"  # the advisor's comment when Olymp answered
+_Q_SYSTEM = ("A weaker coding agent blocked its card to ask a person a question. You answer in place of the person ONLY "
+             "when the answer follows from the card, the repository, the earlier comments, and a wrong answer is cheap "
+             "to undo. Reply with exactly one of:\n"
+             "ANSWER: <text>\n"
+             "ASK_HUMAN: followed by a brief of exactly four lines: 'Question:' (what must be decided), 'Options:' "
+             "(A, B, optional C), 'Recommendation:' (your pick and why), 'If nobody answers:' (what happens, what is the "
+             "safe default).\n"
+             "When in doubt, or when the choice is a matter of taste, money, access or the owner's name: ASK_HUMAN.")
+_Q_ESCALATE = ("\nESCALATE: <one-line reason>\nA far more expensive reviewer exists. ESCALATE only for a rare high-stakes "
+               "question you cannot judge from this context. Routine or reversible questions: never escalate.")
+_Q_BRIEF_ONLY = ("\n\nThis question touches something only the owner decides (credentials, money, legal, personal data, "
+                 "publishing, a held or critical command). Do NOT answer. Reply with ASK_HUMAN and the four-line brief only.")
+
+
+def _brief(question, options, recommendation, otherwise) -> str:
+    """The four-line brief, one line each, whatever the model's line breaks were."""
+    one = lambda text: " ".join(str(text).split())[:400]
+    return (f"Question: {one(question)}\nOptions: {one(options)}\nRecommendation: {one(recommendation)}\n"
+            f"If nobody answers: {one(otherwise)}")
+
+
+def _q_parse(text):
+    """``("answer", text)``, ``("human", brief)``, ``("escalate", reason)`` or None (anything else)."""
+    head, _, rest = (text or "").strip().partition(":")
+    kind, rest = head.strip().upper(), rest.strip()
+    if kind == "ANSWER":
+        return ("answer", rest[:1500]) if rest else None
+    if kind == "ESCALATE":
+        return ("escalate", rest[:200])
+    match = _BRIEF.search(rest) if kind == "ASK_HUMAN" else None
+    return ("human", _brief(*match.groups())) if match else None
+
+
+def _q_messages(task, reason, comments, held, escalate, brief_only, limit) -> list:
+    user = f"Task: {task.title}\n{(task.body or '')[:1500]}\n"
+    if held:
+        user += "\nHeld by the pre-flight check (this exact command stays blocked until a person allows it):\n"
+        user += "\n".join(f"- {h.get('reason')}. Instead: {h.get('alternative') or 'a safer equivalent'}" for h in held) + "\n"
+    if comments:
+        user += "\nLatest comments:\n" + "\n".join(f"- {c[:400]}" for c in comments) + "\n"
+    user += f"\nQuestion from the agent:\n{reason}\n"
+    user = _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", user))
+    if len(user) > limit:  # keep the task head and the question at the end
+        head = limit // 3
+        user = user[:head] + "\n...\n" + user[-(limit - head - 5):]
+    system = _Q_SYSTEM + (_Q_ESCALATE if escalate and not brief_only else "") + (_Q_BRIEF_ONLY if brief_only else "")
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _count_comments(conn, task_id, *likes) -> int:
+    where = " OR ".join(["body LIKE ?"] * len(likes))
+    return conn.execute(f"SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND ({where})", (task_id, *likes)).fetchone()[0]
+
+
+def _answer_on(cfg, board) -> bool:
+    return bool(cfg["answer"]["enabled"]) and ("*" in cfg["answer"]["boards"] or board in cfg["answer"]["boards"])
+
+
+def _rekinded(conn, task_id) -> bool:
+    """Hermes itself turned the block into ``needs_input`` (a dependency without an open parent): nobody asked anything."""
+    blocks = [e for e in kb.list_events(conn, task_id) if e.kind == "blocked"]
+    return bool(blocks and (blocks[-1].payload or {}).get("rekind_reason"))
+
+
+def _question_risk(task, reason) -> "str | None":
+    """Why Mom may not answer this question, only brief it: a held command, a critical command, an owner-only topic."""
+    if holds_for(task.id):
+        return "hold"
+    text = f"{reason}\n{task.title}\n{task.body or ''}"[:4000]  # ponytail: ceiling; a hit past 4000 characters is missed
+    arch = settings()["categories"].get("architecture") or {}
+    if rules.classify(text, extra=arch.get("commands_extra") or [], critical=arch.get("commands") or [], watch=[]) == "critical":
+        return "critical"
+    return "human_topic" if rules.human_topic(text) else None
+
+
+def on_question(task_id=None, board=None, reason=None, run_id=None, **_):
+    """``kanban_task_blocked``: the worker itself asked a person (``kanban_block(kind="needs_input")``) on a board where
+    Mom answers first. The hook is not bounded by Hermes, Mom's call stays within ``advisor.timeout_s``. Never raises."""
+    if not _enabled() or not task_id or os.environ.get("HERMES_KANBAN_TASK") != task_id:
+        return  # a block by a person (CLI, dashboard) or by another worker is not this worker's question
+    board = board or os.environ.get("HERMES_KANBAN_BOARD", "")
+    if not _answer_on(settings(), board):
+        return
+    try:
+        _answer_question(settings(), task_id, board, str(reason or ""), run_id)
+    except Exception as exc:  # pragma: no cover - a question must never break the board
+        logger.warning("calling-mom: question hook failed for %s: %s", task_id, exc)
+
+
+def _answer_question(cfg, task_id, board, reason, run_id) -> None:
+    started = time.monotonic()
+    usage = {"calls": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0}
+
+    def log(outcome, why=None, by=None):
+        fields = {"task": task_id, "board": board, "run": run_id, "outcome": outcome, "reason": why, "by": by,
+                  "ms": int((time.monotonic() - started) * 1000)}
+        if usage["calls"]:
+            fields |= {k: usage[k] for k in ("tokens_in", "tokens_out", "usd")}
+        _trace_row("question", **{k: v for k, v in fields.items() if v is not None})
+
+    adv, olymp = cfg["advisor"], cfg["olymp"]
+    with _connect(board) as conn:  # read everything now: no connection is held while the model thinks
+        task = kb.get_task(conn, task_id)
+        if task is None or task.status != "blocked" or task.block_kind != "needs_input":
+            return  # a typed block of another kind, a block loop parked in triage, ...
+        spent = _spent_today()
+        skip = next((why for why, hit in (
+            ("rekind", _rekinded(conn, task_id)), ("goal", reason.startswith("Goal-mode")),
+            ("local_only", _is_local_only(task)),
+            ("human_marker", bool(cfg["human_marker"]) and cfg["human_marker"].lower() in f"{task.title or ''}\n{task.body or ''}".lower()),
+            ("cap", _count_comments(conn, task_id, *(p + "%" for p in (*_ANSWERED, _FOR_YOU))) >= cfg["answer"]["max_per_card"]),
+            ("cap_daily", spent["usd"] >= adv["daily_usd_cap"] or spent["tokens"] >= adv["daily_token_cap"]),
+            ("no_llm", _ctx is None)) if hit), None)
+        if skip:
+            return log("skipped", skip)
+        comments = [c.body for c in kb.list_comments(conn, task_id)][-5:]
+        olymp_used = _count_comments(conn, task_id, _OLYMP_COMMENT, "[olymp answered]%")
+    held = holds_for(task_id)
+    risk = _question_risk(task, reason)
+    olymp_pair = bool(olymp["model"] and olymp["provider"])
+    olymp_room = olymp_pair and olymp_used < olymp["max_per_card"] and spent["olymp"] < olymp["max_per_day"]
+    brief_only = risk is not None
+    msgs = _q_messages(task, reason, comments, held, olymp_room, brief_only, adv["context_chars"])
+    route, by = {"model": cfg["model"], "provider": cfg["provider"]}, "mom"
+
+    def ask(r, messages, is_olymp=False):
+        res = _ask_model(r, messages, adv["max_output_tokens"], adv["timeout_s"], "kanban-question")
+        cost = res.usage.cost_usd or 0.0
+        usage["calls"] += 1
+        usage["tokens_in"] += res.usage.input_tokens or 0
+        usage["tokens_out"] += res.usage.output_tokens or 0
+        if not is_olymp:
+            usage["usd"] += cost
+            _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
+        else:  # olymp: a subscription, counted in calls
+            _add_spend(0.0, 0, olymp=1)
+        return _q_parse(res.text)
+
+    why = risk
+    try:
+        verdict = ask(route, msgs)
+        if verdict and verdict[0] == "escalate" and not brief_only:
+            if olymp_room:
+                by, route = "olymp", {"model": olymp["model"], "provider": olymp["provider"]}
+                verdict = ask(route, _q_messages(task, reason, comments, held, False, False, adv["context_chars"]), True)
+            else:  # Mom wants a stronger opinion and none is left: the person decides, with a brief
+                why = "olymp_cap" if olymp_pair else "no_olymp"
+                verdict = ("human", _brief(reason, "A) decide it yourself B) tell the worker to stop", "decide it yourself: "
+                                                   f"Mom asked for a stronger opinion ({verdict[1] or 'no reason given'}) and none is available",
+                                           "the card stays blocked"))
+    except _CoolingDown:
+        return log("error", "cooldown")
+    except _Timeout:
+        return log("error", "timeout")
+    except Exception:
+        return log("error", "down")
+    if verdict is None or verdict[0] == "escalate" or (brief_only and verdict[0] != "human"):
+        return log("error", "parse")  # Mom never answers a risky question, and never overrules a hold
+    kind, text = verdict
+    if not _post_comment(task_id, f"{_FOR_YOU} {text}" if kind == "human" else f"[{by} answered] {text}"):
+        return log("error", "comment")
+    if kind == "answer":
+        with _connect(board) as conn:
+            if not kb.unblock_task(conn, task_id):
+                return log("error", "unblock")
+    log("answered" if kind == "answer" else "human", why if kind == "human" else None, by)
+
+
+def _recommendation(comments) -> "str | None":
+    """Mom's recommendation from the newest ``[for you]`` brief."""
+    briefs = [c.body for c in comments if (c.body or "").startswith(_FOR_YOU)]
+    match = _RECOMMENDATION.search(briefs[-1]) if briefs else None
+    return match.group(1) if match else None
+
+
+def _note_card_answer(conn, task, board) -> None:
+    """A card with a ``[for you]`` brief was claimed again: somebody unblocked it without our help (the card, the CLI of
+    another profile, the dashboard). Log it once per brief as ``human_answer via=card``."""
+    briefs = [c for c in kb.list_comments(conn, task.id) if (c.body or "").startswith(_FOR_YOU)]
+    data = _load_holds()
+    if not briefs or (data.get("answered") or {}).get(task.id) == briefs[-1].id:
+        return
+    data.setdefault("answered", {})[task.id] = briefs[-1].id
+    _write_state(data)
+    _trace_row("human_answer", task=task.id, board=board, via="card", accepted=False, allow_once=False,
+               latency_s=max(0, int(time.time()) - briefs[-1].created_at))
+
+
+def _opted_in(board) -> bool:
+    cfg = settings()
+    boards = [*cfg["answer"]["boards"], *cfg["advisor"]["boards"]]
+    return "*" in boards or board in boards
+
+
+def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False) -> dict:
+    """A person answers a card that carries Mom's brief or a pre-flight HOLD (the CLI and the Desktop page call this).
+
+    Writes the answer as ``[you via calling-mom] ...`` (``accept`` copies Mom's recommendation), records an
+    allowance for every held command when ``allow_once``, unblocks the card and logs ``human_answer``. Returns
+    ``{"ok": True, ...}`` or ``{"ok": False, "status": 400|404|409, "error": ...}``; nothing changes on an error."""
+    def fail(status, error):
+        return {"ok": False, "status": status, "error": error}
+
+    if by not in ("cli", "desktop"):
+        return fail(400, "by must be 'cli' or 'desktop'")
+    text = text.strip() if isinstance(text, str) else text
+    if text is not None and not (isinstance(text, str) and 0 < len(text) <= 2000):
+        return fail(400, "text must be 1 to 2000 characters")
+    if text and accept:
+        return fail(400, "give either text or accept, not both")
+    if not (text or accept or allow_once):
+        return fail(400, "nothing to do: give text, accept or allow_once")
+    if not _opted_in(board):
+        return fail(404, f"board {board!r} did not opt in to calling-mom")
+    with _connect(board) as conn:
+        task = kb.get_task(conn, task_id)
+        if task is None:
+            return fail(404, f"no card {task_id!r} on board {board!r}")
+        if task.status != "blocked":
+            return fail(409, f"{task_id} is not blocked (it is {task.status})")
+        comments, holds = kb.list_comments(conn, task_id), holds_for(task_id)
+        briefs = [c for c in comments if (c.body or "").startswith(_FOR_YOU)]
+        if not (briefs or holds):
+            return fail(409, f"{task_id} carries no brief and no hold")
+        if allow_once and not holds:
+            return fail(409, f"{task_id} has no held command to allow")
+        if accept:
+            text = _recommendation(comments)
+            if not text:
+                return fail(400, f"{task_id} has no recommendation to accept")
+        asked = max([c.created_at for c in briefs] + [h.get("ts", 0) for h in holds])
+        kb.add_comment(conn, task_id, "you", f"{_YOU} {text or 'Allowed once: the held command may run.'}")
+        if allow_once:
+            for hold in holds:
+                _release_hold(board, task_id, hold["cmd_hash"], by=by)
+        released = kb.unblock_task(conn, task_id)
+    data = _load_holds()
+    if briefs:
+        data.setdefault("answered", {})[task_id] = briefs[-1].id
+        _write_state(data)
+    _trace_row("human_answer", task=task_id, board=board, via=by, accepted=bool(accept), allow_once=bool(allow_once),
+               latency_s=max(0, int(time.time()) - asked))
+    return {"ok": True, "task_id": task_id, "text": text, "unblocked": bool(released)}
 
 
 class _Verify:
@@ -1299,14 +1591,16 @@ def register(ctx) -> None:
     if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
         register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
                      setup_fn=cli.setup_parser,
-                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core),
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card),
                      description="setup: choose mom/olymp from your providers. status: show setup and usage. "
-                                 "doctor: check the setup with one real call per model.")
+                                 "doctor: check the setup with one real call per model. "
+                                 "answer: answer a card that carries Mom's brief or a pre-flight HOLD.")
     if _core.ERROR:  # a Hermes update removed something we use: no hooks, but `doctor` still runs; say why once
         logger.warning("calling-mom: not active, %s. Run: hermes calling-mom doctor", _core.ERROR)
         return
     ctx.register_hook("kanban_task_claimed", on_claimed)
     ctx.register_hook("kanban_task_blocked", on_blocked)
+    ctx.register_hook("kanban_task_blocked", on_question)
     ctx.register_hook("transform_tool_result", on_tool_result)
     ctx.register_hook("pre_tool_call", on_pre_tool)
     ctx.register_hook("post_api_request", on_api_response)
