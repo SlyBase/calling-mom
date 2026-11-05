@@ -3,6 +3,61 @@
 The everyday guide is the [README](../README.md). This page holds the details: every config key, security model,
 metrics, how the risk list was built, what was measured, and how to develop and release.
 
+## New in 1.4 at a glance
+
+One page for what 1.4 added. The details are in the sections named in each row.
+
+**Options** (under `calling_mom:` in `config.yaml`; defaults in `__init__.py` `DEFAULTS`):
+
+| Key | Default | What it does | Section |
+|---|---|---|---|
+| `preflight.enabled` | `true` | Mom checks a critical command before it runs. Active only where the advisor is. | Hook deadlines |
+| `preflight.timeout_s` | `12` | Deadline of that one synchronous question. The effective deadline is `min(timeout_s, 0.4 x hook budget)`. | Hook deadlines |
+| `preflight.max_per_card` | `4` | Model calls per card for pre-flight. Past it, critical commands run. | Hook deadlines |
+| `answer.enabled` | `false` | Mom answers a worker's `needs_input` question first. `setup` asks. | Mom answers first |
+| `answer.boards` | `[]` | Boards where she may. `"*"` = all. | Mom answers first |
+| `answer.max_per_card` | `2` | Answers and briefs per card. | Mom answers first |
+| `answer.precedents` | `true` | Keep your answers to briefs as text, show Mom up to three. | Precedents |
+| `human_marker` | `[human]` | A card with it is for a person. Mom never answers its questions. | Mom answers first |
+| `verify.timeout_s` | `600` (was 120) | `verify:` runs in the background, so a long command is fine. | Hook deadlines |
+| `advisor.timeout_s` | `40` | Limit for one advice call. It runs off the hot path, see the budget rule. | Hook deadlines |
+
+Settings read from Hermes, not from this plugin: `plugins.hook_callback_timeout` (default 30 s) is the hook budget.
+
+**Commands** added in 1.4: `hermes calling-mom answer <task>` (`--accept`, `--text`, `--allow-once`, `--board`),
+`hermes calling-mom precedents [list | forget <id> | clear]`, `hermes calling-mom report [--days N] [--board X] [--json]`,
+`hermes calling-mom setup --answer / --no-answer`. `scripts/demo.py --assignee <profile> [--board B] [--root DIR]
+[--wait MIN] [--log FILE] [--reset]` makes the demo cards (see "Demo kit").
+
+**Log record kinds** (`logs/calling-mom.jsonl`, one JSON object per line, no prose; every row has `ts`, `kind`, `pid`,
+and `task`, `board`, `run` where known). New or changed in 1.4:
+
+| kind | Fields | Written when |
+|---|---|---|
+| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `allowance`, `local_only`), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
+| `question` | `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`, `ms`, `tokens_in`, `tokens_out`, `usd` | A worker's `needs_input` question was handled. |
+| `human_answer` | `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
+| `verify` | `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ok`, `fails`, `exit`, `ms` | The background `verify:` command changed state. |
+| `advice_late` | `signal`, `ms` | An advice missed the wait and reached the worker on a later tool result. |
+| `worker_usage` | `tokens_in`, `tokens_out` | One worker API request (`post_api_request`). Counts only, no text. |
+
+Unchanged kinds: tool rows (no `kind`: `tool`, `ok`, `sig`, `signals`), `advisor`, `advisor_error`, `advice_feedback`,
+`escalated`, `review_redirect`, `verify_ignored`, `tick`. Precedents are a separate file (see "Precedents").
+`hermes calling-mom report` and `GET /summary` only count these rows.
+
+**The hook budget rule.** Hermes cuts a bounded hook off after `plugins.hook_callback_timeout` (the budget, default 30 s) and then skips that
+callback for 60 s. So no synchronous wait inside a bounded hook may take more than **40 % of the budget**:
+
+| Where | Wait | At 30 s budget |
+|---|---|---|
+| Advice in `transform_tool_result` | `min(8 s, 0.25 x budget)`, then it goes late | 7.5 s |
+| Pre-flight in `pre_tool_call` | `min(preflight.timeout_s, 0.4 x budget)` | 12 s |
+| `verify:` result in `kanban_complete` | `0.3 x budget` per call, the command runs in the background | 9 s |
+| ESCALATE to Olymp, completion check, question handling | no wait: background or unbounded hook | - |
+
+`pre_tool_call` fails closed, so a hook that waits too long freezes every tool call of the worker for a minute.
+Everything else fails open. See "Hook deadlines".
+
 ## Manual configuration
 
 Everything `setup` writes can be set by hand. Keys live under `calling_mom:` in `config.yaml`:
@@ -55,6 +110,35 @@ hermes -p reviewer config set model.provider <provider> --force
 hermes -p reviewer plugins disable calling-mom
 ```
 
+
+## Demo kit
+
+`scripts/demo.py` (stdlib only) makes a scratch tree and four cards on the board `calling-mom-demo`, then watches
+the log until each rung has fired:
+
+| Card | Workspace | Trigger | Proof in the log |
+|---|---|---|---|
+| `[demo] make the flaky build pass` | `build/` | `build.sh` fails the same way three times (`out` is a file, not a folder). | `advisor` row with `signal` `same_error` or `loop` |
+| `[demo] set the greeting` | `config/` | The worker asks which file to change. The card holds the facts, so Mom can answer. | `question` row, `outcome` `answered`, `by` `mom` |
+| `[demo] publish the release notes` | `repo/` | The worker must replace `main` on a shared remote. | `preflight` row, `verdict` `hold` |
+| `[demo] write the notes` | `verify/` | The card carries `verify: python3 check_notes.py`. | `verify` row, `state` `pass` |
+
+Safe by construction: everything lives under `--root` (default `<tmp>/calling-mom-demo`, marked by a `.calling-mom-demo`
+file; the script never deletes a folder without that mark). The "remote" is `remote.git`, a bare repository in that folder, and the
+script refuses to go on if `origin` points anywhere else. Each run archives the cards of the last run and builds the tree
+again, so it can run twice in a row. `--reset` does only that. The board must be opted in
+(`hermes calling-mom setup --boards calling-mom-demo --answer`) and a gateway must run, because the gateway starts the worker.
+The log it watches is the one of the installation: `CALLING_MOM_LOG`, else `<Hermes root>/logs/calling-mom.jsonl`
+(`--log` overrides). The exit code is 0 only when all four triggers fired within `--wait` minutes (default 15).
+
+Limits: a model decides whether the stuck card gets stuck (it must repeat the failing command), and whether Mom says
+HOLD, so a run can miss a trigger. The script reports it as `NOT FIRED`; run it again. Run it with a worker profile you
+can throw away: in one test Hermes' own approval gate blocked the force push (Mom had said GO), and the worker then ran
+`hermes config set approvals.single_query_mode approve` on its own profile. Mom's pre-flight held the retry, and the
+worker reverted the setting. Measured on 2026-11-05 with a local 27B worker (Swift-27B), Mom = Sonnet: all four triggers
+fired at +7:44 and +7:31 in two runs in a row. With the first, looser card texts one run missed the stuck card and one
+HOLD came only at +12:26. Four workers on one local model are slow: in one run a pre-flight check timed out (12 s) and the
+command was allowed, as designed.
 
 ## Where the risk list comes from
 
