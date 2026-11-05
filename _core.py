@@ -26,6 +26,19 @@ def load_config() -> dict:
         return {}
 
 
+def hook_budget() -> float:
+    """Seconds Hermes gives a bounded hook (``plugins.hook_callback_timeout``, default 30), clamped to 1..600.
+
+    Every wait inside ``pre_tool_call``, ``transform_tool_result`` and ``post_api_request`` is a fraction of it.
+    A missing, non-numeric or negative value means Hermes' own default, as in Hermes itself."""
+    plugins = load_config().get("plugins")
+    try:
+        value = float(plugins.get("hook_callback_timeout")) if isinstance(plugins, dict) else 30.0
+    except (TypeError, ValueError):
+        value = 30.0
+    return min(600.0, max(1.0, value)) if value >= 0 else 30.0
+
+
 def save_config(cfg) -> None:
     from hermes_cli.config import save_config as save
     save(cfg)
