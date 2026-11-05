@@ -4,7 +4,6 @@ Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanb
 POST /answer, which goes through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``).
 """
 import importlib.util
-import json
 import time
 from pathlib import Path
 
@@ -38,39 +37,7 @@ def mom():
 
 def _rows(since=0):
     """Log rows from ``since`` (epoch seconds) on; a broken line or a missing file is skipped."""
-    try:
-        lines = mom()._log_path().read_text().splitlines()
-    except OSError:
-        return []
-    rows = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict) and row.get("ts", 0) >= since:
-            rows.append(row)
-    return rows
-
-
-def _counts(rows):
-    """Counts per rung. Mom's calls: advice, pre-flight checks, and every question she answered or briefed."""
-    of = lambda kind, **want: [r for r in rows if r.get("kind") == kind and all(r.get(k) in v for k, v in want.items())]
-    advice = of("advisor")
-    questions = of("question", outcome=("answered", "human"))
-    checks = of("preflight", verdict=("go", "hold"))
-    verify = of("verify", state=_FINISHED)
-    return {
-        "worker": {"tool_calls": sum(1 for r in rows if "kind" not in r),
-                   "signals": sum(len(r.get("signals") or []) for r in rows if "kind" not in r)},
-        "mom": {"calls": sum(1 for r in advice if not r.get("olymp")) + len(checks) + len(questions),
-                "answered": sum(1 for r in questions if r["outcome"] == "answered" and r.get("by") == "mom"),
-                "checked": len(checks), "holds": sum(1 for r in checks if r["verdict"] == "hold"),
-                "verified": sum(1 for r in verify if r["state"] == "pass"),
-                "verify_failed": sum(1 for r in verify if r["state"] != "pass")},
-        "olymp": {"calls": sum(1 for r in advice if r.get("olymp")) + sum(1 for r in questions if r.get("by") == "olymp")},
-        "you": {"briefs": sum(1 for r in questions if r["outcome"] == "human"), "answered": len(of("human_answer"))},
-    }
+    return [r for r in mom().report.read(mom()._log_path()) if r.get("ts", 0) >= since]
 
 
 def _recent(rows, limit=10):
@@ -157,13 +124,13 @@ def needs_you():
 
 @router.get("/summary")
 def summary(days: int = Query(7, ge=1, le=90)):
+    """The attention report (``hermes calling-mom report``) plus what only the Desktop shows: today, waiting, recent."""
     now = time.time()
     rows = _rows(now - days * DAY)
-    out = _counts(rows)
-    out["olymp"] |= {"today": mom()._spent_today()["olymp"], "cap": mom().settings()["olymp"]["max_per_day"]}
-    out["today"] = {"mom_calls": _counts([r for r in rows if r["ts"] >= now - now % DAY])["mom"]["calls"]}
+    out = mom().attention_report(days, rows=rows, now=now)
+    out["today"] = {"mom_calls": mom().report.build(rows, since=now - now % DAY)["mom"]["calls"]}
     out["you"]["waiting"] = len(_needs_you())
-    return {"days": days, **out, "recent": _recent(rows)}
+    return {**out, "recent": _recent(rows)}
 
 
 class Answer(BaseModel):

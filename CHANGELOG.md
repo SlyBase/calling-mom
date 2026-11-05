@@ -42,6 +42,14 @@ versioning: [SemVer](https://semver.org/).
   process): `GET /summary?days=7`, `GET /cards?board=`, `GET /needs-you`, `POST /answer` (`answer_card(by="desktop")`).
   The 100 % coverage gate counts the backend (`test_dashboard.py`).
 
+- **Attention report.** `hermes calling-mom report [--days 7] [--board X] [--json]` shows, per rung, what happened
+  and what it cost: Worker (tool calls, runs, stuck signals, API calls and tokens), Mom (calls, questions answered,
+  pre-flight checks and holds, verify results, tips followed or rejected), Olymp (calls against the daily cap), You
+  (briefs, answers, median time to answer, holds released) and Cost (Mom's dollars and tokens, Olymp's calls). When
+  Mom reports a price, it adds what running every worker call on Mom would have cost. One function (`report.build`)
+  is behind the CLI and `GET /summary`. New log row `worker_usage` (`tokens_in`, `tokens_out` per worker API
+  request, no text); `preflight` rows that reached the model now carry `tokens_in`, `tokens_out`, `usd`.
+
 ### Fixed
 - No hook reaches Hermes' hook timeout any more (`plugins.hook_callback_timeout`, default 30 s). Before, a slow
   Mom (40 s), Mom plus Olymp (about 80 s) or a `verify:` command (120 s) inside `pre_tool_call` could time out; a

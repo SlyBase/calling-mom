@@ -171,6 +171,39 @@ the dashboard) gets one `human_answer via=card` row per brief.
 New log rows: `question` has `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`,
 `ms` and, after a model call, `tokens_in`, `tokens_out`, `usd` (Mom's; Olymp is counted in calls). `human_answer` has
 `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
+`worker_usage` (one per worker API request) has `task`, `run`, `tokens_in`, `tokens_out`; `preflight` rows that
+reached the model also carry `tokens_in`, `tokens_out`, `usd`.
+
+## Attention report
+
+`hermes calling-mom report [--days 7] [--board X] [--json]` and `GET /summary` call one function, `report.build(rows,
+since, board, tasks)` (via `attention_report(days, board)` in `__init__.py`). It counts rows of `logs/calling-mom.jsonl`
+and nothing else, so the same log gives the same numbers. `--board` keeps the rows that name the board and the rows of
+its cards (tool and advice rows carry a task id, not a board; the cards come from a read-only list of the board).
+
+JSON fields (`days` and `board` are added by `attention_report`; `olymp.today` and `olymp.cap` too):
+
+| Field | Meaning |
+|---|---|
+| `worker.tool_calls` / `runs` / `signals` | tool-result rows / distinct (card, run) pairs among them / stuck signals fired |
+| `worker.api_calls` / `tokens_in` / `tokens_out` | `worker_usage` rows (one per worker API request, `post_api_request`) and their tokens; `tokens_in` includes cache reads and writes |
+| `mom.calls` | advisor rows (an Olymp advice was asked of Mom first) + pre-flight checks that reached the model + questions she answered or briefed (`outcome` answered/human) |
+| `mom.answered` | questions with `outcome=answered`, `by=mom` |
+| `mom.checked` / `holds` | pre-flight `go` + `hold` rows / `hold` rows |
+| `mom.verified` / `verify_failed` | finished `verify` rows: `pass` / `fail` + `timeout` (`started` and `stale` are not results) |
+| `mom.tips_followed` / `tips_rejected` | `advice_feedback` rows by verdict |
+| `olymp.calls` | Olymp advice rows + questions with `by=olymp`; `today` and `cap` are the daily count and `olymp.max_per_day` |
+| `you.briefs` | questions with `outcome=human` |
+| `you.answered` / `holds_released` | `human_answer` rows (briefs and holds, any `via`) / those with `allow_once` |
+| `you.median_answer_s` | median `latency_s` of the answers, `null` without any |
+| `cost.mom_usd` / `mom_tokens_in` / `mom_tokens_out` | the cost rows of Mom alone: her advisor rows, her pre-flight rows, her questions (not those finished by Olymp, which mix both models) |
+| `cost.olymp_calls` | same as `olymp.calls` (a subscription: calls, not dollars) |
+| `cost.worker_tokens` | `worker.tokens_in` + `tokens_out` |
+| `cost.all_on_mom_usd` | `worker_tokens` x (`mom_usd` / Mom's tokens): the worker tokens at Mom's observed blended price. `null` unless Mom reports a price (a provider that reports `usd: 0` has none) |
+
+Limits: Mom's cost is a lower bound, because the first, escalating call of an Olymp advice is not logged; the price is
+one blended number for input and output; worker tokens count cache reads at full weight; the log is trimmed to its last 1000 rows when it passes 5 MB, so a busy install reports fewer days than asked. `GET /summary` adds
+`you.waiting`, `today.mom_calls` and `recent` to this report.
 
 ## Desktop backend
 
@@ -180,7 +213,7 @@ it imports nothing from Hermes itself. Boards are read through the plugin's `_co
 
 | Route | Answer |
 |---|---|
-| `GET /summary?days=7` (1..90) | `{days, worker{tool_calls, signals}, mom{calls, answered, checked, holds, verified, verify_failed}, olymp{calls, today, cap}, you{briefs, answered, waiting}, today{mom_calls}, recent[{ts, kind, task, board, detail, by}]}`. Mom's `calls` are advice, pre-flight checks that reached the model and every question she answered or briefed; Olymp's include the questions he answered. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
+| `GET /summary?days=7` (1..90) | The attention report (see above: `worker`, `mom`, `olymp`, `you`, `cost`) plus `you.waiting`, `today{mom_calls}` and `recent[{ts, kind, task, board, detail, by}]`. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
 | `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `verify failed`, `olymp`, `mom`, `verified`. `held` and `for you` need an opted-in board and a card that still waits; the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
 | `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. |
 | `POST /answer` | `{board, task_id, text?, accept?, allow_once?}` -> `answer_card(..., by="desktop")`. 404 for a board that does not exist or did not opt in, or no such card; 409 for a card that is not blocked or carries no brief or hold; 400 for bad arguments; 422 for a malformed body. |
