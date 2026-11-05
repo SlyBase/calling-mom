@@ -34,6 +34,7 @@ plugins:
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only). |
 | `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
 | `answer.*` | disabled, `boards []`, `max_per_card 2` | Mom answers a worker's `needs_input` question before it reaches you (see "Mom answers first"). `setup` asks. Model calls use `advisor.timeout_s`, `advisor.max_output_tokens`, `advisor.context_chars` and the daily caps of the advisor. |
+| `answer.precedents` | `true` | Keep a person's answers to `[for you]` briefs as text and show Mom up to three (see "Precedents"). Meaningful only where `answer` is on. |
 | `human_marker` | `[human]` | A card with this marker is for a person: Mom never answers its questions (no brief either). |
 | `categories.<name>` | inherit | Per category (`error`, `loop`, `validation`, `architecture`) its own `model` AND `provider`. |
 | `verify.*` | see below | `timeout_s 600`, `max_fix`, `trusted_creators ["user"]`, `allow`. The command runs in the background, see "Hook deadlines". |
@@ -77,6 +78,7 @@ Card text can come from mail or web content, so treat it as untrusted.
 - **Advisor** is opt-in per board or card. Context is redacted with Hermes' `redact_for_egress`. Board tool results (`kanban_*`) are filtered out of the context. Daily USD and token caps apply.
 - **Pre-flight** is active only where the advisor is (board opt-in or card marker) and never on `[local-only]` cards. The card and the command are redacted with `redact_for_egress` before the question leaves. A HOLD is a persistent block that only a human release lifts; a model never releases its own hold. The log stores only the command hash, not the command.
 - **Answers** (`answer.enabled`) are a second, separate opt-in: Mom answers a worker's question and unblocks the card. The fast path (no model call) skips `[local-only]` and `[human]` cards and sends critical, `rules.HUMAN_TOPICS` and held cards to a brief-only prompt. The question prompt is redacted with `redact_for_egress` plus the URL-credential scrub. Mom cannot release a hold.
+- **Precedents** (`answer.precedents`) are the one prose store: redacted answers to briefs in `logs/calling-mom-precedents.jsonl`, listed and deleted with `hermes calling-mom precedents`. See "Precedents".
 - **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content.
 - The plugin never edits Hermes config.
 
@@ -173,6 +175,24 @@ New log rows: `question` has `outcome` (`answered`, `human`, `skipped`, `error`)
 `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
 `worker_usage` (one per worker API request) has `task`, `run`, `tokens_in`, `tokens_out`; `preflight` rows that
 reached the model also carry `tokens_in`, `tokens_out`, `usd`.
+
+## Precedents
+
+`precedents.py` (stdlib) keeps one JSON object per line in `logs/calling-mom-precedents.jsonl`, next to the log:
+`{id, board, question, answer, task, ts}`. `id` is a hash of board, card and brief comment id, so one brief is stored
+once whichever path reports it.
+
+Capture, when `answer.precedents` is on, `answer` is on for the board, the card is not `[local-only]`, and neither text
+matches `rules.HUMAN_TOPICS`: `answer_card` (CLI, Desktop; the typed text, or Mom's recommendation for `accept`; an
+`allow_once` without text stores nothing) and the claim hook `_note_card_answer` (the newest comment after the brief
+that is not a plugin comment: `[for you]`, `[mom answered]`, `[olymp answered]`, `[you via calling-mom]`). The
+question is the `Question:` line of the newest brief. Both texts are redacted (`redact_for_egress` plus the
+URL-credential scrub), joined to one line and cut at 500 characters. A failure is logged and never blocks the answer.
+
+Use: `_answer_question` ranks the stored entries by the number of shared words (four letters or more) between the new
+question plus card title and the stored question, at least one; on a tie the same board, then the newer entry. The
+top three go into the prompt under "Earlier answers" (not for brief-only questions), together with the instruction to
+cite one as "as decided on <card id>". `hermes calling-mom precedents [list | forget <id> | clear]` manages the file.
 
 ## Attention report
 

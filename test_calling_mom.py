@@ -2335,7 +2335,7 @@ class QuestionTest(QuestionFixture, unittest.TestCase):
     """Mom answers a worker question first: ANSWER unblocks, ASK_HUMAN writes a brief, anything else changes nothing."""
 
     def test_the_defaults_leave_it_off_until_setup_asks(self):
-        self.assertEqual(self.saved["answer"], {"enabled": False, "boards": [], "max_per_card": 2})
+        self.assertEqual(self.saved["answer"], {"enabled": False, "boards": [], "max_per_card": 2, "precedents": True})
         self.assertEqual(self.saved["human_marker"], "[human]")
 
     # --- ANSWER -----------------------------------------------------------------------------------------

@@ -50,6 +50,14 @@ versioning: [SemVer](https://semver.org/).
   is behind the CLI and `GET /summary`. New log row `worker_usage` (`tokens_in`, `tokens_out` per worker API
   request, no text); `preflight` rows that reached the model now carry `tokens_in`, `tokens_out`, `usd`.
 
+- **Precedents: your answers become Mom's rules.** When you answer one of Mom's `[for you]` briefs (CLI, Desktop, or a
+  card comment followed by an unblock), the plugin stores `{id, board, question, answer, task, ts}` as text in
+  `logs/calling-mom-precedents.jsonl` (redacted, at most 500 characters each, local only). Mom's question prompt gets
+  up to three entries with the most shared words (same board first on a tie) and cites one as "as decided on t_...".
+  `hermes calling-mom precedents [list | forget <id> | clear]`; setting `answer.precedents` (default `true`, meaningful
+  only where answers are on). Owner-only topics and `[local-only]` cards are never stored. This is the one prose file
+  of the plugin; it is disclosed in README and SECURITY.md.
+
 ### Fixed
 - No hook reaches Hermes' hook timeout any more (`plugins.hook_callback_timeout`, default 30 s). Before, a slow
   Mom (40 s), Mom plus Olymp (about 80 s) or a `verify:` command (120 s) inside `pre_tool_call` could time out; a

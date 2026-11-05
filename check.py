@@ -20,11 +20,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CANONICAL = HERE
 DEPLOYED = Path(os.environ["CALLING_MOM_DEPLOYED"]) if os.environ.get("CALLING_MOM_DEPLOYED") else None
-MODULES = ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules", "test_core", "test_dashboard", "test_report"]
+MODULES = ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules", "test_core", "test_dashboard", "test_report", "test_precedents"]
 PAYLOAD = ["__init__.py", "_core.py", "test_core.py", "cli.py", "rules.py", "test_rules.py", "metrics.py", "signals.py", "plugin.yaml",
            "test_signals.py", "test_calling_mom.py", "test_metrics.py", "test_matrix.py", "test_cli.py",
            "linecov.py", "check.py", "README.md", "CHANGELOG.md", "scripts/sweep.py",
-           "test_dashboard.py", "test_report.py", "report.py", "dashboard/plugin_api.py", "dashboard/manifest.json", "desktop/plugin.js"]
+           "test_dashboard.py", "test_report.py", "report.py", "precedents.py", "test_precedents.py", "dashboard/plugin_api.py", "dashboard/manifest.json", "desktop/plugin.js"]
 
 
 def measure(minimum):

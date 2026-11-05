@@ -75,6 +75,24 @@ without an open parent, an exhausted goal budget, a block loop) are not question
 It is **off** until you say yes: `hermes calling-mom setup` asks "Let Mom answer worker questions before they reach
 you?" (`--answer` / `--no-answer` for scripts). Mom answers at most twice per card and shares the daily budget of the advisor.
 
+### Your answers become Mom's rules
+
+When you answer a brief (`hermes calling-mom answer`, the Desktop page, or a card comment followed by an unblock), the
+plugin keeps the question and your answer as **text** in `logs/calling-mom-precedents.jsonl`: `{id, board, question,
+answer, task, ts}`, redacted, at most 500 characters each. The next time a worker asks a similar question, Mom sees up
+to three of these (the most shared words with the new question; on a tie, the same board first) and, if her answer
+rests on one, says so: "as decided on t_...". Nothing leaves the machine except inside Mom's prompt, which is
+redacted like every other. Owner-only topics (credentials, money, legal, personal data, publishing) and `[local-only]`
+cards are never stored.
+
+| Command | What it does |
+|---|---|
+| `hermes calling-mom precedents` | Lists what is stored, with ids. |
+| `hermes calling-mom precedents forget <id>` | Deletes one. |
+| `hermes calling-mom precedents clear` | Deletes all. |
+
+Turn it off with `calling_mom.answer.precedents: false`. It only matters where answers are on.
+
 ## When is Olymp called?
 
 **Almost never.** Olymp is asked only if all of this is true:
@@ -132,6 +150,7 @@ Mom or Olymp (run `setup` again for that). A route needs both a provider and a m
 | `hermes calling-mom status` | Who is Mom, who is Olymp, Olymp calls today, any failures. |
 | `hermes calling-mom doctor` | Checks the setup and makes a real call to each model. Run it after every Hermes update. |
 | `hermes calling-mom report` | What reached whom and what it cost: per rung, `--days 7`, `--board X`, `--json`. |
+| `hermes calling-mom precedents [forget <id> \| clear]` | The answers of yours that Mom may reuse (see [Your answers become Mom's rules](#your-answers-become-moms-rules)). |
 | `hermes calling-mom answer <task>` | Answers a card that carries Mom's `[for you]` brief or a pre-flight HOLD: `--accept`, `--text "..."` or `--allow-once` (`--board` if it is not the current board). |
 
 ## What you will see in a card
@@ -202,6 +221,7 @@ write is your click on a button, see [SECURITY.md](SECURITY.md).
 - **Nothing leaves your machine until you say so.** Helpers are off until you enable them and name a board (or put `[advisor]` on a card).
 - **`[local-only]` on a card always wins**: nothing from that card is sent anywhere.
 - **Answers are a separate switch** (`calling_mom.answer`, off by default). With it on, Mom answers worker questions and unblocks cards on the listed boards; the question, the card text and the last comments are sent to her model (redacted). Questions about secrets, money, legal matters, personal data or publishing, and critical commands never get an answer from her.
+- **Your answers are kept as text.** With answers on, your reply to one of Mom's briefs is stored (redacted, 500 characters each) in `logs/calling-mom-precedents.jsonl` and shown to Mom for similar questions. It is the only place the plugin keeps prose. See and delete it with `hermes calling-mom precedents`; turn it off with `answer.precedents: false`.
 - Secrets (tokens, keys, passwords, credentials in URLs) are **blanked out** before anything is sent.
 - Olymp is limited by **number of calls**, so a subscription never surprises you. Mom has a daily dollar and token cap.
 - The plugin never changes your config by itself. Only `setup` does, and only with the values you picked.
