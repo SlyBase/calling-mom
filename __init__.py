@@ -62,6 +62,13 @@ except ImportError:  # loaded by path (tests, plugin doctor)
     _rules_spec.loader.exec_module(rules)
 
 try:
+    from . import report
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _report_spec = importlib.util.spec_from_file_location("calling_mom_report", Path(__file__).with_name("report.py"))
+    report = importlib.util.module_from_spec(_report_spec)
+    _report_spec.loader.exec_module(report)
+
+try:
     from . import cli
 except ImportError:  # loaded by path (tests, plugin doctor)
     _cli_spec = importlib.util.spec_from_file_location("calling_mom_cli", Path(__file__).with_name("cli.py"))
@@ -994,18 +1001,19 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
         return None
     _add_spend(res.usage.cost_usd or 0.0, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
     _preflight_calls[key[0]] = _preflight_calls.get(key[0], 0) + 1
+    paid = {"tokens_in": res.usage.input_tokens or 0, "tokens_out": res.usage.output_tokens or 0, "usd": res.usage.cost_usd or 0.0}
     verdict = _pf_parse(res.text)
     if verdict == "go":
-        _trace_row("preflight", task=key[0], verdict="go", cmd_hash=h, model=cfg["model"])
+        _trace_row("preflight", task=key[0], verdict="go", cmd_hash=h, model=cfg["model"], **paid)
         return None
     if not isinstance(verdict, tuple):
-        _trace_row("preflight", task=key[0], verdict="allowed", reason="parse", cmd_hash=h)
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="parse", cmd_hash=h, **paid)
         return None
     _, reason, alternative = verdict
     hold = _record_hold(key[0], h, reason, alternative)
     _post_comment(task.id, f"[pre-flight] HOLD: {reason}. Instead: {alternative or 'run a safer equivalent'}. "
                            "This exact command stays blocked on this card until a human allows it.")
-    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=cfg["model"])
+    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=cfg["model"], **paid)
     return _pf_block(hold)
 
 
@@ -1512,6 +1520,23 @@ def _log_path() -> Path:
     return Path(get_default_hermes_root()) / "logs" / "calling-mom.jsonl"
 
 
+def attention_report(days=7, board=None, rows=None, now=None) -> dict:
+    """The numbers behind ``hermes calling-mom report`` and ``GET /summary`` (see ``report.build``).
+
+    ``board`` keeps that board's rows plus the rows of its cards; Olymp also shows today's calls against the daily cap."""
+    now = time.time() if now is None else now
+    tasks = ()
+    if board is not None:
+        try:
+            with _connect(board) as conn:
+                tasks = {t.id for t in kb.list_tasks(conn, include_archived=True)}
+        except Exception:  # a board we cannot read: its own rows still count
+            pass
+    out = report.build(report.read(_log_path()) if rows is None else rows, since=now - days * 86400, board=board, tasks=tasks)
+    out["olymp"] |= {"today": _spent_today()["olymp"], "cap": settings()["olymp"]["max_per_day"]}
+    return {"days": days, "board": board, **out}
+
+
 def _worker_key():
     task = os.environ.get("HERMES_KANBAN_TASK")
     return (task, os.environ.get("HERMES_KANBAN_RUN_ID", "")) if task else None
@@ -1561,9 +1586,23 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
     return None
 
 
-def on_api_response(assistant_message=None, **_):
-    """post_api_request: the first worker text after advice tells whether it was followed or refuted."""
+def _log_usage(key, usage) -> None:
+    """One ``worker_usage`` row per API request of a Kanban worker: the tokens it cost, no text. The report prices them."""
+    if not (key and isinstance(usage, dict) and _enabled() and settings()["observe"]):
+        return
+    try:
+        prompt = usage.get("prompt_tokens")
+        if prompt is None:  # Hermes sends it; the three buckets are what it adds up
+            prompt = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_read_tokens", "cache_write_tokens"))
+        _trace_row("worker_usage", task=key[0], run=key[1], tokens_in=int(prompt), tokens_out=int(usage.get("output_tokens") or 0))
+    except (TypeError, ValueError):  # pragma: no cover - an odd usage payload must not break a request
+        pass
+
+
+def on_api_response(assistant_message=None, usage=None, **_):
+    """post_api_request: tokens of a worker request; the first worker text after advice tells whether it was followed or refuted."""
     key = _worker_key()
+    _log_usage(key, usage)
     content = str(getattr(assistant_message, "content", "") or "").strip()
     if key not in _awaiting_reply or not content:
         return
@@ -1591,10 +1630,11 @@ def register(ctx) -> None:
     if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
         register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
                      setup_fn=cli.setup_parser,
-                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card),
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card, attention_report),
                      description="setup: choose mom/olymp from your providers. status: show setup and usage. "
                                  "doctor: check the setup with one real call per model. "
-                                 "answer: answer a card that carries Mom's brief or a pre-flight HOLD.")
+                                 "answer: answer a card that carries Mom's brief or a pre-flight HOLD. "
+                                 "report: what reached you, what did not, what it cost.")
     if _core.ERROR:  # a Hermes update removed something we use: no hooks, but `doctor` still runs; say why once
         logger.warning("calling-mom: not active, %s. Run: hermes calling-mom doctor", _core.ERROR)
         return

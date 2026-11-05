@@ -1,4 +1,4 @@
-"""User-facing commands of the plugin: ``hermes calling-mom setup | status | doctor``.
+"""User-facing commands of the plugin: ``hermes calling-mom setup | status | doctor | answer | report``.
 
 Pure logic first (testable with fake I/O), Hermes wiring last (``make_env``).
 """
@@ -12,6 +12,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+try:
+    from . import report
+except ImportError:  # loaded by path (tests, plugin doctor): no package context
+    import importlib.util
+    _report_spec = importlib.util.spec_from_file_location("calling_mom_report", Path(__file__).with_name("report.py"))
+    report = importlib.util.module_from_spec(_report_spec)
+    _report_spec.loader.exec_module(report)
 
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
@@ -429,6 +437,7 @@ class Env:
     choose: Optional[Callable] = None  # menu callback; None = numbered lists
     interactive: bool = True           # False: no terminal, never wait for an answer
     answer: Optional[Callable] = None  # the plugin's answer_card
+    report: Optional[Callable] = None  # the plugin's attention_report: (days, board) -> dict
 
 
 def _blocks(env):
@@ -507,6 +516,13 @@ def cmd_answer(env, task, board=None, text=None, accept=False, allow_once=False)
     return 0
 
 
+def cmd_report(env, days=7, board=None, as_json=False) -> int:
+    """What reached whom and what it cost, over the last ``days`` (see ``report.build``)."""
+    out = env.report(days, board)
+    env.say(json.dumps(out, indent=2) if as_json else report.render(out))
+    return 0
+
+
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
     checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps())
@@ -517,7 +533,7 @@ def cmd_doctor(env) -> int:
 
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
-def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None):  # pragma: no cover - needs a live Hermes
+def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None):  # pragma: no cover - needs a live Hermes
     def providers():
         return core.list_providers(core.load_config())
 
@@ -551,7 +567,7 @@ def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None
                routes=lambda: routes_from(core.load_config())[0],
                choose=core.menu if interactive and core.has_menu() else None, interactive=interactive,
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
-               errors=lambda: count_errors(log_path()), answer=answer)
+               errors=lambda: count_errors(log_path()), answer=answer, report=build_report)
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -572,13 +588,17 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     a.add_argument("--accept", action="store_true", help="take Mom's recommendation from the brief")
     a.add_argument("--text", help="your answer, written to the card as '[you via calling-mom] ...'")
     a.add_argument("--allow-once", action="store_true", help="let the held command run once")
+    r = sub.add_parser("report", help="what reached you, what did not, what it cost")
+    r.add_argument("--days", type=int, default=7, help="the window in days (default 7)")
+    r.add_argument("--board", help="only this board")
+    r.add_argument("--json", action="store_true", help="print the numbers as JSON")
     sub.add_parser("status", help="show the effective setup and today's usage")
     sub.add_parser("doctor", help="check the setup and make one real call to each model")
     parser.set_defaults(cm_cmd=None)
 
 
-def dispatch(args, spent, effective, log_path, core, answer=None):  # pragma: no cover - argparse glue
-    env = make_env(spent, effective, log_path, core, answer=answer)
+def dispatch(args, spent, effective, log_path, core, answer=None, build_report=None):  # pragma: no cover - argparse glue
+    env = make_env(spent, effective, log_path, core, answer=answer, build_report=build_report)
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron,
@@ -586,4 +606,6 @@ def dispatch(args, spent, effective, log_path, core, answer=None):  # pragma: no
     if cmd == "answer":
         return cmd_answer(env, args.task, board=args.board or core.kb.get_current_board(), text=args.text,
                           accept=args.accept, allow_once=args.allow_once)
+    if cmd == "report":
+        return cmd_report(env, days=args.days, board=args.board, as_json=args.json)
     return {"status": cmd_status, "doctor": cmd_doctor}[cmd](env)

@@ -131,6 +131,7 @@ Mom or Olymp (run `setup` again for that). A route needs both a provider and a m
 | `hermes calling-mom setup` | Choose Mom and Olymp from your own providers. Safe to repeat. |
 | `hermes calling-mom status` | Who is Mom, who is Olymp, Olymp calls today, any failures. |
 | `hermes calling-mom doctor` | Checks the setup and makes a real call to each model. Run it after every Hermes update. |
+| `hermes calling-mom report` | What reached whom and what it cost: per rung, `--days 7`, `--board X`, `--json`. |
 | `hermes calling-mom answer <task>` | Answers a card that carries Mom's `[for you]` brief or a pre-flight HOLD: `--accept`, `--text "..."` or `--allow-once` (`--board` if it is not the current board). |
 
 ## What you will see in a card
