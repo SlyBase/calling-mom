@@ -7,8 +7,11 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import tempfile
+import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -1561,6 +1564,375 @@ class AdvisorContextTest(unittest.TestCase):
         self.assertIn("Previous run results", user_content)
         self.assertIn("Garage repair + HTML-TTFB fixed", user_content)
         self.assertIn("Garage Web + Pangolin implemented", user_content)
+
+
+# --- WP1: no hook ever reaches Hermes's hook timeout ----------------------------------------------
+# Hermes cuts a hook off at plugins.hook_callback_timeout. A small budget keeps these tests fast; every
+# bound below is a FRACTION of it, so the tests hold on any machine speed (a stub that sleeps 45 s against
+# a 30 s budget becomes "blocked until the test releases it" against a 6 s budget).
+BUDGET = 6
+
+
+def settle(timeout=10):
+    """Wait until no background advice call is in flight (a test must not leak a thread into the next)."""
+    end = time.monotonic() + timeout
+    while plugin._inflight and time.monotonic() < end:
+        time.sleep(0.01)
+    assert not plugin._inflight, "advice thread still running"
+
+
+class BudgetMixin:
+    def set_budget(self, seconds=BUDGET):
+        self._saved_load = _hermes_config.load_config
+        _hermes_config.load_config = lambda *a, **k: {"plugins": {"hook_callback_timeout": seconds}}
+        self.addCleanup(setattr, _hermes_config, "load_config", self._saved_load)
+
+
+class GatedLlm(FakeLlm):
+    """A Mom that answers only when the test lets her go: stands in for a model that takes 45 s."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.release, self.started, self.entered = threading.Event(), threading.Event(), 0
+
+    def complete(self, messages, **kw):
+        self.entered += 1
+        self.started.set()
+        self.release.wait(30)
+        return super().complete(messages, **kw)
+
+
+def log_rows(kind=None):
+    path = Path(os.environ["CALLING_MOM_LOG"])
+    rows = [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+    return [r for r in rows if kind is None or r.get("kind") == kind]
+
+
+class SlowMomTest(BudgetMixin, AdvisorTest):
+    """Advice runs off the hot path: a Mom that is slow costs the worker nothing, the advice arrives late."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_budget()
+        self.llm = GatedLlm()
+        plugin._ctx.llm = self.llm
+        plugin._late.clear(); plugin._inflight.clear(); plugin._completion_checked.clear()
+
+    def tearDown(self):
+        self.llm.release.set()
+        settle()
+        super().tearDown()
+
+    def timed(self, fn, *a, **k):
+        started = time.monotonic()
+        out = fn(*a, **k)
+        return out, time.monotonic() - started
+
+    def later(self, tool="read_file", result="file text", **args):
+        return plugin.on_tool_result(tool_name=tool, args=args or {"path": "/a"}, result=result, status="ok")
+
+    def test_a_slow_mom_does_not_hold_the_tool_result(self):
+        out, took = self.timed(self.stuck, 3)
+        self.assertIsNone(out)
+        self.assertLess(took, 0.4 * BUDGET)
+        self.assertTrue(self.llm.started.wait(5))            # she was asked, in the background
+        self.assertEqual(advice_comments(self.tid), [])
+
+    def test_the_advice_comes_with_the_next_tool_result_and_lands_on_the_card(self):
+        self.stuck(3)
+        self.llm.release.set()
+        settle()
+        self.assertEqual(len(advice_comments(self.tid)), 1)  # the card comment is posted when the advice arrives
+        out = self.later()
+        self.assertTrue(out.startswith("file text"))
+        self.assertIn("Root cause: X", out)
+        self.assertIn("late", out.lower())
+        self.assertEqual(self.later(path="/b"), "file text" if False else None)   # delivered exactly once
+        rows = log_rows("advice_late")
+        self.assertEqual([(r["signal"], r["task"]) for r in rows], [("same_error", self.tid)])
+        self.assertIsInstance(rows[0]["ms"], int)
+
+    def test_late_advice_waits_for_a_text_result(self):
+        self.stuck(3)
+        self.llm.release.set()
+        settle()
+        self.assertIsNone(plugin.on_tool_result(tool_name="read_file", args={"path": "/a"}, result=None, status="ok"))
+        self.assertIn("Root cause: X", self.later())
+
+    def test_one_advice_call_in_flight_per_run(self):
+        self.stuck(3)
+        self.assertTrue(self.llm.started.wait(5))
+        plugin._trackers.clear()
+        out, took = self.timed(self.stuck, 3)                # a second trigger while the first is pending
+        self.assertIsNone(out)
+        self.assertLess(took, 0.4 * BUDGET)
+        self.llm.release.set()
+        settle()
+        self.assertEqual(self.llm.entered, 1)
+
+    def test_a_late_followed_verdict_counts_from_the_delivery_not_the_generation(self):
+        self.stuck(3)
+        self.llm.release.set()
+        settle()
+        plugin.on_api_response(assistant_message=types.SimpleNamespace(content="Running the tests now."))
+        self.assertEqual(log_rows("advice_feedback"), [])    # the worker has not seen the advice yet
+        self.later()
+        plugin.on_api_response(assistant_message=types.SimpleNamespace(content="Good point, thanks."))
+        self.assertEqual([r["verdict"] for r in log_rows("advice_feedback")], ["followed"])
+
+    def test_a_failing_background_call_leaves_no_trace_on_the_worker(self):
+        self.llm.boom = True
+        self.llm.release.set()
+        self.assertIsNone(self.stuck(3))
+        settle()
+        self.assertIsNone(self.later())
+
+    def test_a_slow_mom_does_not_hold_kanban_complete(self):
+        out, took = self.timed(plugin.on_pre_tool, tool_name="kanban_complete", args={"summary": "all done"})
+        self.assertIsNone(out)                               # fail-open: the card may finish
+        self.assertLess(took, 0.4 * BUDGET)
+        self.assertTrue(self.llm.started.wait(5))
+        self.llm.release.set()
+        settle()
+        self.assertEqual(len(advice_comments(self.tid)), 1)  # the verdict still reaches the card
+
+    def test_a_slow_mom_does_not_hold_the_verify_failure(self):
+        ws = tempfile.mkdtemp()
+        os.environ["HERMES_KANBAN_WORKSPACE"] = ws
+        self.addCleanup(os.environ.pop, "HERMES_KANBAN_WORKSPACE", None)
+        tid = with_conn(lambda c: kb.create_task(c, title="vf", body="verify: false", assignee="worker", created_by="user"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        plugin._verify_fails.clear(); plugin._verify_runs.clear()
+        plugin.on_pre_tool(tool_name="kanban_complete", args={})
+        out, took = self.timed(plugin.on_pre_tool, tool_name="kanban_complete", args={})   # 2nd failure asks Mom
+        self.assertEqual(out["action"], "block")
+        self.assertNotIn("[ADVISOR", out["message"])
+        self.assertLess(took, 0.4 * BUDGET)
+
+    def test_olymp_escalation_runs_in_the_background_too(self):
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
+        plugin.DEFAULTS["categories"] = {"architecture": {"max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+        plugin._arch_seen.clear()
+        gate = self.llm
+
+        class Mom(SeqLlm):
+            def complete(self, messages, **kw):
+                if kw["model"] == "m/olymp":
+                    gate.entered += 1
+                    gate.started.set()
+                    gate.release.wait(30)
+                return super().complete(messages, **kw)
+
+        plugin._ctx.llm = Mom(["ESCALATE: prod deploy", "Olymp says: keep a fallback."])
+        out, took = self.timed(plugin.on_tool_result, tool_name="terminal", args={"command": "terraform apply"},
+                               result="r", status="ok")
+        self.assertIsNone(out)
+        self.assertLess(took, 0.4 * BUDGET)
+        self.assertTrue(gate.started.wait(5))
+
+
+class PromptSectionTest(unittest.TestCase):
+    """The tip lands in the system prompt of Kanban workers only, never in a chat session."""
+
+    def registered(self):
+        seen = {}
+        plugin.register(types.SimpleNamespace(
+            register_hook=lambda *a, **k: None, register_tool=lambda **kw: None,
+            register_system_prompt_section=lambda **kw: seen.update(kw)))
+        return seen
+
+    def test_content_is_a_callable_that_is_empty_outside_kanban_workers(self):
+        os.environ.pop("HERMES_KANBAN_TASK", None)
+        seen = self.registered()
+        self.assertTrue(callable(seen["content"]))
+        self.assertEqual(seen["content"]({}), "")
+
+    def test_a_kanban_worker_gets_the_section(self):
+        os.environ["HERMES_KANBAN_TASK"] = "t_x"
+        self.addCleanup(os.environ.pop, "HERMES_KANBAN_TASK", None)
+        text = self.registered()["content"]({})
+        self.assertIn("SECOND-OPINION", text)
+        self.assertIn("verify:", text)
+
+
+class AsyncVerifyTest(BudgetMixin, unittest.TestCase):
+    """`verify:` runs on a background thread: kanban_complete never waits longer than the hook budget allows."""
+
+    def setUp(self):
+        os.environ["CALLING_MOM"] = "on"
+        os.environ["CALLING_MOM_LOG"] = str(Path(tempfile.mkdtemp()) / "v.jsonl")
+        self.ws = tempfile.mkdtemp()
+        os.environ["HERMES_KANBAN_WORKSPACE"] = self.ws
+        os.environ["HERMES_KANBAN_RUN_ID"] = "1"
+        plugin._verify_fails.clear(); plugin._verify_runs.clear(); plugin._edits.clear()
+        self.set_budget()
+        # the command ends when the test creates ./go: no sleep, no race with machine load
+        Path(self.ws, "wait.py").write_text("import os, time\nwhile not os.path.exists('go'):\n    time.sleep(0.02)\n")
+
+    def tearDown(self):
+        Path(self.ws, "go").write_text("")
+        for run in list(plugin._verify_runs.values()):
+            run.done.wait(10)
+        for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_WORKSPACE"):
+            os.environ.pop(k, None)
+
+    def card(self, body):
+        tid = with_conn(lambda c: kb.create_task(c, title="verify card", body=body, assignee="worker", created_by="user"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        return tid
+
+    def gate(self, tool="kanban_complete"):
+        started = time.monotonic()
+        out = plugin.on_pre_tool(tool_name=tool, args={})
+        self.took = time.monotonic() - started
+        return out
+
+    def states(self):
+        return [r["state"] for r in log_rows("verify")]
+
+    def release(self):
+        Path(self.ws, "go").write_text("")
+
+    def test_default_timeout_is_ten_minutes(self):
+        self.assertEqual(load_plugin().DEFAULTS["verify"]["timeout_s"], 600)
+
+    def test_a_long_command_blocks_with_running_and_a_later_call_passes(self):
+        self.card("verify: python3 wait.py")
+        out = self.gate()
+        self.assertEqual(out["action"], "block")
+        self.assertIn("verify running: `python3 wait.py`", out["message"])
+        self.assertIn("Do not edit files", out["message"])
+        self.assertIn("kanban_complete again", out["message"])
+        self.assertLess(self.took, 0.4 * BUDGET)
+        self.release()
+        self.assertIsNone(self.gate())                       # each call waits up to 0.3 x budget for the result
+        self.assertEqual(self.states(), ["started", "pass"])
+        self.assertEqual(log_rows("verify")[1]["exit"], 0)
+        self.assertIsInstance(log_rows("verify")[1]["ms"], int)
+
+    def test_a_pass_holds_while_the_workspace_is_unchanged(self):
+        self.card("verify: python3 wait.py")
+        self.release()
+        self.assertIsNone(self.gate())
+        self.assertIsNone(self.gate())
+        self.assertEqual(self.states(), ["started", "pass"])  # no second run
+
+    def test_the_review_handoff_is_gated_the_same_way(self):
+        self.card("verify: python3 wait.py")
+        self.assertIn("verify running", self.gate("kanban_request_review")["message"])
+
+    def test_an_edit_after_a_pass_forces_a_new_run(self):
+        self.card("verify: python3 wait.py")
+        self.release()
+        self.assertIsNone(self.gate())
+        self.assertIsNone(plugin.on_pre_tool(tool_name="write_file", args={"path": "x.py", "content": "1"}))
+        Path(self.ws, "go").unlink()
+        self.assertIn("verify running", self.gate()["message"])
+        self.assertEqual(self.states(), ["started", "pass", "stale", "started"])
+        self.release()
+        self.assertIsNone(self.gate())
+
+    def test_an_edit_while_the_command_runs_discards_its_result(self):
+        self.card("verify: python3 wait.py")
+        self.assertIn("verify running", self.gate()["message"])
+        plugin.on_pre_tool(tool_name="patch", args={"path": "x.py"})
+        self.assertIn("verify running", self.gate()["message"])   # the old run is dropped, a new one starts
+        self.assertEqual(self.states(), ["started", "stale", "started"])
+        self.release()
+        self.assertIsNone(self.gate())
+        self.assertEqual(self.states(), ["started", "stale", "started", "pass"])   # never a pass for the old run
+
+    def test_a_failure_is_reported_once_then_the_next_call_runs_again(self):
+        self.card("verify: python3 -c \"import sys; sys.stderr.write('boom'); sys.exit(3)\"")
+        out = self.gate()
+        self.assertIn("exit 3", out["message"])
+        self.assertIn("boom", out["message"])
+        self.assertEqual(self.states(), ["started", "fail"])
+        self.gate()
+        self.assertEqual(self.states(), ["started", "fail", "started", "fail"])
+        self.assertEqual(log_rows("verify")[1]["exit"], 3)
+
+    def test_a_command_that_runs_too_long_times_out_and_its_children_die(self):
+        Path(self.ws, "tree.py").write_text(
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "time.sleep(60)\n")
+        self.card("verify: python3 tree.py")
+        plugin.DEFAULTS["verify"]["timeout_s"] = 1
+        self.addCleanup(plugin.DEFAULTS["verify"].__setitem__, "timeout_s", 600)
+        out = self.gate()                                     # the pipe closes only when the whole tree is killed
+        self.assertIn("timed out after 1s", out["message"])
+        self.assertEqual(self.states(), ["started", "timeout"])
+
+    def test_a_command_that_cannot_start_is_a_failure_with_a_reason(self):
+        self.card("verify: python3 wait.py")
+        real = plugin.subprocess.Popen
+        plugin.subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(OSError("no exec"))
+        try:
+            out = self.gate()
+        finally:
+            plugin.subprocess.Popen = real
+        self.assertIn("could not start: no exec", out["message"])
+
+    def test_a_failing_check_passes_after_max_fix_plus_two_fails(self):
+        self.card("verify: false")
+        msgs = [self.gate() for _ in range(6)]
+        self.assertTrue(all(m and m["action"] == "block" for m in msgs[:5]))
+        self.assertIsNone(msgs[5])                            # never trap the worker
+
+    def test_a_broken_gate_never_traps_the_worker(self):
+        self.card("verify: python3 wait.py")
+        real = plugin._workspace_state
+        plugin._workspace_state = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git exploded"))
+        try:
+            self.assertIsNone(self.gate())
+        finally:
+            plugin._workspace_state = real
+
+
+class GitWorkspaceTest(AsyncVerifyTest):
+    """In a git workspace the state is HEAD plus `git status`: an edit by any means forces a new run,
+    but the artifacts the command writes itself do not invalidate its own result."""
+
+    def setUp(self):
+        super().setUp()
+        self.git("init", "-q")
+        Path(self.ws, "app.py").write_text("x = 1\n")
+        Path(self.ws, "mk.py").write_text("open('artifact.txt', 'w').write('built')\n")
+        Path(self.ws, ".gitignore").write_text("go\n")
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.ws, check=True, capture_output=True, text=True).stdout
+
+    def test_an_edit_by_any_means_forces_a_new_run(self):
+        self.card("verify: python3 wait.py")
+        self.release()
+        self.assertIsNone(self.gate())
+        Path(self.ws, "app.py").write_text("x = 2\n")        # not through write_file or patch
+        Path(self.ws, "go").unlink()
+        self.assertIn("verify running", self.gate()["message"])
+        self.assertEqual(self.states(), ["started", "pass", "stale", "started"])
+
+    def test_a_new_commit_forces_a_new_run(self):
+        self.card("verify: python3 wait.py")
+        self.release()
+        self.assertIsNone(self.gate())
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "more")
+        self.assertIsNone(self.gate())
+        self.assertEqual(self.states(), ["started", "pass", "stale", "started", "pass"])
+
+    def test_the_artifacts_of_the_command_do_not_invalidate_its_result(self):
+        self.card("verify: python3 mk.py")
+        self.assertIsNone(self.gate())
+        self.assertTrue(Path(self.ws, "artifact.txt").exists())
+        self.assertIsNone(self.gate())
+        self.assertEqual(self.states(), ["started", "pass"])
+
+    def test_a_workspace_that_is_not_a_git_repo_falls_back_to_the_edit_counter(self):
+        self.assertEqual(plugin._workspace_state(("t", "1"), tempfile.mkdtemp(), 3)[0], None)
+        self.assertEqual(plugin._workspace_state(("t", "1"), None, 3)[0], None)
 
 
 if __name__ == "__main__":
