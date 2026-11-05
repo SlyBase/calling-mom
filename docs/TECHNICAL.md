@@ -33,7 +33,7 @@ plugins:
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only). |
 | `categories.<name>` | inherit | Per category (`error`, `loop`, `validation`, `architecture`) its own `model` AND `provider`. |
-| `verify.*` | see below | `timeout_s`, `max_fix`, `trusted_creators ["user"]`, `allow`. |
+| `verify.*` | see below | `timeout_s 600`, `max_fix`, `trusted_creators ["user"]`, `allow`. The command runs in the background, see "Hook deadlines". |
 | `review.*` | `[review]` / `reviewer` | Marker and reviewer profile (`""` = off). |
 | `metrics.pushgateways` | `[]` | Pushgateway URLs, tried in order. |
 
@@ -75,6 +75,34 @@ Card text can come from mail or web content, so treat it as untrusted.
 - **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content.
 - The plugin never edits Hermes config.
 
+
+## Hook deadlines
+
+Hermes cuts a bounded hook off after `plugins.hook_callback_timeout` (default 30 s) and then skips that callback for
+60 s. `transform_tool_result` and `post_api_request` fail open (a late result is dropped); `pre_tool_call` fails
+closed (a timeout blocks the tool, so a slow check would freeze the whole worker for a minute). The plugin reads the
+value through `_core.hook_budget()` (1..600 s) and keeps every synchronous wait inside these hooks below 40 % of it:
+
+- **Advice runs in the background.** On a stuck signal, a risky command, a `SECOND-OPINION:` comment or a completion
+  check, the question runs on its own thread (one in flight per run). The hook waits at most `min(8 s, 0.25 x budget)`.
+  If the answer is ready it is appended to the tool result as before. If not, the answer is written to the card when
+  it arrives and appended to the next tool result of the same run as `[late advice]`, once (log row `advice_late`).
+  The Olymp step after an `ESCALATE` always runs in the background. Advice still pending when the run ends reaches the
+  card only. A late completion check cannot block `kanban_complete` any more; it is a card comment.
+- **`verify:` runs in the background.** The first `kanban_complete` (or `kanban_request_review`) starts the command
+  (own process group, scrubbed environment, `verify.timeout_s`) and waits up to 0.3 x budget. No result yet: the call is
+  blocked with `verify running: ... Do not edit files. Call kanban_complete again`. Every later call waits again.
+  PASS lets the card finish; FAIL keeps the `max_fix` path with the output tail. A timeout kills the whole process tree.
+- **A result counts only for the workspace it ran on.** In a git workspace the state is HEAD plus a hash of
+  `git status --porcelain` taken when the command ended (files the command writes itself do not make its result stale).
+  Without git, or before the first commit, any `write_file`/`patch` call since the start makes it stale. A stale result
+  is dropped (`verify` row with `state: stale`) and the command runs again. Limit: an edit made by a terminal command
+  during the run, in a workspace without git, is not seen.
+- **The prompt tip** (`SECOND-OPINION`, `verify:`) is added to Kanban worker sessions only (`HERMES_KANBAN_TASK`).
+- **Untyped blocks** are escalated only on cards with an assignee; a card nobody works on is a human to-do.
+
+New log rows: `verify` has `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ms` and `exit`;
+`advice_late` has `signal` and `ms`. Metrics count only finished verify rows.
 
 ## Metrics
 

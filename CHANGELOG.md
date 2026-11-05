@@ -3,6 +3,26 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.4.0] - unreleased
+
+### Fixed
+- No hook reaches Hermes' hook timeout any more (`plugins.hook_callback_timeout`, default 30 s). Before, a slow
+  Mom (40 s), Mom plus Olymp (about 80 s) or a `verify:` command (120 s) inside `pre_tool_call` could time out; a
+  timed-out `pre_tool_call` blocked every tool call of the worker for a minute. All waits in the bounded hooks now stay
+  under 40 % of the configured timeout (`hook_budget()` in `_core.py`).
+- A chat session no longer gets the calling-mom tip in its system prompt; only Kanban workers do.
+- An untyped block on a card without assignee (a human to-do) is no longer escalated to Mom's model.
+- The regex timing test measures CPU time, not wall time, so `check.py` passes on a busy machine.
+
+### Changed
+- **Advice is asynchronous.** The question to Mom (and the Olymp step) runs on a background thread, one per run. The
+  tool result waits at most `min(8 s, 0.25 x budget)`; a later answer goes to the card and is appended to the next tool
+  result as `[late advice]` (new log row `advice_late`). A late completion check is a card comment, it cannot block.
+- **`verify:` is asynchronous.** The command runs on a background thread (own process group, killed on timeout).
+  `kanban_complete` is blocked with `verify running` until the result is in; a result is valid only for the workspace
+  state it ran on (git HEAD plus `git status` hash, otherwise no file edit since the start). Default `verify.timeout_s`
+  is now 600 (was 120). The `verify` log row has a `state` (`started`, `pass`, `fail`, `timeout`, `stale`) and `ms`.
+
 ## [1.3.2] - 2026-11-03
 
 Review fixes for the Hermes plugin catalog (NousResearch/hermes-agent#147276).
