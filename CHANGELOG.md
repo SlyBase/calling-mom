@@ -35,6 +35,13 @@ versioning: [SemVer](https://semver.org/).
 - New log rows `question` (`outcome`, `by`, `reason`, `ms`, tokens, `usd`) and `human_answer` (`via`, `accepted`,
   `allow_once`, `latency_s`; `via=card` when a card with a brief is claimed again after someone else unblocked it).
 
+- **Desktop half** (Hermes Desktop; badges need 0.22.6 or later). `desktop/plugin.js` (plugin SDK only, no JSX, no
+  build) adds card badges (`mom`, `olymp`, `held`, `for you`, `verified`, `verify failed`, at most two per card), the
+  sidebar page "Calling mom" (the ladder with 7-day counts, **Needs you** with *Accept recommendation*, *Answer...*,
+  *Allow once*, *Keep blocked*, recent activity) and a status-bar chip. Backend `dashboard/plugin_api.py` (gateway
+  process): `GET /summary?days=7`, `GET /cards?board=`, `GET /needs-you`, `POST /answer` (`answer_card(by="desktop")`).
+  The 100 % coverage gate counts the backend (`test_dashboard.py`).
+
 ### Fixed
 - No hook reaches Hermes' hook timeout any more (`plugins.hook_callback_timeout`, default 30 s). Before, a slow
   Mom (40 s), Mom plus Olymp (about 80 s) or a `verify:` command (120 s) inside `pre_tool_call` could time out; a

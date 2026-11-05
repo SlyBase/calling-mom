@@ -37,7 +37,7 @@ def private_imports(path):
 class OneDoorTest(unittest.TestCase):
     def test_only_core_imports_hermes_internals(self):
         files = [p for p in HERE.glob("*.py") if not p.name.startswith("test_") and p.name not in {"_core.py", "linecov.py", "check.py"}]
-        files += list((HERE / "scripts").glob("*.py"))
+        files += list((HERE / "scripts").glob("*.py")) + list((HERE / "dashboard").glob("*.py"))
         offenders = [hit for p in files for hit in private_imports(p) if p.name != "smoke.py"]
         self.assertEqual(offenders, [], "route these through _core.py")
 
