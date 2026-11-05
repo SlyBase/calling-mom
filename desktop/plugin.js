@@ -1,7 +1,7 @@
 // Calling mom, the Desktop half: card badges, the "Calling mom" page, a status-bar chip.
 // Plain ESM, no JSX, no build step. It talks to dashboard/plugin_api.py only (ctx.rest), never to app internals.
 import * as sdk from '@hermes/plugin-sdk'
-import { createElement as h, useState, useSyncExternalStore } from 'react'
+import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
@@ -263,6 +263,9 @@ function Section({ title, count, children }) {
 function Page() {
   const s = useStore()
   const [showKept, setShowKept] = useState(false)
+
+  useEffect(() => void refresh(), []) // fresh numbers the moment the page opens, not up to 15 s later
+
   const open = waiting(s)
   const kept = s.needs.filter(item => s.kept.includes(keepKey(item)))
 

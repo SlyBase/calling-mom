@@ -132,9 +132,10 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
     def test_today_starts_at_utc_midnight(self):
         midnight = int(time.time()) // 86400 * 86400
         self.put("advisor", ts=midnight - 5, task="t_a", category="error")
+        self.put("advisor", ts=midnight + 1, task="t_a", category="error")
         self.put("advisor", ts=time.time(), task="t_a", category="error")
         out = self.get("/summary")
-        self.assertEqual((out["mom"]["calls"], out["today"]["mom_calls"]), (2, 1))
+        self.assertEqual((out["mom"]["calls"], out["today"]["mom_calls"]), (3, 2))
 
     def test_days_must_be_between_1_and_90(self):
         for days in (0, 91, "x"):
@@ -210,6 +211,19 @@ class NeedsYouTest(DashboardFixture, unittest.TestCase):
         (item,) = self.get("/needs-you")
         self.assertEqual((bool(item["brief"]), len(item["holds"])), (True, 1))
 
+    def test_a_card_waits_since_the_oldest_of_its_brief_and_its_holds(self):
+        tid = self.brief_card()
+        plugin._record_hold(tid, plugin.cmd_hash(CMD), "r", "a")
+        state = plugin._load_holds()
+        state["holds"][tid][plugin.cmd_hash(CMD)]["ts"] = int(time.time()) - 3600
+        plugin._write_state(state)
+        self.assertGreaterEqual(self.get("/needs-you")[0]["age_s"], 3600)
+
+    def test_a_hold_on_a_card_that_is_not_blocked_waits_for_nobody(self):
+        tid = self.card()
+        plugin._record_hold(tid, plugin.cmd_hash(CMD), "r", "a")        # the worker was held but carries on
+        self.assertEqual(self.get("/needs-you"), [])
+
     def test_a_brief_without_a_recommendation_cannot_be_accepted(self):
         tid = self.card()
         with_conn(lambda c: kb.block_task(c, tid, reason="x", kind="needs_input"))
@@ -226,7 +240,8 @@ class NeedsYouTest(DashboardFixture, unittest.TestCase):
     def test_a_brief_that_was_answered_does_not_come_back_when_the_card_blocks_again(self):
         tid = self.brief_card()
         self.assertTrue(plugin.answer_card("t-board", tid, "Use B.", by="desktop")["ok"])
-        with_conn(lambda c: kb.block_task(c, tid, reason="something else", kind="needs_input"))
+        with_conn(lambda c: c.execute("UPDATE tasks SET status = 'blocked', block_kind = 'needs_input' WHERE id = ?", (tid,)).connection.commit())
+        self.assertEqual(self.status(tid), "blocked")        # Hermes would park a second block in triage; the fixture forces it
         self.assertEqual(self.get("/needs-you"), [])
 
     def test_a_hold_a_person_already_allowed_is_not_waiting(self):
