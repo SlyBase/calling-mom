@@ -1437,6 +1437,25 @@ class BlockedCardTest(unittest.TestCase):
         self.assertEqual(t.model_override, STRONG)
         self.assertIn(t.status, {"blocked", "triage"})   # the strong model had its attempt
 
+    def test_an_untyped_block_on_a_card_without_assignee_is_a_human_to_do_and_stays(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="buy milk"))
+        with_conn(lambda c: kb.block_task(c, tid, reason="waiting for the shop"))   # untyped
+        plugin.on_blocked(task_id=tid, board=None, reason="waiting for the shop")
+        t = self_task(tid)
+        self.assertEqual((t.model_override, t.status), (None, "blocked"))
+
+    def test_an_untyped_block_on_an_assigned_card_still_escalates(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="crashy", assignee="worker"))
+        with_conn(lambda c: kb.block_task(c, tid, reason="crashed"))
+        plugin.on_blocked(task_id=tid, board=None, reason="crashed")
+        t = self_task(tid)
+        self.assertEqual((t.model_override, t.status), (STRONG, "ready"))
+
+    def test_a_typed_capability_block_without_assignee_still_escalates(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="orphan hard"))
+        self.give_up(tid)
+        self.assertEqual(self_task(tid).model_override, STRONG)
+
     def test_the_plugin_never_writes_the_board_tables_directly(self):
         self.assertNotIn("UPDATE tasks", Path(plugin.__file__).read_text())
 

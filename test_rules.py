@@ -111,9 +111,11 @@ class RuleMatrixTest(unittest.TestCase):
         for word in words:
             for label, text in (("one line", word * (12000 // len(word))), ("many lines", (word + "x\n") * (12000 // len(word)))):
                 with self.subTest(word=word, shape=label):
-                    started = time.perf_counter()
+                    # CPU time of this thread, not wall clock: a busy machine (a parallel build, `hermes plugins
+                    # validate`) stretches wall time but not CPU time. The cubic bug took seconds of CPU.
+                    started = time.thread_time()
                     rules.classify(text)
-                    self.assertLess(time.perf_counter() - started, 0.05)
+                    self.assertLess(time.thread_time() - started, 0.5)
 
     def test_a_gap_is_bounded_not_unlimited(self):
         near, far = "git push origin " + "x" * 100 + " --force", "git push origin " + "x" * 400 + " --force"

@@ -240,8 +240,8 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
             task = kb.get_task(conn, task_id)
             if task is None or task.status != "blocked" or _is_local_only(task):
                 return
-            if task.block_kind not in ESCALATABLE_KINDS:
-                return
+            if task.block_kind not in ESCALATABLE_KINDS or (task.block_kind is None and not task.assignee):
+                return  # an untyped block on a card nobody works on is a human to-do, not a give-up
             if task.model_override == settings()["model"]:
                 return  # the strong model already had its attempt
             why = f"blocked ({reason.strip()[:200]})" if reason and reason.strip() else "blocked"
