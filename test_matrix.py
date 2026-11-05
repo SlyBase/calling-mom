@@ -408,12 +408,12 @@ class EdgeContractTest(unittest.TestCase):
     def test_verify_command_that_cannot_start_blocks_with_a_reason(self):
         tid = make(body="verify: python3 -c 0", created_by="user", state="running")
         os.environ["HERMES_KANBAN_TASK"] = tid
-        orig = plugin.subprocess.run
-        plugin.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError("no exec"))
+        orig = plugin.subprocess.Popen
+        plugin.subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(OSError("no exec"))
         try:
             out = plugin.on_pre_tool(tool_name="kanban_complete", args={})
         finally:
-            plugin.subprocess.run = orig
+            plugin.subprocess.Popen = orig
             os.environ.pop("HERMES_KANBAN_TASK", None)
         self.assertEqual(out["action"], "block")
         self.assertIn("could not start", out["message"])

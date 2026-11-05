@@ -481,8 +481,8 @@ class FakeLlm:
         return self._res
 
 
-class AdvisorTest(unittest.TestCase):
-    """Step 3: the strong model is asked ONE short question at the point where the worker is stuck."""
+class AdvisorFixture:
+    """A kanban worker with the advisor on, a fake LLM and a recorded `kanban_comment` tool."""
 
     def setUp(self):
         from types import SimpleNamespace as NS
@@ -522,6 +522,10 @@ class AdvisorTest(unittest.TestCase):
             out = plugin.on_tool_result(tool_name=tool, args=args or {"command": f"pytest {i}"}, result="r",
                                         status="error", error_type="tool_error", error_message=text)
         return out
+
+
+class AdvisorTest(AdvisorFixture, unittest.TestCase):
+    """Step 3: the strong model is asked ONE short question at the point where the worker is stuck."""
 
     def test_stuck_worker_gets_short_advice_appended_to_the_result(self):
         out = self.stuck(3)
@@ -905,7 +909,7 @@ class CommentRouteTest(AdvisorTest):
         from types import SimpleNamespace as NS
         seen = {}
         plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: None,
-                           register_system_prompt_section=lambda **kw: seen.update({"text": kw["content"], "kw": kw}),
+                           register_system_prompt_section=lambda **kw: seen.update({"text": kw["content"]({}), "kw": kw}),
                            llm=self.llm))
         self.assertIn("SECOND-OPINION", seen["text"])
 
@@ -1608,7 +1612,7 @@ def log_rows(kind=None):
     return [r for r in rows if kind is None or r.get("kind") == kind]
 
 
-class SlowMomTest(BudgetMixin, AdvisorTest):
+class SlowMomTest(BudgetMixin, AdvisorFixture, unittest.TestCase):
     """Advice runs off the hot path: a Mom that is slow costs the worker nothing, the advice arrives late."""
 
     def setUp(self):
@@ -1931,8 +1935,8 @@ class GitWorkspaceTest(AsyncVerifyTest):
         self.assertEqual(self.states(), ["started", "pass"])
 
     def test_a_workspace_that_is_not_a_git_repo_falls_back_to_the_edit_counter(self):
-        self.assertEqual(plugin._workspace_state(("t", "1"), tempfile.mkdtemp(), 3)[0], None)
-        self.assertEqual(plugin._workspace_state(("t", "1"), None, 3)[0], None)
+        self.assertEqual(plugin._workspace_state(tempfile.mkdtemp(), 3)[0], None)
+        self.assertEqual(plugin._workspace_state(None, 3)[0], None)
 
 
 if __name__ == "__main__":
