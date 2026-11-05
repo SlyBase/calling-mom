@@ -172,6 +172,22 @@ New log rows: `question` has `outcome` (`answered`, `human`, `skipped`, `error`)
 `ms` and, after a model call, `tokens_in`, `tokens_out`, `usd` (Mom's; Olymp is counted in calls). `human_answer` has
 `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
 
+## Desktop backend
+
+`dashboard/plugin_api.py` (manifest `dashboard/manifest.json`, `tab.hidden`: no web-dashboard tab) is mounted by Hermes
+at `/api/plugins/calling-mom/` in the gateway process. It loads the plugin module by path and reuses its functions;
+it imports nothing from Hermes itself. Boards are read through the plugin's `_connect` (read-only use).
+
+| Route | Answer |
+|---|---|
+| `GET /summary?days=7` (1..90) | `{days, worker{tool_calls, signals}, mom{calls, answered, checked, holds, verified, verify_failed}, olymp{calls, today, cap}, you{briefs, answered, waiting}, today{mom_calls}, recent[{ts, kind, task, board, detail, by}]}`. Mom's `calls` are advice, pre-flight checks that reached the model and every question she answered or briefed; Olymp's include the questions he answered. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
+| `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `verify failed`, `olymp`, `mom`, `verified`. `held` and `for you` need an opted-in board and a card that still waits; the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
+| `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. |
+| `POST /answer` | `{board, task_id, text?, accept?, allow_once?}` -> `answer_card(..., by="desktop")`. 404 for a board that does not exist or did not opt in, or no such card; 409 for a card that is not blocked or carries no brief or hold; 400 for bad arguments; 422 for a malformed body. |
+
+The Desktop half polls the three GET routes every 15 s (not while the window is hidden) and keeps "Keep blocked" in
+`ctx.storage`: it hides an item on this machine only, the card stays blocked and the backend is not told.
+
 ## Metrics
 
 `metrics.py` renders Prometheus text from the plugin log, the spend ledger and read-only board DBs. The sweep PUTs it to `/metrics/job/calling_mom/instance/<instance>` on the first reachable Pushgateway. Families: `calling_mom_events_total`, `_advisor_calls_total`, `_advisor_errors_total` (dead key, no login), `_olymp_calls_total`, `_advisor_tokens_total`, `_advisor_cost_usd_total`, `_advice_feedback_total{verdict}`, `_stuck_signals_total`, `_verify_total`, `_verify_ignored_total`, `_review_redirects_total`, `_escalations_total{reason}`, `_gave_up_age_seconds{board}`, `_spend_today_{usd,tokens}`, `_spend_cap_{usd,tokens}`, `_cards{board,state}`, `_last_push_timestamp_seconds`.
@@ -216,7 +232,7 @@ Needs a Hermes checkout/venv (the tests use the real `kanban_db`):
 
 ```bash
 python check.py        # tests + 100 % line coverage + optional drift check
-python -m unittest test_signals test_calling_mom test_metrics test_matrix test_cli test_rules test_core
+python -m unittest test_signals test_calling_mom test_metrics test_matrix test_cli test_rules test_core test_dashboard
 ```
 
 Every import of Hermes internals (`hermes_cli`, `agent`, ...) lives in `_core.py`; `test_core.py` fails if another file adds one. Hermes has no public Kanban API for plugins yet, so this keeps a Hermes update to one place to fix.

@@ -165,6 +165,37 @@ When a worker asks something Mom can settle, the card shows:
 
 and the worker continues. When she cannot, you see the `[for you]` brief above and the card waits.
 
+## Desktop
+
+Hermes Desktop shows the ladder instead of making you read card comments:
+
+- **Badges on Kanban cards** (at most two each): `mom`, `olymp`, `held`, `for you`, `verified`, `verify failed`.
+  Needs Hermes Desktop 0.22.6 or later; an older app loads the page without badges.
+- **The "Calling mom" page** (sidebar): the ladder worker, Mom, Olymp, you with the last 7 days, a **Needs you** list
+  and recent activity. Each brief has **Accept recommendation** and **Answer...**; each held command has
+  **Allow once** and **Keep blocked**. One click and the card continues.
+- **A status-bar chip**: Mom's calls today and what waits for you. A click opens the page.
+
+Two halves, one package. The Python half (hooks, and the backend routes in `dashboard/`) runs where the gateway runs;
+the Desktop half (`desktop/plugin.js`) runs in the app.
+
+```bash
+hermes plugins install SlyBase/calling-mom
+hermes plugins enable calling-mom      # the Python half, including the backend routes
+```
+
+Then switch the Desktop half on in **Capabilities -> Plugins**. Desktop copies it from the installed package and
+ships it off until you say so.
+
+**The gateway is on another machine?** Desktop cannot read that machine's plugin folder. Install the Python half there
+as above, then in Desktop open **Install from Git**, enter `SlyBase/calling-mom` and tick the **Desktop** target (or
+open `hermes://plugin/install?repo=SlyBase/calling-mom&enable=1` and pick the Desktop component). Until then the
+Plugins page shows the Desktop half as "unavailable (remote backend)". If the chip reads `mom offline`, the app
+cannot reach the backend routes: check that the plugin is enabled, then run `hermes gateway restart` once.
+
+Nothing new leaves your machine: the page reads the plugin log and your boards through your own gateway. The only
+write is your click on a button, see [SECURITY.md](SECURITY.md).
+
 ## Your money and your data
 
 - **Nothing leaves your machine until you say so.** Helpers are off until you enable them and name a board (or put `[advisor]` on a card).
