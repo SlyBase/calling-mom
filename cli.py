@@ -1,4 +1,4 @@
-"""User-facing commands of the plugin: ``hermes calling-mom setup | status | doctor | answer | report``.
+"""User-facing commands of the plugin: ``hermes calling-mom setup | status | doctor | answer | report | precedents``.
 
 Pure logic first (testable with fake I/O), Hermes wiring last (``make_env``).
 """
@@ -20,6 +20,14 @@ except ImportError:  # loaded by path (tests, plugin doctor): no package context
     _report_spec = importlib.util.spec_from_file_location("calling_mom_report", Path(__file__).with_name("report.py"))
     report = importlib.util.module_from_spec(_report_spec)
     _report_spec.loader.exec_module(report)
+
+try:
+    from . import precedents
+except ImportError:  # loaded by path (tests, plugin doctor): no package context
+    import importlib.util
+    _precedents_spec = importlib.util.spec_from_file_location("calling_mom_precedents", Path(__file__).with_name("precedents.py"))
+    precedents = importlib.util.module_from_spec(_precedents_spec)
+    _precedents_spec.loader.exec_module(precedents)
 
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
@@ -438,6 +446,7 @@ class Env:
     interactive: bool = True           # False: no terminal, never wait for an answer
     answer: Optional[Callable] = None  # the plugin's answer_card
     report: Optional[Callable] = None  # the plugin's attention_report: (days, board) -> dict
+    precedents_path: Optional[Callable] = None  # () -> Path of logs/calling-mom-precedents.jsonl
 
 
 def _blocks(env):
@@ -523,6 +532,25 @@ def cmd_report(env, days=7, board=None, as_json=False) -> int:
     return 0
 
 
+def cmd_precedents(env, action="list", pid=None) -> int:
+    """The answers Mom may reuse (see ``precedents.py``): list them, forget one, or clear them all."""
+    path = env.precedents_path()
+    if action == "clear":
+        env.say(f"Cleared {precedents.clear(path)} precedent(s).")
+    elif action == "forget":
+        if not precedents.forget(path, pid):
+            env.say(f"No precedent {pid or '(no id given)'}. List them with: hermes calling-mom precedents")
+            return 1
+        env.say(f"Forgot {pid}.")
+    else:
+        rows = precedents.read(path)
+        for e in rows:
+            env.say(f"{e['id']}  {e['board']}  {e['task']}\n  Q: {e['question']}\n  A: {e['answer']}")
+        if not rows:
+            env.say("No precedents yet. They appear when you answer one of Mom's briefs.")
+    return 0
+
+
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
     checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps())
@@ -567,7 +595,8 @@ def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None
                routes=lambda: routes_from(core.load_config())[0],
                choose=core.menu if interactive and core.has_menu() else None, interactive=interactive,
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
-               errors=lambda: count_errors(log_path()), answer=answer, report=build_report)
+               errors=lambda: count_errors(log_path()), answer=answer, report=build_report,
+               precedents_path=lambda: precedents.path_for(log_path()))
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -592,6 +621,9 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     r.add_argument("--days", type=int, default=7, help="the window in days (default 7)")
     r.add_argument("--board", help="only this board")
     r.add_argument("--json", action="store_true", help="print the numbers as JSON")
+    p = sub.add_parser("precedents", help="the answers of yours that Mom may reuse: list, forget one, clear all")
+    p.add_argument("action", nargs="?", choices=["list", "forget", "clear"], default="list")
+    p.add_argument("id", nargs="?", help="the precedent id (for forget)")
     sub.add_parser("status", help="show the effective setup and today's usage")
     sub.add_parser("doctor", help="check the setup and make one real call to each model")
     parser.set_defaults(cm_cmd=None)
@@ -608,4 +640,6 @@ def dispatch(args, spent, effective, log_path, core, answer=None, build_report=N
                           accept=args.accept, allow_once=args.allow_once)
     if cmd == "report":
         return cmd_report(env, days=args.days, board=args.board, as_json=args.json)
+    if cmd == "precedents":
+        return cmd_precedents(env, args.action, args.id)
     return {"status": cmd_status, "doctor": cmd_doctor}[cmd](env)
