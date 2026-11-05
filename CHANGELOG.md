@@ -17,6 +17,24 @@ versioning: [SemVer](https://semver.org/).
   (`preflight.max_per_card`, default 4) lets the command run and the 1.3 post-hoc review runs as today.
   Config: `calling_mom.preflight: {enabled: true, timeout_s: 12, max_per_card: 4}`.
 
+- **Mom answers first.** A question that a worker raises itself (`kanban_block`, kind `needs_input`) on a board in
+  `calling_mom.answer.boards` goes to Mom before it reaches a person. She replies `ANSWER: <text>` (the card gets
+  `[mom answered]` and continues), `ASK_HUMAN:` with a four-line brief (`Question:`, `Options:`, `Recommendation:`,
+  `If nobody answers:`; the card gets `[for you]` and stays blocked) or `ESCALATE: <reason>` (Olymp, 1 per card and 6
+  per day, answers or writes the brief). The fast path decides without a model: `[local-only]` and `[human]` cards,
+  blocks that Hermes itself re-kinded to `needs_input`, the per-card cap (`answer.max_per_card`, default 2) and the
+  advisor's daily cap are skipped; a question or card that matches the critical risk list, the new
+  `rules.HUMAN_TOPICS` (credentials and secrets, payments and money, legal, personal data, publishing in the owner's
+  name) or an active pre-flight HOLD gets a brief, never an answer. An error or timeout leaves the card unchanged.
+  **Off by default**: `hermes calling-mom setup` asks "Let Mom answer worker questions before they reach you?"
+  (`--answer` / `--no-answer`). New setting `human_marker` (`[human]`).
+- `answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False)` and
+  `hermes calling-mom answer <task> [--board B] [--accept | --text "..." | --allow-once]`: a person answers a brief
+  (`[you via calling-mom] ...`; `--accept` takes Mom's recommendation) or releases a pre-flight HOLD once
+  (`--allow-once`), and the card continues. `status` shows whether answers are on.
+- New log rows `question` (`outcome`, `by`, `reason`, `ms`, tokens, `usd`) and `human_answer` (`via`, `accepted`,
+  `allow_once`, `latency_s`; `via=card` when a card with a brief is claimed again after someone else unblocked it).
+
 ### Fixed
 - No hook reaches Hermes' hook timeout any more (`plugins.hook_callback_timeout`, default 30 s). Before, a slow
   Mom (40 s), Mom plus Olymp (about 80 s) or a `verify:` command (120 s) inside `pre_tool_call` could time out; a

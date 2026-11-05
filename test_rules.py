@@ -132,5 +132,45 @@ class RuleMatrixTest(unittest.TestCase):
                 self.assertFalse(rules.is_critical_file(path), path)
 
 
+HUMAN = [  # one row per topic the owner decides: credentials, money, legal, personal data, publishing in the owner's name
+    ("credentials", "What is the password of the staging database?"),
+    ("credentials", "Please send me the API key for the mail service"),
+    ("credentials", "I need the private key to sign the release"),
+    ("money", "Should I buy the paid plan? It costs $20 a month"),
+    ("money", "Which invoice do I pay first?"),
+    ("legal", "The contract says the license is exclusive, is that fine?"),
+    ("legal", "Do we need an NDA with the vendor?"),
+    ("personal_data", "The export contains the home address of each customer"),
+    ("personal_data", "Can I keep the passport scans in the repository?"),
+    ("publishing", "Should I publish the post on LinkedIn?"),
+    ("publishing", "May I send an email to the customers in your name?"),
+]
+NOT_HUMAN = [
+    "Which config file should I change, A or B?", "Should the helper live in utils.py or in core.py?",
+    "Use tabs or spaces in the Makefile?", "The tests need a fixture: reuse the old one or write a new one?",
+]
+
+
+class HumanTopicsTest(unittest.TestCase):
+    def test_topics(self):
+        for topic, text in HUMAN:
+            with self.subTest(text=text):
+                self.assertEqual(rules.human_topic(text), topic)
+
+    def test_everyday_questions_are_not_human_topics(self):
+        for text in NOT_HUMAN:
+            with self.subTest(text=text):
+                self.assertIsNone(rules.human_topic(text))
+
+    def test_empty_text_is_no_topic(self):
+        self.assertIsNone(rules.human_topic(None))
+        self.assertIsNone(rules.human_topic(""))
+
+    def test_a_long_line_stays_fast(self):
+        started = time.thread_time()
+        rules.human_topic("x " * 6000)
+        self.assertLess(time.thread_time() - started, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

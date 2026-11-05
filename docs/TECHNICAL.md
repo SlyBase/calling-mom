@@ -33,6 +33,8 @@ plugins:
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only). |
 | `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
+| `answer.*` | disabled, `boards []`, `max_per_card 2` | Mom answers a worker's `needs_input` question before it reaches you (see "Mom answers first"). `setup` asks. Model calls use `advisor.timeout_s`, `advisor.max_output_tokens`, `advisor.context_chars` and the daily caps of the advisor. |
+| `human_marker` | `[human]` | A card with this marker is for a person: Mom never answers its questions (no brief either). |
 | `categories.<name>` | inherit | Per category (`error`, `loop`, `validation`, `architecture`) its own `model` AND `provider`. |
 | `verify.*` | see below | `timeout_s 600`, `max_fix`, `trusted_creators ["user"]`, `allow`. The command runs in the background, see "Hook deadlines". |
 | `review.*` | `[review]` / `reviewer` | Marker and reviewer profile (`""` = off). |
@@ -74,6 +76,7 @@ Card text can come from mail or web content, so treat it as untrusted.
 - **`verify:`** runs only for cards created by `verify.trusted_creators`, never through a shell (`shlex`), only commands whose first word is in `verify.allow`, with a reduced environment. `python3 -c` is still arbitrary code: the creator check is the real control. Ignored lines are logged as `verify_ignored`.
 - **Advisor** is opt-in per board or card. Context is redacted with Hermes' `redact_for_egress`. Board tool results (`kanban_*`) are filtered out of the context. Daily USD and token caps apply.
 - **Pre-flight** is active only where the advisor is (board opt-in or card marker) and never on `[local-only]` cards. The card and the command are redacted with `redact_for_egress` before the question leaves. A HOLD is a persistent block that only a human release lifts; a model never releases its own hold. The log stores only the command hash, not the command.
+- **Answers** (`answer.enabled`) are a second, separate opt-in: Mom answers a worker's question and unblocks the card. The fast path (no model call) skips `[local-only]` and `[human]` cards and sends critical, `rules.HUMAN_TOPICS` and held cards to a brief-only prompt. The question prompt is redacted with `redact_for_egress` plus the URL-credential scrub. Mom cannot release a hold.
 - **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content.
 - The plugin never edits Hermes config.
 
@@ -111,6 +114,63 @@ value through `_core.hook_budget()` (1..600 s) and keeps every synchronous wait 
 New log rows: `verify` has `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ms` and `exit`;
 `advice_late` has `signal` and `ms`; `preflight` has `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`),
 `reason` (`timeout`, `down`, `parse`, `cap`, `allowance`, `local_only`) and `cmd_hash`. Metrics count only finished verify rows.
+
+## Mom answers first
+
+`on_question` listens to `kanban_task_blocked` (not bounded by Hermes). It acts only when the worker itself blocked its
+own card (`HERMES_KANBAN_TASK` equals the task id), the card is `blocked` with kind `needs_input` and the board is in
+`answer.boards`. Order of the checks, each logged as `question outcome=skipped reason=...` unless silent:
+
+| Check | Reason | Note |
+|---|---|---|
+| kind is not `needs_input`, status is not `blocked` (block loop: Hermes parks the card in `triage`), board not listed, switch off | (silent) | Not a question for Mom. |
+| the latest `blocked` event has `rekind_reason` (a `dependency` block with no open parent) | `rekind` | Hermes made it `needs_input`; nobody asked. |
+| the reason starts with `Goal-mode` (exhausted goal budget or judge verdict) | `goal` | Today Hermes blocks these untyped, so the kind check already skips them. |
+| `[local-only]` | `local_only` | Nothing leaves the machine. |
+| `[human]` (`human_marker`) | `human_marker` | The card is for a person. |
+| comments `[mom answered]`, `[olymp answered]`, `[for you]` >= `answer.max_per_card` | `cap` | |
+| the advisor's daily USD or token cap is used up | `cap_daily` | |
+| no plugin LLM context | `no_llm` | |
+
+Then the **risk** check. A held command (`holds_for`), a critical command in the question or card (`rules.classify`,
+first 4000 characters) or an owner-only topic (`rules.HUMAN_TOPICS`, `rules.human_topic`) turn the question into
+**brief-only**: the prompt says "Do NOT answer", and a reply other than `ASK_HUMAN` is an error row (`reason=parse`),
+never an answer. Reason of the `human` row: `hold`, `critical` or `human_topic`.
+
+Mom replies with exactly `ANSWER: <text>` (kept to 1500 characters), `ASK_HUMAN:` plus `Question:`, `Options:`,
+`Recommendation:`, `If nobody answers:` (re-shaped to four lines of at most 400 characters; a missing line is an
+error), or `ESCALATE: <reason>`. `ESCALATE` is offered only when Olymp is configured and has room (1 per card, 6 per
+day; his comments `[olymp answered]` and the advisor's `, olymp)` comments count). Olymp answers `ANSWER` or
+`ASK_HUMAN`. When Mom escalates and Olymp has no room, the card gets a brief written from the question
+(`reason=olymp_cap` or `no_olymp`).
+
+Effects: `[mom answered] <text>` (or `[olymp answered]`) is posted through the public `kanban_comment` tool, then the
+card is unblocked with `kb.unblock_task` (the path of the capability escalation); if the comment fails the card is not
+unblocked (`reason=comment`). `[for you] <brief>` leaves the card blocked. Model error, timeout (`advisor.timeout_s`,
+enforced on a thread), cooldown or an unparseable reply: nothing changes, one `error` row (`down`, `timeout`,
+`cooldown`, `parse`, `comment`, `unblock`), no retry.
+
+Hermes limit: `block_recurrences` survives an unblock and the limit is 2, so the second `needs_input` block of the
+same card goes to `triage` and reaches a person directly. `answer.max_per_card` matters only if that changes.
+
+### `answer_card`
+
+`answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False) -> dict` is the entry point of the CLI
+(`by="cli"`) and the Desktop page (`by="desktop"`). It returns `{"ok": True, "task_id", "text", "unblocked"}` or
+`{"ok": False, "status", "error"}`, with `status` 400 (bad arguments: nothing to do, text and `accept` together, text
+empty or over 2000 characters, unknown `by`, `accept` without a recommendation), 404 (board not opted in, no such
+card) or 409 (not blocked, no brief and no hold, `allow_once` without a hold). Nothing changes on an error. On success:
+comment `[you via calling-mom] <text>` (`accept` copies the `Recommendation:` line of the newest `[for you]` brief;
+`allow_once` alone writes "Allowed once..."), an allowance for every held command of the card through `allow_once()`
+of the pre-flight, `kb.unblock_task`, and a `human_answer` row. "Opted in" means the board is in `answer.boards` or
+`advisor.boards`, so a pre-flight hold can be released on a board where answers are off.
+
+A card that carries a `[for you]` brief and is claimed again without an `answer_card` call (somebody unblocked it in
+the dashboard) gets one `human_answer via=card` row per brief.
+
+New log rows: `question` has `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`,
+`ms` and, after a model call, `tokens_in`, `tokens_out`, `usd` (Mom's; Olymp is counted in calls). `human_answer` has
+`via` (`cli`, `desktop`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
 
 ## Metrics
 
