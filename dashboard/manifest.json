@@ -1,0 +1,7 @@
+{
+  "name": "calling-mom",
+  "label": "Calling mom",
+  "description": "Backend of the Calling mom Desktop half: the ladder counts, the cards that wait for you, one-tap sign-off.",
+  "api": "plugin_api.py",
+  "tab": {"hidden": true}
+}

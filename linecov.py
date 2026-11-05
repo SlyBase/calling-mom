@@ -16,7 +16,8 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent  # measure the copy this file lives in
 
-targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "rules.py", PLUGIN / "__init__.py"}
+targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "rules.py", PLUGIN / "__init__.py",
+           PLUGIN / "dashboard" / "plugin_api.py"}
 hit = {p: set() for p in targets}
 
 
@@ -40,17 +41,14 @@ def executable_lines(path):
     return lines
 
 
-NAMES = {p.name: p for p in targets}
-
-
 _target_of = {}  # filename -> our target file, or None
 
 
 def _target(fn):
     if fn not in _target_of:
-        t = NAMES.get(os.path.basename(fn))
-        # same basename in another package (hermes_cli/__init__.py) must not count as ours
-        _target_of[fn] = t if t is not None and os.path.dirname(os.path.realpath(fn)) == str(PLUGIN) else None
+        # the full path decides: the same basename in another package (hermes_cli/__init__.py) is not ours
+        real = Path(os.path.realpath(fn))
+        _target_of[fn] = real if real in targets else None
     return _target_of[fn]
 
 
@@ -87,7 +85,7 @@ def measure(mods):
         total += len(ex)
         covered += len(ex & hit[p])
         missing += len(miss)
-        print("\n%s: %d/%d lines (%.1f%%)" % (p.name, len(ex & hit[p]), len(ex), 100.0 * len(ex & hit[p]) / max(1, len(ex))))
+        print("\n%s: %d/%d lines (%.1f%%)" % (p.relative_to(PLUGIN), len(ex & hit[p]), len(ex), 100.0 * len(ex & hit[p]) / max(1, len(ex))))
         if miss:
             src = p.read_text().splitlines()
             for ln in miss:
@@ -102,4 +100,4 @@ def main(mods):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules", "test_core"]))
+    sys.exit(main(sys.argv[1:] or ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules", "test_core", "test_dashboard"]))
