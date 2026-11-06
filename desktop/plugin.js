@@ -61,6 +61,7 @@ const BADGES = {
   olymp: { label: 'olymp', tone: 'violet', tooltip: 'Olymp, the stronger model, was asked' },
   held: { label: 'held', tone: 'orange', tooltip: 'Pre-flight HOLD: a risky command stays blocked until you allow it' },
   'for you': { label: 'for you', tone: 'red', tooltip: 'Waiting for your decision' },
+  stalled: { label: 'stalled', tone: 'orange', tooltip: 'Running, but no heartbeat for a while: the worker is probably gone' },
   verified: { label: 'verified', tone: 'green', tooltip: 'The verify command passed' },
   'verify failed': { label: 'verify failed', tone: 'red', tooltip: 'The verify command failed' }
 }
@@ -162,6 +163,17 @@ function outsideLine(outside) {
     : `outside help: ${outside.comments} comments · ${outside.changes} board changes`
 }
 
+function quotaLine(quota) {
+  const parts = quota
+    ? [
+        quota.limits.length ? `${quota.limits.length} quota limit${quota.limits.length === 1 ? '' : 's'}` : null,
+        quota.stalled.cards ? `${quota.stalled.cards} stalled` : null
+      ].filter(Boolean)
+    : []
+
+  return parts.join(' · ')
+}
+
 function Ladder({ summary, count }) {
   if (!summary) {
     return null
@@ -173,7 +185,7 @@ function Ladder({ summary, count }) {
   return h(
     'div',
     { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'stretch' } },
-    h(Rung, { name: 'Worker', big: worker.tool_calls, unit: 'tool calls watched', lines: [`${worker.signals} stuck signals`] }),
+    h(Rung, { name: 'Worker', big: worker.tool_calls, unit: 'tool calls watched', lines: [`${worker.signals} stuck signals`, quotaLine(summary.quota)] }),
     arrow('a1'),
     h(Rung, {
       name: 'Mom',
@@ -240,6 +252,14 @@ function Item({ item }) {
           h('div', { key: `${label}-v`, style: { whiteSpace: 'pre-wrap' } }, value)
         ])
       ),
+    item.stalled &&
+      h(
+        'div',
+        { style: { fontSize: '0.8125rem' } },
+        h(Badge, { variant: 'warn' }, 'STALLED'),
+        ` No heartbeat for ${item.stalled.minutes} min: the worker is probably gone. If so, run: `,
+        h('code', { style: { fontFamily: 'var(--font-mono, monospace)', userSelect: 'all' } }, item.stalled.reclaim)
+      ),
     ...item.holds.map((hold, i) =>
       h(
         'div',
@@ -252,21 +272,22 @@ function Item({ item }) {
     writing &&
       h(Textarea, { value: draft, autoFocus: true, placeholder: 'Your answer goes to the worker as a card comment', onChange: e => setDraft(e.target.value) }),
     error && h('div', { className: 'text-destructive', style: { fontSize: '0.75rem' } }, error),
-    h(
-      'div',
-      { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-      ...(writing
-        ? [
-            button('send', 'Send answer', { disabled: busy || !draft.trim(), onClick: () => send({ text: draft.trim() }) }),
-            button('cancel', 'Cancel', { variant: 'ghost', onClick: () => setWriting(false) })
-          ]
-        : [
-            item.can_accept && button('accept', 'Accept recommendation', { onClick: () => send({ accept: true }) }),
-            item.brief && button('answer', 'Answer...', { variant: 'secondary', onClick: () => setWriting(true) }),
-            holds && button('allow', 'Allow once', { variant: item.brief ? 'secondary' : 'default', onClick: () => send({ allow_once: true }) }),
-            holds && button('keep', 'Keep blocked', { variant: 'ghost', onClick: keep })
-          ].filter(Boolean))
-    )
+    !item.stalled &&
+      h(
+        'div',
+        { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+        ...(writing
+          ? [
+              button('send', 'Send answer', { disabled: busy || !draft.trim(), onClick: () => send({ text: draft.trim() }) }),
+              button('cancel', 'Cancel', { variant: 'ghost', onClick: () => setWriting(false) })
+            ]
+          : [
+              item.can_accept && button('accept', 'Accept recommendation', { onClick: () => send({ accept: true }) }),
+              item.brief && button('answer', 'Answer...', { variant: 'secondary', onClick: () => setWriting(true) }),
+              holds && button('allow', 'Allow once', { variant: item.brief ? 'secondary' : 'default', onClick: () => send({ allow_once: true }) }),
+              holds && button('keep', 'Keep blocked', { variant: 'ghost', onClick: keep })
+            ].filter(Boolean))
+      )
   )
 }
 

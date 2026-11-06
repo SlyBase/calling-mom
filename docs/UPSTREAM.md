@@ -1,0 +1,86 @@
+# Requests to Hermes
+
+Five things calling-mom 1.5 works around because Hermes has no public seam for them. Each section says what is missing,
+what calling-mom does today, which file and function would use the seam, and what the seam would remove. They are drafts
+for an upstream issue each; Timon files them. Every private import stays in `_core.py` (`test_core.OneDoorTest`), so a
+seam replaces code in one place.
+
+## 1. A dispatcher veto, or a per-profile / per-provider concurrency limit
+
+**Missing.** The dispatcher starts every ready card. A user who wants one card at a time (a Claude subscription window
+holds one worker, not four) can only chain the cards with parent links by hand.
+
+**Today.** `hermes calling-mom pace --board B --max N` plans the chains and writes the parent links through
+`kanban_db.link_tasks`; `--undo` removes exactly those links.
+
+**Would use it.** `__init__.py` `pace_board` and `quota.py` `plan` (and `cli.py` `cmd_pace`).
+
+**Removes.** The whole `pace` command and the links it leaves on the board. A limit in `config.yaml`
+(for example `kanban.max_running_per_profile` or `per_provider`) does the same without touching the cards. A veto hook
+(`on_kanban_before_claim`, return `"defer"`) would let calling-mom hold cards while a provider is `limited`.
+
+## 2. A public read API for Kanban events and comments
+
+**Missing.** A plugin cannot list the comments, events, links or heartbeats of a board without importing
+`hermes_cli.kanban_db` and `kanban_db_connect`, which can change with any release.
+
+**Today.** `_core.py` wraps the reads: `board_activity` (comments and events of every card), `board_cards` (cards and
+parent links), `running_cards` (heartbeat of running cards), `last_event_id`. `doctor` has a `board read` check that fails by
+name when Hermes changed one of them.
+
+**Would use it.** `__init__.py` `_record_touches` (outside help) and `_record_stalls` (stalled cards),
+`dashboard/plugin_api.py` `_board` and `_stalled`, `_core.py` `check_board_read`.
+
+**Removes.** The private imports in `_core.py` and the `board read` doctor check. A read-only
+`ctx.kanban.list_tasks / list_comments / list_events / list_links` with a stable shape would be enough. The store records
+no actor for board events (link, unlink, reclaim, assign, ...); an `actor` field would turn "unattributed" into a name in
+`report.py` `_outside`.
+
+## 3. A plugin can offer an answer to a human-input request, and the person can still override it
+
+**Missing.** `on_human_input_request` is an observer. A plugin sees that a chat session waits for the person, but it cannot
+offer an answer that the person confirms or replaces.
+
+**Today.** `__init__.py` `on_human_input_request` and `on_human_input_resolved` only time the wait (kind, seconds,
+outcome) when `calling_mom.count.chat_waits` is on. Mom answers worker questions on Kanban cards (`_answer_question`), not in
+chat.
+
+**Would use it.** A new hook return value, for example `{"suggest": "...", "auto_after_s": 60}`, read by
+`on_human_input_request`; the answer would come from `_answer_question`'s logic, with the same risk rules
+(`_question_risk`).
+
+**Removes.** The gap between the ladder on cards (Worker, Mom, Olymp, you) and ordinary chat sessions, which have no ladder
+in 1.5.
+
+## 4. Read access to subscription usage windows
+
+**Missing.** A Claude subscription limits by a time window (the 5-hour session). Hermes shows the gauge in its own UI
+(`agent/usage_gauges.py`), but a plugin cannot read it. The only signal is the error text
+`You've hit your session limit · resets 1:50pm (UTC)`.
+
+**Today.** `quota.py` `classify` and `parse_reset` read that text (UTC only, bounded pattern, nothing stored), then
+`__init__.py` `_set_health` keeps `limited until HH:MM`. `report.py` `_quota` can only count limits and cards paused, and the
+cost line gives tokens.
+
+**Would use it.** `__init__.py` `_set_health` and `_quota_notice` (before the limit: share of the window used),
+`report.py` `_quota` and `render` (share of the window instead of tokens), `__init__.py` `_guarded` (skip Mom before
+the wall, not after the first failure).
+
+**Removes.** The text parsing, and the first failed call of every window.
+
+## 5. Release the claim of a running card when its dispatcher host is gone
+
+**Missing.** A deploy that recreates the gateway container kills the dispatcher and its workers, but the cards stay
+`running` with a claim. On 2026-11-06 a deploy at 11:03 UTC left card t_6159c155 `running` until the orchestrator reclaimed it at
+13:06 UTC. Its `max_runtime` (3 h) would have released it at 13:58. Nothing on the board said so.
+
+**Today.** `__init__.py` `_record_stalls` writes one `[stalled]` comment per run and a `stall` row when a running card has no
+heartbeat for `calling_mom.stall_minutes` (default 15); the Desktop half shows a `stalled` badge and lists the card in Needs
+you (`dashboard/plugin_api.py` `_stalled`). calling-mom never reclaims by itself: a person runs
+`hermes kanban --board B reclaim <id> --reason stalled`.
+
+**Would use it.** `__init__.py` `_record_stalls`: with the seam the plugin would only report the cases Hermes could not
+settle.
+
+**Removes.** Most `[stalled]` comments. On start, a dispatcher would release the claims whose `claim_lock` names a host or
+process that is gone (`on_kanban_worker_stale_claim` exists as an observer; the missing part is the release itself).

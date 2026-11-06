@@ -14,7 +14,7 @@ router = APIRouter()
 DAY = 86400
 _plugin = None
 _FINISHED = ("pass", "fail", "timeout")  # a verify row is a result only in these states
-BADGES = ("held", "for you", "verify failed", "olymp", "mom", "verified")  # most urgent first; a card shows the first two
+BADGES = ("held", "for you", "stalled", "verify failed", "olymp", "mom", "verified")  # most urgent first; a card shows the first two
 _SHOWN = {  # rows worth a line in the activity list
     "advisor": lambda r: not r.get("noop"),
     "question": lambda r: r.get("outcome") in ("answered", "human"),
@@ -105,9 +105,23 @@ def _waiting(board, cards, state, now):
     return items
 
 
+def _stalled(board, cards, now):
+    """The running cards of a board without a heartbeat for ``calling_mom.stall_minutes``, read only (the sweep comments, a person reclaims)."""
+    quota, minutes = mom().quota, mom().settings()["stall_minutes"]
+    return [{"board": board, "task_id": t.id, "title": t.title, "brief": None, "holds": [], "can_accept": False,
+             "stalled": {"minutes": quota.minutes_silent(t, now),
+                         "reclaim": f"hermes kanban --board {board} reclaim {t.id} --reason stalled"},
+             "age_s": max(0, int(now - quota.last_beat(t)))}
+            for t in quota.stalled([t for t, _ in cards], now, minutes)]
+
+
 def _needs_you():
     state, now = mom()._load_holds(), time.time()
-    items = [i for b in mom()._core.list_board_slugs() if mom()._opted_in(b) for i in _waiting(b, _board(b), state, now)]
+    items = []
+    for b in mom()._core.list_board_slugs():
+        if mom()._opted_in(b):
+            cards_ = _board(b)
+            items += _waiting(b, cards_, state, now) + _stalled(b, cards_, now)
     return sorted(items, key=lambda i: -i["age_s"])
 
 
@@ -137,9 +151,11 @@ def cards(board: str | None = None):
     activity, state, now, out = _activity(_rows()), mom()._load_holds(), time.time(), {}
     for slug in slugs:
         cards_ = _board(slug)
-        waiting = {i["task_id"]: i for i in _waiting(slug, cards_, state, now)} if mom()._opted_in(slug) else {}
+        opted = mom()._opted_in(slug)
+        waiting = {i["task_id"]: i for i in _waiting(slug, cards_, state, now)} if opted else {}
+        stalled = {i["task_id"] for i in _stalled(slug, cards_, now)} if opted else set()
         for task, _ in cards_:
-            names = set(activity.get(task.id, ()))
+            names = set(activity.get(task.id, ())) | ({"stalled"} if task.id in stalled else set())
             if task.id in waiting:
                 names |= ({"for you"} if waiting[task.id]["brief"] else set()) | ({"held"} if waiting[task.id]["holds"] else set())
             picked = [n for n in BADGES if n in names][:2]

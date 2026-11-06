@@ -22,4 +22,5 @@ provides_hooks:
   - post_api_request
   - on_human_input_request
   - on_human_input_resolved
+  - api_request_error
 author: SlyBase

@@ -46,8 +46,20 @@ Added in 1.5 (WP1), all additive:
 | kind | Fields | Written when |
 |---|---|---|
 | `touch` | `src` (`comment`, `event`, `chat`), `what` (`comment`, `link`, `unlink`, `reclaim`, `unblock`, `edit`, `archive`, `assign`, `model`, `effort`, `changes`, `triage`, `to_person`, `chat_wait`), `author` (comments: profile or surface id), `actor` (`other`, `unattributed`), `store_id` (dedupe key with `board` and `src`; the last row of a key wins), `wait_s` (triage, to_person, chat waits; absent while still waiting), `outcome` (chat), `wait` (chat: `clarify`, `approval`, `sudo`, `other`) | The sweep found outside help on an opted-in board (`ts` is the time of the event), or a prompt wait in chat ended. `wait` is an addition to the spec's field list: the spec asks for the kind of wait, and `kind` is taken by the row kind. |
-| `own_write` | `what` (`pin`, `unblock`), `store_id` | calling-mom wrote to a board itself; the sweep takes that event out of the outside-help count. |
+| `own_write` | `what` (`pin`, `unblock`, `link`, `unlink`), `store_id` | calling-mom wrote to a board itself; the sweep takes that event out of the outside-help count. |
 | `advice_feedback` | `result` (`followed`, `acted`, `ignored`, `unknown`), `anchors` (count), `match` (hash prefix of the matched anchor or null) | An advice was judged: at the first matching tool call, when the run ends, or at once for advice without anchors. 1.4 rows have `verdict` instead of `result`. |
+
+Added in 1.5 (WP2), all additive:
+
+| kind | Fields | Written when |
+|---|---|---|
+| `quota` | `provider`, `model`, `profile`, `state`, `until` (epoch seconds, or null while the reset time is a guess), `error_class` (`rate_limit`, `auth`, `key_limit`, `other`), `src` (`api_error`, `exit`, `call`), `task`, `board`, `run`, `tier` | `state` `limited` / `down` / `recovered`: the health of a provider changed (one row per change). The spec lists these three; WP2 adds `skipped` (a Mom or Olymp call was not made, `tier` says which), `fallback` (the fallback answered) and `paused` (a `[quota]` comment was written for `task`, `src` `exit`) so the report can count them. |
+| `pace` | `board`, `max` (null for `--undo`), `added`, `removed`, `skipped_running` | A person ran `pace` or `pace --undo` (not for `--dry-run`). |
+| `stall` | `last_heartbeat` (epoch seconds), `minutes` (silent when flagged), `task`, `board`, `run` | The sweep flagged a running card; one row per run. |
+
+State in `calling-mom-state.json` (additive): `health` (`{profile: {provider: {state, until, class, known}}}`, `known` false when the reset time
+is the 30 minute guess), `pace` (`{board: [[parent, child], ...]}`: the links to undo), `stalled` (`{task: run}` already commented),
+`quota_cards` (`{task: limit window}` already commented). Comment prefixes: `[quota]`, `[stalled]` (author `calling-mom`).
 
 Unchanged kinds: tool rows (no `kind`: `tool`, `ok`, `sig`, `signals`), `advisor`, `advisor_error`,
 `escalated`, `review_redirect`, `verify_ignored`, `tick`. Precedents are a separate file (see "Precedents").
@@ -309,6 +321,7 @@ JSON fields (`days` and `board` are added by `attention_report`; `olymp.today` a
 | `advice.unknown` | `calls` minus the three above, never below 0: advice without anchors, without a verdict yet, or a hard-killed run |
 | `you.outside` | `comments` (+ `authors` by author id), `changes` (+ `changes_by` by kind), `actor` (always `unattributed`), `to_person` (cards that entered triage or sat on an unanswered question), `waiting` (those still in that state), `own_writes` (rows taken out of the count), `source`, `observed` (false: the sweep has not read this board, nothing is shown as 0) |
 | `you.chat_waits` | `count`, `total_s`, `longest_s`, `by_kind`, `source`, `observed` (false while `count.chat_waits` is off) |
+| `quota` | `limits` (one entry per `limited` row: `provider`, `until`, `seconds` to the reset or null), `down`, `paused` (cards with a `[quota]` comment), `skipped` (Mom calls not made; Olymp's are not counted), `fallback` (answers by the fallback), `stalled{cards, minutes}` (`stall` rows), `source` |
 | `olymp.calls` | Olymp advice rows + questions with `by=olymp`; `today` and `cap` are the daily count and `olymp.max_per_day` |
 | `you.briefs` | questions with `outcome=human` |
 | `you.answered` / `holds_released` | `human_answer` rows (briefs and holds, any `via`) / those with `allow_once` |
@@ -322,6 +335,31 @@ Limits: Mom's cost is a lower bound, because the first, escalating call of an Ol
 one blended number for input and output; worker tokens count cache reads at full weight; the log is trimmed to its last 1000 rows when it passes 5 MB, so a busy install reports fewer days than asked. `GET /summary` adds
 `you.waiting`, `today.mom_calls` and `recent` to this report.
 
+## Quota, fallback, stalled cards, pace
+
+`quota.py` holds the pure parts (error classes, the `resets 1:50pm (UTC)` pattern, health dicts, stalled test, pace plan);
+`__init__.py` wires them: `on_api_error` (`api_request_error`, worker sessions of opted-in boards), `_note_error` (failed Mom and
+Olymp calls), `_guarded` (skips an unhealthy route, hands Mom's calls to `mom_fallback`, retries on it after a failure unless the
+caller is a bounded hook), `_quota_notice` (`on_kanban_worker_exited` with `outcome == "rate_limited"`), `_record_stalls` (the
+sweep, with the touch scan, at most every 30 s per board) and `pace_board`.
+
+- **Classes.** `key_limit` (402, `reason` billing, `Key limit exceeded`) and `auth` (401, `reason` auth, an error type that contains
+  `LoggedOut`) come first, then `rate_limit` (429, `reason` rate_limit, `You've hit your ... limit`, `usage limit`). An aggregator's
+  upstream 429 (`upstream_rate_limit`), overload and timeouts are `other`: they change nothing.
+- **Health.** `limited` until the parsed reset (30 minutes when unknown; a guess never extends a known reset), `down` for 30 minutes. Keyed by profile
+  and provider. An entry that ended is dropped on the next read and logged as `recovered`.
+- **Exit hook.** The payload of `on_kanban_worker_exited` names no provider, so the `[quota]` comment takes it from the health entry of
+  the card's assignee profile (set by the worker's own `api_request_error`), else from the card's model pin, else says "The provider".
+  One comment per card and limit window (the reset time, or a 30 minute bucket without one). It needs the plugin in the dispatcher's home.
+- **Fallback.** Used for Mom's route (advice, pre-flight, questions, second opinion), never for Olymp. A bounded hook (pre-flight) makes one call
+  only: it uses the fallback when Mom is already known to be limited or down, and does not retry after a failure.
+- **Stalled.** `running` and `now - (last_heartbeat_at or started_at) >= stall_minutes`. The sweep reads it through `_core.running_cards`
+  (covered by `doctor`'s `board read`). Hermes' own wedged-worker reclaim only runs after an hour of silence and for a live PID;
+  this flag is for the case before that and for a dead host.
+- **Pace.** `quota.plan` orders the `todo` and `ready` cards by priority, then age; running cards head the first chains; waiting cards fill
+  the empty chains first and then go round-robin; a link that would close a cycle goes to another chain or the card is left alone. Links
+  go through `kanban_db.link_tasks` (via `_core.link`). A second `pace` on a board refuses until `--undo` ran.
+
 ## Desktop backend
 
 `dashboard/plugin_api.py` (manifest `dashboard/manifest.json`, `tab.hidden`: no web-dashboard tab) is mounted by Hermes
@@ -331,8 +369,8 @@ it imports nothing from Hermes itself. Boards are read through the plugin's `_co
 | Route | Answer |
 |---|---|
 | `GET /summary?days=7` (1..90), optionally `since=` and `until=` (400 for a bad date) | The attention report (see above: `worker`, `mom`, `olymp`, `you`, `cost`) plus `you.waiting`, `today{mom_calls}` and `recent[{ts, kind, task, board, detail, by}]`. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
-| `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `verify failed`, `olymp`, `mom`, `verified`. `held` and `for you` need an opted-in board and a card that still waits; the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
-| `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. |
+| `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `stalled`, `verify failed`, `olymp`, `mom`, `verified`. `held`, `for you` and `stalled` need an opted-in board and a card that still waits (`stalled`: a running card without a heartbeat); the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
+| `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. Also the running cards without a heartbeat for `stall_minutes` (read live from the store, so the entry goes when the heartbeat is back): `brief` null, no holds, `can_accept` false, plus `stalled{minutes, reclaim}` (the reclaim command to copy); the Desktop page shows them without buttons. |
 | `POST /answer` | `{board, task_id, text?, accept?, allow_once?}` -> `answer_card(..., by="desktop")`. 404 for a board that does not exist or did not opt in, or no such card; 409 for a card that is not blocked or carries no brief or hold; 400 for bad arguments; 422 for a malformed body. |
 
 **Desktop on another machine.** The app loads Desktop plugins from its own disk only

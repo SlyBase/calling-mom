@@ -376,6 +376,63 @@ class CardsTest(DashboardFixture, unittest.TestCase):
         self.assertNotIn("Okta", self.client.get("/cards").text)
 
 
+class StalledViewTest(DashboardFixture, unittest.TestCase):
+    """WP2: a running card without a heartbeat for `stall_minutes` is listed in Needs you (read only) and wears a `stalled` badge."""
+
+    def run_card(self, beat_ago_min, tid=None):
+        tid = tid or self.card()
+        now = int(time.time())
+        with_conn(lambda c: c.execute(
+            "UPDATE tasks SET status = 'running', last_heartbeat_at = ?, started_at = ?, current_run_id = 3 WHERE id = ?",
+            (now - beat_ago_min * 60, now - 7200, tid)) and c.commit())
+        return tid
+
+    def test_a_stalled_card_is_listed_with_no_way_to_answer(self):
+        tid = self.run_card(20)
+        (item,) = self.get("/needs-you")
+        self.assertEqual((item["board"], item["task_id"], item["title"]), ("t-board", tid, "fix the parser"))
+        self.assertEqual((item["brief"], item["holds"], item["can_accept"]), (None, [], False))
+        self.assertEqual(item["stalled"]["minutes"], 20)
+        self.assertEqual(item["stalled"]["reclaim"], f"hermes kanban --board t-board reclaim {tid} --reason stalled")
+        self.assertGreaterEqual(item["age_s"], 20 * 60)
+        self.assertEqual(self.get("/summary")["you"]["waiting"], 1)
+
+    def test_a_card_that_beats_is_not_listed_and_comes_back_without_a_restart(self):
+        tid = self.run_card(5)
+        self.assertEqual(self.get("/needs-you"), [])
+        self.run_card(30, tid)
+        self.assertEqual(len(self.get("/needs-you")), 1)
+        self.run_card(0, tid)                         # kill -CONT: the heartbeat is back
+        self.assertEqual(self.get("/needs-you"), [])
+
+    def test_the_badge_is_stalled_and_goes_with_the_stall(self):
+        tid = self.run_card(20)
+        self.assertEqual(self.get("/cards"), {tid: ["stalled"]})
+        self.run_card(1, tid)
+        self.assertEqual(self.get("/cards"), {})
+
+    def test_stalled_comes_before_the_badges_of_the_log(self):
+        tid = self.run_card(20)
+        self.put("advisor", task=tid, category="error")
+        self.assertEqual(self.get("/cards"), {tid: ["stalled", "mom"]})
+
+    def test_zero_minutes_switches_it_off(self):
+        self.run_card(60)
+        plugin.DEFAULTS["stall_minutes"] = 0
+        self.assertEqual(self.get("/needs-you"), [])
+        self.assertEqual(self.get("/cards"), {})
+
+    def test_a_board_that_did_not_opt_in_is_not_listed(self):
+        self.run_card(60)
+        plugin.DEFAULTS["advisor"]["boards"] = []
+        plugin.DEFAULTS["answer"]["boards"] = []
+        self.assertEqual(self.get("/needs-you"), [])
+
+    def test_the_oldest_wait_comes_first(self):
+        young, old = self.run_card(20), self.run_card(90, self.card())
+        self.assertEqual([i["task_id"] for i in self.get("/needs-you")], [old, young])
+
+
 class AnswerRouteTest(DashboardFixture, unittest.TestCase):
     """POST /answer: a person's click, as the page sends it. It is `answer_card(..., by="desktop")` and nothing else."""
 
