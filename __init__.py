@@ -97,6 +97,13 @@ except ImportError:  # loaded by path (tests, plugin doctor)
     touches = importlib.util.module_from_spec(_touches_spec)
     _touches_spec.loader.exec_module(touches)
 
+try:
+    from . import quota
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _quota_spec = importlib.util.spec_from_file_location("calling_mom_quota", Path(__file__).with_name("quota.py"))
+    quota = importlib.util.module_from_spec(_quota_spec)
+    _quota_spec.loader.exec_module(quota)
+
 DEFAULTS = {
     "model": "deepseek/deepseek-v4.1-flash-1017",
     "provider": "openrouter",
@@ -111,6 +118,8 @@ DEFAULTS = {
     "review": {"marker": "[review]", "reviewer": "reviewer"},  # [review] cards finish via the reviewer profile ("" = off)
     "metrics": {"pushgateways": [], "instance": "hermes"},  # Pushgateway base URLs, tried in order ([] = off)
     "count": {"chat_waits": False},  # time you wait on a prompt in chat (kind, seconds, outcome; never the text). Off until setup asks.
+    "mom_fallback": {"provider": "", "model": ""},  # answers when Mom's provider is limited or down (never replaces Olymp)
+    "stall_minutes": 15,  # a running card without a heartbeat this long gets a [stalled] comment (0 = off)
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
     "human_marker": "[human]",  # such cards are for a person: Mom never answers their questions
     "advisor": {  # one short question to the strong model at the point where the worker is stuck
@@ -172,6 +181,7 @@ _edits: dict = {}  # (task, run) -> file-editing tool calls so far (workspace st
 _EDIT_TOOLS = {"write_file", "patch"}
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"  # author of comments written by versions before 1.3.1; new ones carry the worker's profile
+NOTICE_AUTHOR = "calling-mom"  # [quota] and [stalled] comments (not "escalation": the metrics count that author as escalated cards)
 _UNAVAILABLE = "[advisor unavailable]"
 # an advisor comment is recognised by its text, whoever signed it
 _IS_ADVICE = "author = 'advisor' OR body LIKE '[advisor unavailable]%' OR body LIKE '[%/%] run %'"
@@ -181,6 +191,14 @@ _down: dict = {}  # (provider, model) -> time of its last failure
 
 class _CoolingDown(Exception):
     """The model failed a moment ago: skip silently, the first failure already left its comment."""
+
+
+class _Unavailable(Exception):
+    """The provider is limited or down (its health entry): skipped without a model call. The text says until when."""
+
+    def __init__(self, provider, entry):
+        super().__init__(f"{provider} is {entry['state']} until {quota.clock(entry['until'])} UTC"
+                         + (" (login or key problem)" if entry["state"] == "down" else ""))
 # `steps` is a pace signal (logged, never a question): it cost one advisor call and returned NO_ACTION
 _CATEGORY = {"same_error": "error", "malformed": "error", "loop": "loop"}
 
@@ -237,7 +255,7 @@ class _connect:
 
 def _own_write(conn, task_id, what, board) -> None:
     """Log a board write calling-mom made itself (``pin``, ``unblock``), so the sweep does not count its event as outside help."""
-    event = {"pin": "model_override_set", "unblock": "unblocked"}[what]
+    event = {"pin": "model_override_set", "unblock": "unblocked", "link": "linked", "unlink": "unlinked"}[what]
     _trace_row("own_write", task=task_id, board=board, what=what, store_id=_core.last_event_id(conn, task_id, event))
 
 
@@ -350,6 +368,247 @@ def _load_marks() -> dict:
         return {}
 
 
+# --- quota and pacing (WP2 of 1.5) ---------------------------------------------------------------------------
+# Provider health lives in the state file, per profile and provider (see quota.py). The text of an error is parsed
+# (class, reset time) and dropped: it never reaches the log or the state file.
+
+def _health() -> dict:
+    """The provider health of the state file. An entry that ended is dropped now and logged as ``recovered``."""
+    data = _load_holds()
+    health = data.get("health") or {}
+    gone = quota.expire(health, time.time())
+    if gone:
+        for profile, provider, _state in gone:
+            _trace_row("quota", profile=profile, provider=provider, state="recovered")
+        data["health"] = health
+        if not health:
+            del data["health"]
+        _write_state(data)
+    return health
+
+
+def _unhealthy(route) -> "dict | None":
+    return quota.active(_health(), _core.profile_name(), route["provider"], time.time())
+
+
+def _set_health(provider, model, error_class, reset, src, profile=None, **where) -> None:
+    """Provider news: ``rate_limit`` -> limited until ``reset`` (30 minutes when it is None), ``auth`` and ``key_limit`` ->
+    down for 30 minutes. Only a change writes a ``quota`` row; ``where`` (task, board, run) says where it was seen."""
+    _health()  # an entry that ended must not hide this news
+    now, state = time.time(), "limited" if error_class == "rate_limit" else "down"
+    known = reset is not None or state == "down"
+    until = reset or now + (quota.LIMIT_UNKNOWN_S if state == "limited" else quota.DOWN_S)
+    profile = profile or _core.profile_name()
+    data = _load_holds()
+    health = data.get("health") or {}
+    if quota.mark(health, profile, provider, state, until, error_class, known):
+        data["health"] = health
+        _write_state(data)
+        _trace_row("quota", profile=profile, provider=provider, model=model or None, state=state,
+                   until=int(until) if known else None, error_class=error_class, src=src, **where)
+
+
+def _note_error(route, exc, task=None) -> None:
+    """A failed Mom or Olymp call: a quota-type error (not a timeout, not a crash) marks the provider."""
+    error_class = quota.classify(type(exc).__name__, str(exc), getattr(exc, "status_code", None))
+    if error_class != "other":
+        reset = quota.parse_reset(str(exc), time.time()) if error_class == "rate_limit" else None
+        _set_health(route["provider"], route["model"], error_class, reset, "call", **({"task": task} if task else {}))
+
+
+def _fallback() -> "dict | None":
+    fb = settings()["mom_fallback"]
+    return {"provider": fb["provider"], "model": fb["model"], "fallback": True} if fb.get("provider") and fb.get("model") else None
+
+
+def _guarded(route, call, *, mom=True, retry=True, task=None):
+    """``(call(route), route used)``. A route whose provider is limited or down is skipped without a model call; Mom's
+    fallback (never Olymp's: an expensive model is not replaced silently) takes over, also after a failed call when
+    ``retry`` (a bounded hook passes False: one call only). With nothing left, the error of the first route is raised."""
+    errors, tier, where = [], "mom" if mom else "olymp", {"task": task} if task else {}
+    for rt in [route] + ([fb] if mom and (fb := _fallback()) else []):
+        entry = _unhealthy(rt)
+        if entry:
+            _trace_row("quota", profile=_core.profile_name(), provider=rt["provider"], model=rt["model"], state="skipped",
+                       tier=tier, until=entry["until"], error_class=entry["class"], src="call", **where)
+            errors.append(_Unavailable(rt["provider"], entry))
+            continue
+        try:
+            out = call(rt)
+        except _Timeout:
+            raise
+        except _CoolingDown as exc:
+            errors.append(exc)
+            continue
+        except Exception as exc:
+            _note_error(rt, exc, task)
+            errors.append(exc)
+            if not retry:
+                raise
+            continue
+        if rt.get("fallback"):
+            _trace_row("quota", profile=_core.profile_name(), provider=rt["provider"], model=rt["model"], state="fallback",
+                       tier=tier, src="call", **where)
+        return out, rt
+    raise errors[0]
+
+
+def on_api_error(provider=None, model=None, error=None, status_code=None, reason=None, **_):
+    """``api_request_error``: a provider error in a worker session on an opted-in board. A rate limit, a login problem or a key
+    limit marks the provider (per profile) so Mom does not call it; anything else changes nothing. Observer, never raises."""
+    key = _worker_key()
+    if not (key and provider and _enabled() and _opted_in(os.environ.get("HERMES_KANBAN_BOARD", ""))):
+        return
+    try:
+        error = error if isinstance(error, dict) else {}
+        error_class = quota.classify(error.get("type"), error.get("message"), status_code, reason)
+        if error_class != "other":
+            reset = quota.parse_reset(error.get("message"), time.time()) if error_class == "rate_limit" else None
+            _set_health(str(provider), str(model or ""), error_class, reset, "api_error", task=key[0],
+                        board=os.environ.get("HERMES_KANBAN_BOARD", ""), run=key[1])
+    except Exception as exc:  # pragma: no cover - observing must never break a worker
+        logger.warning("calling-mom: api error not recorded: %s", exc)
+
+
+def _card_comment(board, task_id, body) -> None:
+    """A calling-mom notice on a card (``[quota]``, ``[stalled]``). Not the public comment tool: the sweep has no plugin context."""
+    with _connect(board) as conn:
+        kb.add_comment(conn, task_id, NOTICE_AUTHOR, body)
+
+
+def _quota_notice(task_id, board, profile) -> None:
+    """A worker exited rate-limited: one ``[quota]`` comment per card and limit window, from the health of the card's profile
+    (the exit payload names no provider, so the worker's own ``api_request_error`` told us), else the card's model pin."""
+    if not (task_id and _enabled() and _opted_in(board or "")):
+        return
+    try:
+        with _connect(board) as conn:
+            task = kb.get_task(conn, task_id)
+        if task is None:
+            return
+        now = time.time()
+        found = next(((prov, e) for prov, e in quota.entries(_health(), profile, now) if e["state"] == "limited"), None)
+        if found is None and task.provider_override:
+            _set_health(task.provider_override, task.model_override, "rate_limit", None, "exit", profile=profile)
+            found = (task.provider_override, quota.entries(_health(), profile, now)[0][1])
+        provider, entry = found or (None, None)
+        window = str(entry["until"]) if entry else f"?{int(now // quota.LIMIT_UNKNOWN_S)}"
+        data = _load_holds()
+        if (data.get("quota_cards") or {}).get(task_id) == window:
+            return
+        known = bool(entry and entry["known"])
+        _card_comment(board, task_id, f"[quota] {provider or 'The provider'} hit its usage limit; "
+                      + (f"resets about {quota.clock(entry['until'])} UTC" if known else "reset time unknown")
+                      + f". The dispatcher retries by itself; the work in {task.workspace_path or 'its workspace'} is kept.")
+        data.setdefault("quota_cards", {})[task_id] = window
+        _write_state(data)
+        _trace_row("quota", task=task_id, board=board, profile=profile, provider=provider, state="limited",
+                   until=int(entry["until"]) if known else None, error_class="rate_limit", src="exit")
+    except Exception as exc:  # pragma: no cover - a notice must never break the dispatcher
+        logger.warning("calling-mom: quota notice failed for %s: %s", task_id, exc)
+
+
+def _record_stalls(board) -> None:
+    """Flag the running cards without a heartbeat for ``stall_minutes``: one ``[stalled]`` comment and one ``stall`` row per run.
+    Never reclaims (a person decides); a card that left ``running`` is forgotten, so its next run may comment again."""
+    minutes = settings()["stall_minutes"]
+    if minutes <= 0:
+        return
+    with _connect(board) as conn:
+        running = _core.running_cards(conn)
+    now, data = time.time(), _load_holds()
+    seen = dict(data.get("stalled") or {})
+    for task in quota.stalled(running, now, minutes):
+        if seen.get(task.id) == str(task.current_run_id):
+            continue
+        beat = quota.last_beat(task)
+        _card_comment(board, task.id, f"[stalled] no heartbeat since {quota.clock(beat)} UTC (run {task.current_run_id}). "
+                      "The worker is probably gone, for example after a gateway restart. "
+                      f"If so: hermes kanban --board {board} reclaim {task.id} --reason stalled")
+        _trace_row("stall", task=task.id, board=board, run=task.current_run_id, last_heartbeat=beat,
+                   minutes=quota.minutes_silent(task, now))
+        seen[task.id] = str(task.current_run_id)
+    seen = {k: v for k, v in seen.items() if k in {t.id for t in running}}
+    if seen != (data.get("stalled") or {}):
+        data["stalled"] = seen
+        _write_state(data)
+
+
+def _pace_lines(board, n, plan, titles) -> list:
+    name = lambda tid, status: f"{tid} {titles.get(tid, '')[:40]!r}" + (" (running)" if status.get(tid) == "running" else "")
+    lines = [f"pace on board {board}: at most {n} card(s) ready or running"]
+    for k, chain in enumerate(plan["chains"], 1):
+        lines.append(f"chain {k}: " + (" -> ".join(name(t, plan["status"]) for t in chain) or "(empty)"))
+    lines.append(f"{len(plan['add'])} link(s) to add" + "".join(f"\n  {p} -> {c}  ({c} waits for {p})" for p, c in plan["add"]))
+    if plan["skipped"]:
+        lines.append("left alone, a link would close a cycle: " + ", ".join(plan["skipped"]))
+    if plan["skipped_running"]:
+        lines.append(f"{plan['skipped_running']} running card(s) above the maximum are left running")
+    return lines
+
+
+def _pace_undo(board, mine, dry_run, out) -> dict:
+    if not mine:
+        out |= {"ok": True, "lines": [f"nothing to undo on board {board}: pace added no links"]}
+        return out
+    out["lines"] = [f"undo: {len(mine)} link(s) added by pace on board {board}"] + [f"  {p} -> {c}" for p, c in mine]
+    if not dry_run:
+        with _connect(board) as conn:
+            for parent, child in mine:
+                if _core.unlink(conn, parent, child):
+                    _own_write(conn, child, "unlink", board)
+                    out["removed"] += 1
+        data = _load_holds()
+        data["pace"].pop(board, None)
+        if not data["pace"]:
+            del data["pace"]
+        _write_state(data)
+        _trace_row("pace", board=board, max=None, added=0, removed=out["removed"], skipped_running=0)
+    out["ok"] = True
+    return out
+
+
+def pace_board(board, n=None, *, dry_run=False, undo=False) -> dict:
+    """``hermes calling-mom pace``: keep at most ``n`` cards of ``board`` ready or running by chaining the rest with parent
+    links (``quota.plan``). The one board write of calling-mom that a person asks for: ``dry_run`` only prints the plan, ``undo``
+    removes exactly the links this wrote (the state file remembers them). Returns ``{ok, lines, added, removed, skipped_running, error}``."""
+    out = {"ok": False, "lines": [], "added": 0, "removed": 0, "skipped_running": 0}
+    try:
+        mine = [tuple(pair) for pair in (_load_holds().get("pace") or {}).get(board) or []]
+        if undo:
+            return _pace_undo(board, mine, dry_run, out)
+        if not n or n < 1:
+            out["error"] = "--max must be at least 1"
+        elif mine:
+            out["error"] = f"pace links from an earlier run exist on board {board}: run --undo first"
+        else:
+            with _connect(board) as conn:
+                tasks, links = _core.board_cards(conn)
+            plan = quota.plan(tasks, links, n) | {"status": {t.id: t.status for t in tasks}}
+            out |= {"lines": _pace_lines(board, n, plan, {t.id: t.title or "" for t in tasks}), "ok": True,
+                    "skipped_running": plan["skipped_running"]}
+            if not dry_run:
+                added = []
+                with _connect(board) as conn:
+                    for parent, child in plan["add"]:
+                        try:
+                            _core.link(conn, parent, child)
+                        except ValueError as exc:
+                            out["lines"].append(f"refused by Hermes: {parent} -> {child} ({exc})")
+                            continue
+                        _own_write(conn, child, "link", board)
+                        added.append([parent, child])
+                if added:
+                    data = _load_holds()
+                    data.setdefault("pace", {})[board] = added
+                    _write_state(data)
+                out["added"] = len(added)
+                _trace_row("pace", board=board, max=n, added=len(added), removed=0, skipped_running=plan["skipped_running"])
+    except Exception as exc:
+        out |= {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
 TOUCH_EVERY_S = 30  # the dispatcher ticks often; reading every card of a board is not needed that often
 _last_scan: dict = {}  # board -> time of its last touch scan
 
@@ -396,10 +655,11 @@ def sweep(board=None) -> list:
         logger.warning("calling-mom: sweep failed on board %s: %s", board, exc)
     if board and _opted_in(board) and time.time() - _last_scan.get(board, 0) >= TOUCH_EVERY_S:
         _last_scan[board] = time.time()
-        try:
-            _record_touches(board)
-        except Exception as exc:  # counting must never break the sweep
-            logger.warning("calling-mom: touches not counted on board %s: %s", board, exc)
+        for scan in (_record_touches, _record_stalls):
+            try:
+                scan(board)
+            except Exception as exc:  # counting must never break the sweep
+                logger.warning("calling-mom: %s failed on board %s: %s", scan.__name__.strip("_"), board, exc)
     return done
 
 
@@ -506,11 +766,14 @@ def on_parked(task_id=None, board=None, payload=None, **_):
         logger.warning("calling-mom: parked hook failed for %s: %s", task_id, exc)
 
 
-def on_worker_exited(task_id=None, board=None, outcome=None, **_):
+def on_worker_exited(task_id=None, board=None, outcome=None, assignee=None, **_):
     """``on_kanban_worker_exited``: the dispatcher fires this after breaker accounting has
-    committed, so a crash-parked card can be escalated without polling."""
+    committed, so a crash-parked card can be escalated without polling. A rate-limited exit is no crash:
+    the card is requeued by Hermes, and gets one ``[quota]`` comment per limit window."""
     if outcome == "completed":
         return
+    if outcome == "rate_limited":
+        return _quota_notice(task_id, board, assignee)
     on_parked(task_id=task_id, board=board, payload={"error": None})
 
 
@@ -728,32 +991,34 @@ def _advise(key, category, signal, note="") -> "str | None":
             return None
         gate = gate and olymp_used < olymp["max_per_card"] and spent["olymp"] < olymp["max_per_day"]
 
-        def ask(r, msgs):
-            pair = (r["provider"], r["model"])
-            if time.time() - _down.get(pair, 0) < COOLDOWN_S:
-                raise _CoolingDown()
-            try:
-                out = _ctx.llm.complete(msgs, provider=r["provider"], model=r["model"],
-                                        max_tokens=adv["max_output_tokens"], timeout=adv["timeout_s"],
-                                        purpose="kanban-advisor")
-            except Exception:
-                _down[pair] = time.time()
-                raise
-            _down.pop(pair, None)
-            return out
+        def ask(r, msgs, mom=True):
+            def call(rt):
+                pair = (rt["provider"], rt["model"])
+                if time.time() - _down.get(pair, 0) < COOLDOWN_S:
+                    raise _CoolingDown()
+                try:
+                    out = _ctx.llm.complete(msgs, provider=rt["provider"], model=rt["model"],
+                                            max_tokens=adv["max_output_tokens"], timeout=adv["timeout_s"],
+                                            purpose="kanban-advisor")
+                except Exception:
+                    _down[pair] = time.time()
+                    raise
+                _down.pop(pair, None)
+                return out
+            return _guarded(r, call, mom=mom, task=task.id)
 
         msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
         is_olymp = False
         if gate:  # mom first, with the escalation instruction
-            first = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
+            first, route = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
             if (first.text or "").strip().upper().startswith("ESCALATE"):
                 _add_spend(first.usage.cost_usd or 0.0, (first.usage.input_tokens or 0) + (first.usage.output_tokens or 0))
                 route, is_olymp = {"model": olymp["model"], "provider": olymp["provider"]}, True
-                res = ask(route, msgs)
+                res, route = ask(route, msgs, mom=False)
             else:
                 res = first
         else:
-            res = ask(route, msgs)
+            res, route = ask(route, msgs)
         text = (res.text or "").strip()
         if not text:
             return None
@@ -769,13 +1034,17 @@ def _advise(key, category, signal, note="") -> "str | None":
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
         _post_comment(task.id, f"[{category}/{signal}] run {key[1] or '?'} · {res.model} "
-                      f"({route['provider']}{', olymp' if is_olymp else ''}): "
+                      f"({route['provider']}{', olymp' if is_olymp else ''}{', fallback' if route.get('fallback') else ''}): "
                       f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}")
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                    provider=route["provider"], olymp=is_olymp,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
         return f"[ADVISOR {res.model}] {text}"
     except _CoolingDown:
+        return None
+    except _Unavailable as exc:  # the provider is limited or down: no model call, the card hears why (once)
+        if opted_in:
+            _report_unavailable(task.id, exc)
         return None
     except Exception as exc:
         logger.warning("calling-mom: advisor failed (%s): %s", signal, exc)
@@ -845,12 +1114,14 @@ def _report_unavailable(task_id, exc) -> None:
     """ONE visible comment per card when the advisor model cannot be reached (dead key, no login, ...).
     Without it the card just runs on without advice and nobody learns why."""
     try:
-        _trace_row("advisor_error", task=task_id, error=type(exc).__name__)
+        if not isinstance(exc, _Unavailable):  # a skipped call is a quota row, not a failed call
+            _trace_row("advisor_error", task=task_id, error=type(exc).__name__)
         with _connect() as conn:
             if conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND body LIKE ?",
                             (task_id, _UNAVAILABLE + "%")).fetchone():
                 return
-        reason = _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
+        reason = str(exc) if isinstance(exc, _Unavailable) else _core.redact_for_egress(
+            _URL_CREDS.sub(r"\1***@", f"{type(exc).__name__}: {exc}"))[:300]
         _post_comment(task_id, f"{_UNAVAILABLE} {reason}\nThe card continues without advice. "
                                "Check the setup: hermes calling-mom doctor")
     except Exception as err:  # pragma: no cover - reporting must never break the worker
@@ -988,21 +1259,24 @@ def _complete_within(route, msgs, max_tokens, timeout, purpose):
     return box["res"]
 
 
-def _ask_model(route, msgs, max_tokens, timeout, purpose):
-    """``_complete_within`` plus the cooldown: a model that just failed is not asked again for ``COOLDOWN_S``
-    (``_CoolingDown``). A provider error starts the cooldown, a timeout does not."""
-    pair = (route["provider"], route["model"])
-    if time.time() - _down.get(pair, 0) < COOLDOWN_S:
-        raise _CoolingDown()
-    try:
-        out = _complete_within(route, msgs, max_tokens, timeout, purpose)
-    except _Timeout:
-        raise
-    except Exception:
-        _down[pair] = time.time()
-        raise
-    _down.pop(pair, None)
-    return out
+def _ask_model(route, msgs, max_tokens, timeout, purpose, *, mom=True, retry=True, task=None):
+    """``(result, route used)``: ``_complete_within`` plus the cooldown (a model that just failed is not asked again for
+    ``COOLDOWN_S``: ``_CoolingDown``; a provider error starts it, a timeout does not) plus the quota health and Mom's
+    fallback (``_guarded``)."""
+    def call(rt):
+        pair = (rt["provider"], rt["model"])
+        if time.time() - _down.get(pair, 0) < COOLDOWN_S:
+            raise _CoolingDown()
+        try:
+            out = _complete_within(rt, msgs, max_tokens, timeout, purpose)
+        except _Timeout:
+            raise
+        except Exception:
+            _down[pair] = time.time()
+            raise
+        _down.pop(pair, None)
+        return out
+    return _guarded(route, call, mom=mom, retry=retry, task=task)
 
 
 def _pf_block(hold) -> dict:
@@ -1092,8 +1366,8 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
         return None
     deadline = min(pf["timeout_s"], 0.4 * _core.hook_budget())
     try:
-        res = _ask_model({"provider": cfg["provider"], "model": cfg["model"]}, _pf_messages(task, command),
-                         48, deadline, "kanban-preflight")
+        res, used = _ask_model({"provider": cfg["provider"], "model": cfg["model"]}, _pf_messages(task, command),
+                               48, deadline, "kanban-preflight", retry=False, task=key[0])
     except _Timeout:
         _trace_row("preflight", task=key[0], verdict="allowed", reason="timeout", cmd_hash=h)
         return None
@@ -1105,7 +1379,7 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
     paid = {"tokens_in": res.usage.input_tokens or 0, "tokens_out": res.usage.output_tokens or 0, "usd": res.usage.cost_usd or 0.0}
     verdict = _pf_parse(res.text)
     if verdict == "go":
-        _trace_row("preflight", task=key[0], verdict="go", cmd_hash=h, model=cfg["model"], **paid)
+        _trace_row("preflight", task=key[0], verdict="go", cmd_hash=h, model=used["model"], **paid)
         return None
     if not isinstance(verdict, tuple):
         _trace_row("preflight", task=key[0], verdict="allowed", reason="parse", cmd_hash=h, **paid)
@@ -1114,7 +1388,7 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
     hold = _record_hold(key[0], h, reason, alternative)
     _post_comment(task.id, f"[pre-flight] HOLD: {reason}. Instead: {alternative or 'run a safer equivalent'}. "
                            "This exact command stays blocked on this card until a human allows it.")
-    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=cfg["model"], **paid)
+    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=used["model"], **paid)
     return _pf_block(hold)
 
 
@@ -1258,7 +1532,7 @@ def _answer_question(cfg, task_id, board, reason, run_id) -> None:
     route, by = {"model": cfg["model"], "provider": cfg["provider"]}, "mom"
 
     def ask(r, messages, is_olymp=False):
-        res = _ask_model(r, messages, adv["max_output_tokens"], adv["timeout_s"], "kanban-question")
+        res, _ = _ask_model(r, messages, adv["max_output_tokens"], adv["timeout_s"], "kanban-question", mom=not is_olymp, task=task_id)
         cost = res.usage.cost_usd or 0.0
         usage["calls"] += 1
         usage["tokens_in"] += res.usage.input_tokens or 0
@@ -1284,6 +1558,8 @@ def _answer_question(cfg, task_id, board, reason, run_id) -> None:
                                            "the card stays blocked"))
     except _CoolingDown:
         return log("error", "cooldown")
+    except _Unavailable:
+        return log("error", "limited")
     except _Timeout:
         return log("error", "timeout")
     except Exception:
@@ -1864,6 +2140,7 @@ def register(ctx) -> None:
                       emoji="\U0001f9d0")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
+    ctx.register_hook("api_request_error", on_api_error)
     ctx.register_hook("on_human_input_request", on_human_input_request)
     ctx.register_hook("on_human_input_resolved", on_human_input_resolved)
     cfg = settings()

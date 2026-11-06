@@ -32,6 +32,35 @@ def board_activity(conn) -> list:
     return [(t, kb.list_comments(conn, t.id), kb.list_events(conn, t.id)) for t in kb.list_tasks(conn, include_archived=True)]
 
 
+def running_cards(conn) -> list:
+    """The cards that run now (``last_heartbeat_at`` tells the sweep which ones went quiet), read only."""
+    return kb.list_tasks(conn, status="running")
+
+
+def board_cards(conn) -> tuple:
+    """``(tasks, links)`` of the connected board: its live cards and the ``(parent, child)`` pairs between them, read only."""
+    tasks = kb.list_tasks(conn)
+    return tasks, {(parent, t.id) for t in tasks for parent in kb.parent_ids(conn, t.id)}
+
+
+def link(conn, parent_id, child_id) -> None:
+    """``pace`` chains cards with a parent link. Raises ValueError when Hermes refuses (a cycle, a running child)."""
+    kb.link_tasks(conn, parent_id, child_id)
+
+
+def unlink(conn, parent_id, child_id) -> bool:
+    return kb.unlink_tasks(conn, parent_id, child_id)
+
+
+def profile_name() -> str:
+    """The Hermes profile this process works for; quota health is kept per profile."""
+    try:
+        from hermes_cli.profiles import current_profile_name
+        return current_profile_name("default") or "default"
+    except Exception:
+        return "default"
+
+
 def last_event_id(conn, task_id, kind) -> "int | None":
     """Store id of the newest event of ``kind`` on a card: how a write calling-mom just made is told apart from outside help."""
     ids = [e.id for e in kb.list_events(conn, task_id) if e.kind == kind]
@@ -44,6 +73,8 @@ def check_board_read() -> "str | None":
         for slug in list_board_slugs()[:1]:
             with kb.scoped_current_board(slug), kbc.connect_closing() as conn:
                 board_activity(conn)
+                running_cards(conn)
+                board_cards(conn)
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
     return None
