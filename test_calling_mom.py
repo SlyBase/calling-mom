@@ -821,34 +821,6 @@ class LogPathTest(unittest.TestCase):
             os.environ["CALLING_MOM_LOG"] = saved
 
 
-class FeedbackTest(AdvisorTest):
-    """Audit: twice the worker refuted the advice in plain words, and nothing counted it."""
-
-    def reply(self, content):
-        from types import SimpleNamespace as NS
-        plugin.on_api_response(assistant_message=NS(content=content))
-
-    def feedback(self):
-        rows = [json.loads(x) for x in Path(os.environ["CALLING_MOM_LOG"]).read_text().splitlines()]
-        return [r["verdict"] for r in rows if r.get("kind") == "advice_feedback"]
-
-    def test_refuted_advice_is_counted_as_rejected(self):
-        self.stuck(3)
-        self.reply("")  # a tool-call-only reply says nothing yet
-        self.reply("The advisor's hypothesis is disproven: the secret matches.")
-        self.reply("ruled out again")  # only the first reply after the advice counts
-        self.assertEqual(self.feedback(), ["rejected"])
-
-    def test_other_replies_count_as_followed(self):
-        self.stuck(3)
-        self.reply("Good point, running the tests in the foreground now.")
-        self.assertEqual(self.feedback(), ["followed"])
-
-    def test_no_advice_no_feedback(self):
-        self.reply("disproven")
-        self.assertFalse(Path(os.environ["CALLING_MOM_LOG"]).exists() and self.feedback())
-
-
 class PromptTest(AdvisorTest):
     """Each kind of question gets its own system prompt; board chatter stays out of the context."""
 
@@ -1693,15 +1665,16 @@ class SlowMomTest(BudgetMixin, AdvisorFixture, unittest.TestCase):
         settle()
         self.assertEqual(self.llm.entered, 1)
 
-    def test_a_late_followed_verdict_counts_from_the_delivery_not_the_generation(self):
+    def test_late_advice_is_judged_from_its_delivery_not_its_generation(self):
+        self.llm._res.text = "Run `git status` now."
         self.stuck(3)
         self.llm.release.set()
         settle()
-        plugin.on_api_response(assistant_message=types.SimpleNamespace(content="Running the tests now."))
-        self.assertEqual(log_rows("advice_feedback"), [])    # the worker has not seen the advice yet
-        self.later()
-        plugin.on_api_response(assistant_message=types.SimpleNamespace(content="Good point, thanks."))
-        self.assertEqual([r["verdict"] for r in log_rows("advice_feedback")], ["followed"])
+        out = self.later(tool="terminal", command="git status")  # this result delivers the advice: it is no evidence yet
+        self.assertIn("[late advice]", out)
+        self.assertEqual(log_rows("advice_feedback"), [])
+        self.later(tool="terminal", command="git status --short")
+        self.assertEqual([r["result"] for r in log_rows("advice_feedback")], ["followed"])
 
     def test_a_failing_background_call_leaves_no_trace_on_the_worker(self):
         self.llm.boom = True

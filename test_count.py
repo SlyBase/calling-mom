@@ -247,5 +247,178 @@ class WaitingTest(TouchFixture, unittest.TestCase):
         self.assertEqual(self.state()["touches"][BOARD]["waiting"], {})
 
 
+class FeedbackFlowTest(base.AdvisorFixture, unittest.TestCase):
+    """Advice names `git status`: a later call of the run that starts with it is evidence, any other call is only action."""
+
+    def setUp(self):
+        super().setUp()
+        plugin._pending.clear()
+        self.llm._res.text = "The cause is a dirty tree. Run `git status`, then fix `src/app.py`."
+
+    def call(self, command="git status --short", tool="terminal", **args):
+        return plugin.on_tool_result(tool_name=tool, args=args or {"command": command}, result="ok", status="ok")
+
+    def results(self):
+        return [(r["result"], r["anchors"], r["match"]) for r in base.log_rows("advice_feedback")]
+
+    def test_a_matching_call_makes_the_advice_followed(self):
+        self.stuck(3)
+        self.assertEqual(self.results(), [])  # nothing is decided at delivery
+        self.call("git status --short")
+        self.assertEqual(self.results(), [("followed", 2, plugin.feedback.anchors("`git status`")[0].hash)])
+
+    def test_the_hash_and_not_the_text_goes_to_the_log(self):
+        self.stuck(3)
+        self.call("git status")
+        self.assertNotIn("git status", json.dumps(base.log_rows("advice_feedback")))
+
+    def test_any_other_call_makes_it_acted_when_the_run_ends(self):
+        self.stuck(3)
+        self.call("ls")
+        self.assertEqual(self.results(), [])
+        plugin._flush_feedback()
+        self.assertEqual(self.results(), [("acted", 2, None)])
+
+    def test_a_later_match_still_makes_it_followed(self):
+        self.stuck(3)
+        self.call("ls")
+        self.call("git status")
+        plugin._flush_feedback()
+        self.assertEqual([r[0] for r in self.results()], ["followed"])
+
+    def test_a_run_that_ends_without_another_call_ignored_the_advice(self):
+        self.stuck(3)
+        plugin._flush_feedback()
+        self.assertEqual(self.results(), [("ignored", 2, None)])
+
+    def test_advice_without_anchors_stays_unknown_at_once(self):
+        self.llm._res.text = "Root cause: X. Next: do Y."
+        self.stuck(3)
+        self.assertEqual(self.results(), [("unknown", 0, None)])
+        self.call("ls")
+        plugin._flush_feedback()
+        self.assertEqual(len(self.results()), 1)
+
+    def test_a_path_anchor_and_a_tool_anchor_are_evidence_too(self):
+        self.stuck(3)
+        self.call(tool="read_file", path="/repo/src/app.py")
+        self.assertEqual([r[0] for r in self.results()], ["followed"])
+        self.llm._res.text = "Use `read_file` on the log."
+        plugin._trackers.clear()
+        self.stuck(3)
+        self.call(tool="read_file", path="/x")
+        self.assertEqual([r[0] for r in self.results()], ["followed", "followed"])
+
+    def test_every_pending_advice_is_judged_by_itself(self):
+        self.stuck(3)
+        self.llm._res.text = "Try `pytest -x`."
+        plugin._trackers.clear()
+        self.stuck(3)
+        self.call("pytest -x tests")
+        plugin._flush_feedback()
+        self.assertEqual(sorted(r[0] for r in self.results()), ["acted", "followed"])
+
+    def test_the_second_opinion_tool_does_not_count_as_evidence_for_its_own_advice(self):
+        out = json.loads(plugin.handle_second_opinion({"question": "which design?"}))
+        self.assertIn("opinion", out)
+        self.call(tool="second_opinion", question="which design?")
+        plugin._flush_feedback()
+        self.assertEqual(self.results(), [("ignored", 2, None)])
+
+    def test_another_run_is_not_judged(self):
+        self.stuck(3)
+        os.environ["HERMES_KANBAN_RUN_ID"] = "2"
+        self.call("git status")
+        os.environ["HERMES_KANBAN_RUN_ID"] = "1"
+        self.assertEqual(self.results(), [])
+
+    def test_the_flush_of_one_run_leaves_the_others(self):
+        self.stuck(3)
+        plugin._flush_feedback(("other", "9"))
+        self.assertEqual(self.results(), [])
+        plugin._flush_feedback((self.tid, "1"))
+        self.assertEqual([r[0] for r in self.results()], ["ignored"])
+
+    def test_the_reply_text_no_longer_decides_anything(self):
+        self.stuck(3)
+        plugin.on_api_response(assistant_message=NS(content="The advisor's hypothesis is disproven."))
+        self.assertEqual(self.results(), [])
+
+
+class ChatWaitTest(unittest.TestCase):
+    """The time you wait on a prompt in chat: kind, seconds, outcome. Never the prompt, never the answer."""
+
+    def setUp(self):
+        os.environ["CALLING_MOM"] = "on"
+        os.environ["CALLING_MOM_LOG"] = str(Path(tempfile.mkdtemp()) / "chat.jsonl")
+        self.saved = json.dumps(plugin.DEFAULTS["count"])
+        plugin._waits.clear()
+
+    def tearDown(self):
+        plugin.DEFAULTS["count"].update(json.loads(self.saved))
+
+    def switch(self, on=True):
+        plugin.DEFAULTS["count"]["chat_waits"] = on
+
+    def wait(self, kind="clarify", outcome="answered", request_id="r1", prompt="rm -rf / ? my-password", seconds=0):
+        plugin.on_human_input_request(kind=kind, request_id=request_id, prompt=prompt, session_id="s", platform="cli")
+        if seconds:
+            plugin._waits[request_id] -= seconds
+        plugin.on_human_input_resolved(kind=kind, request_id=request_id, prompt=prompt, outcome=outcome, session_id="s")
+
+    def rows(self):
+        return base.log_rows("touch")
+
+    def test_it_is_off_until_setup_asks(self):
+        self.assertFalse(plugin.settings()["count"]["chat_waits"])
+        self.wait()
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(plugin._waits, {})
+
+    def test_a_wait_is_one_row_with_kind_seconds_and_outcome(self):
+        self.switch()
+        self.wait(kind="approval", outcome="denied", seconds=42)
+        (row,) = self.rows()
+        self.assertEqual((row["src"], row["what"], row["wait"], row["outcome"], row["store_id"]), ("chat", "chat_wait", "approval", "denied", "r1"))
+        self.assertIn(row["wait_s"], (42, 43))
+        self.assertEqual(plugin._waits, {})
+
+    def test_neither_the_prompt_nor_the_answer_reaches_the_log(self):
+        self.switch()
+        self.wait()
+        self.assertNotIn("password", Path(os.environ["CALLING_MOM_LOG"]).read_text())
+
+    def test_every_kind_and_an_odd_value_are_words_of_a_short_list(self):
+        self.switch()
+        for kind in ("clarify", "approval", "sudo", "something new", ""):
+            self.wait(kind=kind, request_id=f"r-{kind}", outcome="Weird Outcome!")
+        self.assertEqual([r["wait"] for r in self.rows()], ["clarify", "approval", "sudo", "other", "other"])
+        self.assertEqual({r["outcome"] for r in self.rows()}, {"other"})
+
+    def test_a_wait_that_started_before_this_process_has_no_duration(self):
+        self.switch()
+        plugin.on_human_input_resolved(kind="sudo", request_id="old", outcome="timeout")
+        (row,) = self.rows()
+        self.assertNotIn("wait_s", row)
+
+    def test_the_kill_switch_counts_nothing(self):
+        self.switch()
+        os.environ["CALLING_MOM"] = "off"
+        self.wait()
+        self.assertEqual(self.rows(), [])
+
+    def test_open_waits_are_bounded(self):
+        self.switch()
+        for i in range(150):
+            plugin.on_human_input_request(request_id=f"r{i}", kind="clarify")
+        self.assertLessEqual(len(plugin._waits), 100)
+        self.assertIn("r149", plugin._waits)
+
+    def test_a_request_without_an_id_is_ignored(self):
+        self.switch()
+        plugin.on_human_input_request(kind="clarify")
+        self.assertEqual(plugin._waits, {})
+
+
 if __name__ == "__main__":
     unittest.main()

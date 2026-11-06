@@ -22,6 +22,7 @@ Config (config.yaml, all optional)::
 Kill switch: ``CALLING_MOM=off`` in the environment.
 """
 
+import atexit
 import contextlib
 import hashlib
 import importlib.util
@@ -81,6 +82,13 @@ except ImportError:  # loaded by path (tests, plugin doctor)
     _precedents_spec = importlib.util.spec_from_file_location("calling_mom_precedents", Path(__file__).with_name("precedents.py"))
     precedents = importlib.util.module_from_spec(_precedents_spec)
     _precedents_spec.loader.exec_module(precedents)
+
+try:
+    from . import feedback
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _feedback_spec = importlib.util.spec_from_file_location("calling_mom_feedback", Path(__file__).with_name("feedback.py"))
+    feedback = importlib.util.module_from_spec(_feedback_spec)
+    _feedback_spec.loader.exec_module(feedback)
 
 try:
     from . import touches
@@ -155,16 +163,13 @@ _watch_used: dict = {}  # (task, run) -> `watch` reviews so far (a NO_ACTION ans
 _arch_seen: set = set()  # (task, run, path-or-command) already reviewed
 _redirected: set = set()  # (task, run) whose completion was already handed to the reviewer
 _completion_checked: set = set()  # (task, run) whose completion summary was already checked
-_awaiting_reply: set = set()  # (task, run) that got advice; the next worker reply says if it helped
+_pending: dict = {}  # (task, run) -> advice delivered to the worker with its anchors, not judged yet (see _delivered)
 _lock = threading.Lock()
 _inflight: dict = {}  # (task, run) -> advice call on its background thread (at most one per run)
 _late: dict = {}  # (task, run) -> advice that missed its tool result, delivered with the next one
 _verify_runs: dict = {}  # (task, run) -> the current verify command (see _Verify)
 _edits: dict = {}  # (task, run) -> file-editing tool calls so far (workspace state outside git)
 _EDIT_TOOLS = {"write_file", "patch"}
-_REFUTED = re.compile(
-    r"disprov|refut|ruled out|widerleg|not the (cause|issue|problem)|already (resolved|fixed|verified|done)|"
-    r"does(n't| not) apply|is (wrong|incorrect)", re.I)
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"  # author of comments written by versions before 1.3.1; new ones carry the worker's profile
 _UNAVAILABLE = "[advisor unavailable]"
@@ -820,7 +825,7 @@ def _advise_soon(key, category, signal, note="", t0=None) -> "str | None":
             box["abandoned"] = True
             return None
     if box["text"]:
-        _awaiting_reply.add(key)
+        _delivered(key, box["text"])
     return box["text"]
 
 
@@ -830,9 +835,9 @@ def _take_late(key) -> "str | None":
         items = _late.pop(key, None)
     if not items:
         return None
-    for _, signal, started in items:
+    for text, signal, started in items:
         _trace_row("advice_late", task=key[0], run=key[1], signal=signal, ms=int((time.monotonic() - started) * 1000))
-    _awaiting_reply.add(key)
+        _delivered(key, text)
     return "\n\n".join(f"[late advice] {text}" for text, _, _ in items)
 
 
@@ -1626,7 +1631,7 @@ def handle_second_opinion(args, **_):
     advice = _advise(key, "architecture", "second_opinion", note=note) if _enabled() else None
     if not advice:
         return json.dumps({"error": "second opinion unavailable (disabled, budget used, local-only card, or provider error)"})
-    _awaiting_reply.add(key)
+    _delivered(key, advice)
     return json.dumps({"opinion": advice.split("] ", 1)[-1]})
 
 
@@ -1709,6 +1714,8 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
         text = error_message or (result if isinstance(result, str) else "")
         _remember(key, tool_name, args or {}, ok, text)
         event = tracker.feed(tool_name, args or {}, ok, text, error_type)
+        if tool_name != "second_opinion":  # its own call is the delivery of its advice, not a reaction to it
+            _observe_call(key, tool_name, args)
         row = {"ts": int(time.time()), "task": key[0], "run": key[1], "pid": os.getpid(), **event}
         path = _log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1737,15 +1744,74 @@ def _log_usage(key, usage) -> None:
 
 
 def on_api_response(assistant_message=None, usage=None, **_):
-    """post_api_request: tokens of a worker request; the first worker text after advice tells whether it was followed or refuted."""
-    key = _worker_key()
-    _log_usage(key, usage)
-    content = str(getattr(assistant_message, "content", "") or "").strip()
-    if key not in _awaiting_reply or not content:
+    """post_api_request: the tokens of a worker request (the report prices them)."""
+    _log_usage(_worker_key(), usage)
+
+
+def _feedback_row(key, result, advice, hit=None) -> None:
+    _trace_row("advice_feedback", task=key[0], run=key[1], result=result, anchors=len(advice["anchors"]),
+               match=hit.hash if hit else None)
+
+
+def _delivered(key, text) -> None:
+    """Advice reached the worker. Its anchors (commands, paths, tool names in backticks) stay in memory for the run;
+    advice without any gives no evidence either way and is ``unknown`` at once."""
+    advice = {"anchors": feedback.anchors(text), "acted": False}
+    if advice["anchors"]:
+        _pending.setdefault(key, []).append(advice)
+    else:
+        _feedback_row(key, "unknown", advice)
+
+
+def _observe_call(key, tool_name, args) -> None:
+    """A tool call of the run: a call that uses an anchor makes the advice ``followed``; any other call is only action."""
+    for advice in list(_pending.get(key, ())):
+        hit = next((a for a in advice["anchors"] if feedback.matches(a, tool_name, args)), None)
+        if hit:
+            _pending[key].remove(advice)
+            _feedback_row(key, "followed", advice, hit)
+        else:
+            advice["acted"] = True
+
+
+def _flush_feedback(only=None) -> None:
+    """The run ends (this process exits): advice with no match is ``acted`` when the worker did anything after it, else ``ignored``.
+    ponytail: a worker killed hard never flushes; its open advice is not counted, rather than guessed."""
+    for key in [only] if only else list(_pending):
+        for advice in _pending.pop(key, ()):
+            _feedback_row(key, "acted" if advice["acted"] else "ignored", advice)
+
+
+_waits: dict = {}  # request id -> monotonic start of a human-input wait in this process
+_WAIT_KINDS = ("clarify", "approval", "sudo")
+
+
+def _chat_waits_on() -> bool:
+    return _enabled() and settings()["count"]["chat_waits"]
+
+
+def _word(value, allowed=None) -> str:
+    """A short lowercase word from a Hermes payload field, else ``other``: nothing free-form reaches the log."""
+    value = str(value or "")
+    return value if (value in allowed if allowed else re.fullmatch(r"[a-z_]{1,24}", value)) else "other"
+
+
+def on_human_input_request(request_id="", **_):
+    """``on_human_input_request``: a prompt is about to wait for you (clarify, approval, sudo). Counts when the start
+    happened; the prompt text in the payload is never read. Observer, never raises."""
+    if request_id and _chat_waits_on():
+        if len(_waits) >= 100:  # ponytail: a prompt that never resolves leaks one entry; the oldest goes at 100
+            _waits.pop(next(iter(_waits)))
+        _waits[str(request_id)] = time.monotonic()
+
+
+def on_human_input_resolved(request_id="", kind="", outcome="", **_):
+    """``on_human_input_resolved``: the wait ended. One ``touch`` row: kind, seconds, outcome. Never the prompt or the answer."""
+    if not _chat_waits_on():
         return
-    _awaiting_reply.discard(key)
-    # ponytail: keyword heuristic; a wrong label only skews the ratio, it never changes the run
-    _trace_row("advice_feedback", task=key[0], verdict="rejected" if _REFUTED.search(content[:2000]) else "followed")
+    start = _waits.pop(str(request_id), None)
+    _trace_row("touch", src="chat", what="chat_wait", wait=_word(kind, _WAIT_KINDS), outcome=_word(outcome), store_id=str(request_id)[:32],
+               **({} if start is None else {"wait_s": round(time.monotonic() - start)}))
 
 
 _TIP = (
@@ -1775,6 +1841,7 @@ def register(ctx) -> None:
     if _core.ERROR:  # a Hermes update removed something we use: no hooks, but `doctor` still runs; say why once
         logger.warning("calling-mom: not active, %s. Run: hermes calling-mom doctor", _core.ERROR)
         return
+    atexit.register(_flush_feedback)
     ctx.register_hook("kanban_task_claimed", on_claimed)
     ctx.register_hook("kanban_task_blocked", on_blocked)
     ctx.register_hook("kanban_task_blocked", on_question)
@@ -1790,6 +1857,8 @@ def register(ctx) -> None:
                       emoji="\U0001f9d0")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
+    ctx.register_hook("on_human_input_request", on_human_input_request)
+    ctx.register_hook("on_human_input_resolved", on_human_input_resolved)
     cfg = settings()
     logger.info(
         "calling-mom installed: block -> %s via %s; marker %s",
