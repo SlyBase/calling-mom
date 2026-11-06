@@ -84,6 +84,12 @@ versioning: [SemVer](https://semver.org/).
   state it ran on (git HEAD plus `git status` hash, otherwise no file edit since the start). Default `verify.timeout_s`
   is now 600 (was 120). The `verify` log row has a `state` (`started`, `pass`, `fail`, `timeout`, `stale`) and `ms`.
 
+- **Pre-flight holds a history rewrite on a shared branch even when the card asks for it.** In three demo runs the
+  reviewer answered GO to `git push --force[-with-lease] origin main` because the card named it, so the HOLD never
+  fired. Its prompt now says that a force push to main, master or a shared branch is a HOLD whatever the task says
+  (alternative: a normal commit or a branch push); a person can still release it (`--allow-once`). With this prompt
+  all four demo triggers fired in two runs in a row. Other critical commands stay a model judgement.
+
 ### Compatibility
 - `requires_hermes` stays `>=0.22`. The agent half (hooks, pre-flight, Mom answers, precedents, report, CLI) runs on
   0.22. Only the card badges need the Desktop app 0.22.6 (the badge slot `KANBAN_CARD_AREAS.badges` is not in

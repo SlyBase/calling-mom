@@ -133,7 +133,7 @@ The log it watches is the one of the installation: `CALLING_MOM_LOG`, else `<Her
 
 Limits: a model decides whether the stuck card gets stuck (it must repeat the failing command), and whether Mom says
 HOLD, so a run can miss a trigger. The script reports it as `NOT FIRED`; run it again. Run it with a worker profile you
-can throw away: in one test Hermes' own approval gate blocked the force push (Mom had said GO), and the worker then ran
+can throw away: in one test Hermes' own approval gate blocked the force push (Mom had said GO; since 1.4.0 her prompt holds a force push to a shared branch whatever the card says), and the worker then ran
 `hermes config set approvals.single_query_mode approve` on its own profile. Mom's pre-flight held the retry, and the
 worker reverted the setting. Measured on 2026-11-05 with a local 27B worker (Swift-27B), Mom = Sonnet: all four triggers
 fired at +7:44 and +7:31 in two runs in a row. With the first, looser card texts one run missed the stuck card and one
