@@ -1,4 +1,4 @@
-"""Banner for the Hermes plugin "calling mom", official-plugin banner style.
+"""Banner for the Hermes plugin "Calling Mom", official-plugin banner style.
 
 Reference: hermes-official-plugins/assets/*.jpg (1200x600): distressed black
 paper with folds and worn edges, ivory engraving, red disc behind the head,

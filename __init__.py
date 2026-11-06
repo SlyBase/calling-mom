@@ -1680,7 +1680,7 @@ def register(ctx) -> None:
     _ctx = ctx
     register_cli = getattr(ctx, "register_cli_command", None)
     if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
-        register_cli(name="calling-mom", help="set up, inspect and test the Calling mom plugin",
+        register_cli(name="calling-mom", help="set up, inspect and test the Calling Mom plugin",
                      setup_fn=cli.setup_parser,
                      handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card, attention_report),
                      description="setup: choose mom/olymp from your providers. status: show setup and usage. "

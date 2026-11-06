@@ -1,4 +1,4 @@
-"""Backend of the Calling mom Desktop half: routes under /api/plugins/calling-mom/.
+"""Backend of the Calling Mom Desktop half: routes under /api/plugins/calling-mom/.
 
 Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanban boards; the only write is
 POST /answer, which goes through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``).

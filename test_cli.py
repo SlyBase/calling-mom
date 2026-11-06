@@ -687,6 +687,22 @@ class CommandWiringTest(unittest.TestCase):
         self.assertEqual(saved["calling_mom"]["mom"]["provider"], "openrouter")
         self.assertNotIn("Write it?", s.text)
 
+    def test_setup_and_doctor_point_to_the_desktop_note(self):
+        """1.4.1: one hint line, last in the setup summary; in doctor an info line that never changes the exit code."""
+        s = Script("1", "1", "3", "1")
+        env = cli.Env(load=lambda: {}, save=lambda cfg: None, providers=lambda: LISTING, boards=lambda: ["default"],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask,
+                      say=s.say, cron=lambda: None, sweeps=lambda: [])
+        self.assertEqual(cli.cmd_setup(env, cron=False), 0)
+        self.assertEqual(s.said[-1], cli.DESKTOP_HINT)
+        self.assertIn("Desktop on another machine", cli.DESKTOP_HINT)
+        d = Script()
+        env2 = cli.Env(load=lambda: {}, save=lambda c: None, providers=lambda: [], boards=lambda: [],
+                       spent=lambda: {}, probe=lambda p, m: None, version="0.1.0", internals=True,
+                       ask=d.ask, say=d.say, cron=lambda: None, sweeps=lambda: [("/h", "j1", "scheduled")])
+        self.assertEqual(cli.cmd_doctor(env2), 1)  # the failing check still decides
+        self.assertEqual(d.said[-1], "INFO  " + cli.DESKTOP_HINT)
+
     def test_doctor_returns_one_on_a_failed_check(self):
         s = Script()
         env = cli.Env(load=lambda: {}, save=lambda c: None, providers=lambda: [], boards=lambda: [],
