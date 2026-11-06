@@ -481,10 +481,10 @@ class DoctorTest(unittest.TestCase):
 
     ONE = [("/h", "j1", "scheduled")]
 
-    def run_doctor(self, cfg=None, llm=None, probe=None, version="0.22.5", internals=True, sweeps=None):
+    def run_doctor(self, cfg=None, llm=None, probe=None, version="0.22.5", internals=True, sweeps=None, board_read=False):
         probe = probe or (lambda provider, model: None)
         return cli.run_checks(cfg or self.cfg(), self.LLM if llm is None else llm, probe, version, internals,
-                              self.ONE if sweeps is None else sweeps)
+                              self.ONE if sweeps is None else sweeps, board_read)
 
     def by_name(self, checks):
         return {n: (s, d) for n, s, d in checks}
@@ -492,6 +492,14 @@ class DoctorTest(unittest.TestCase):
     def test_everything_fine(self):
         checks = self.run_doctor()
         self.assertTrue(all(s == "ok" for _, s, _ in checks), checks)
+
+    def test_the_board_read_is_checked_when_asked(self):
+        self.assertNotIn("board read", self.by_name(self.run_doctor()))
+        self.assertEqual(self.by_name(self.run_doctor(board_read=None))["board read"], ("ok", ""))
+        s, d = self.by_name(self.run_doctor(board_read="AttributeError: list_events is gone"))["board read"]
+        self.assertEqual(s, "fail")
+        self.assertIn("list_events is gone", d)
+        self.assertIn("outside help", d)
 
     def test_old_hermes_fails_with_the_minimum_named(self):
         s, d = self.by_name(self.run_doctor(version="0.10.0"))["hermes version"]
@@ -764,6 +772,68 @@ class AnswerSetupTest(unittest.TestCase):
         self.assertIn("answer  : off", off)
         self.assertIn("answer  : on", "\n".join(cli.status_lines({**base, "answer": {"enabled": True, "boards": []}}, {})))
         self.assertIn("no board", "\n".join(cli.status_lines({**base, "answer": {"enabled": True, "boards": []}}, {})))
+
+
+class ChatWaitsSetupTest(unittest.TestCase):
+    """setup asks: "Count how long you wait on prompts in chat?" (off until you say yes; kinds, seconds, outcome, never text)."""
+    ANSWERS = ("2", "1", "2", "2", "2", "")  # mom, olymp, board, then the answer question: enter = no
+
+    def test_without_a_choice_the_block_is_left_alone(self):
+        self.assertNotIn("calling_mom.count.chat_waits", cli.updates((SUB, "claude-sonnet-5-5"), None, ["coding"], {}))
+
+    def test_the_choice_is_written_either_way(self):
+        for choice in (True, False):
+            upd = cli.updates((SUB, "claude-sonnet-5-5"), None, ["coding"], {}, chat_waits=choice)
+            self.assertIs(upd["calling_mom.count.chat_waits"], choice)
+
+    def test_the_question_is_asked_last_and_enter_means_no(self):
+        s = Script(*self.ANSWERS)
+        upd, summary = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIn("Count how long you wait on prompts in chat?", s.text)
+        self.assertIs(upd["calling_mom.count.chat_waits"], False)
+        self.assertIn("chat    : waits not counted", summary)
+
+    def test_yes_in_the_interactive_setup(self):
+        s = Script(*self.ANSWERS, "2")
+        upd, summary = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIs(upd["calling_mom.count.chat_waits"], True)
+        self.assertIn("chat    : waits counted (kind, seconds, outcome; never the text)", summary)
+
+    def test_a_setup_that_already_counts_keeps_yes_as_the_default(self):
+        cfg = {"calling_mom": {"count": {"chat_waits": True}}}
+        s = Script("", "", "", "", "", "", "")
+        upd, _ = cli.setup(cfg, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIs(upd["calling_mom.count.chat_waits"], True)
+
+    def test_the_flag_answers_for_you_and_no_question_is_asked(self):
+        s = Script(*self.ANSWERS[:5])
+        upd, _ = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say, answer=False, chat_waits=True)
+        self.assertIs(upd["calling_mom.count.chat_waits"], True)
+        self.assertNotIn("Count how long", s.text)
+
+    def test_flags_set_it_without_a_question_and_no_flag_leaves_it_alone(self):
+        saved = {}
+        e = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=Script().ask,
+                    say=Script().say, cron=lambda: None, sweeps=lambda: [], interactive=False)
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", chat_waits=True, cron=False)
+        self.assertEqual(saved["calling_mom"]["count"], {"chat_waits": True})
+        saved.clear()
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", cron=False)
+        self.assertNotIn("count", saved["calling_mom"])
+
+    def test_status_says_whether_chat_waits_are_counted(self):
+        base = StatusTest.CFG
+        self.assertIn("count   : chat waits on", "\n".join(cli.status_lines({**base, "count": {"chat_waits": True}}, {})))
+        self.assertIn("count   : chat waits off", "\n".join(cli.status_lines(base, {})))
+
+    def test_the_parser_knows_the_flags(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        cli.setup_parser(parser)
+        self.assertIs(parser.parse_args(["setup", "--chat-waits"]).chat_waits, True)
+        self.assertIs(parser.parse_args(["setup", "--no-chat-waits"]).chat_waits, False)
+        self.assertIsNone(parser.parse_args(["setup"]).chat_waits)
 
 
 class AnswerCommandTest(unittest.TestCase):

@@ -84,6 +84,38 @@ class MissingInternalsTest(unittest.TestCase):
         self.assertFalse(core.has_menu())
 
 
+class BoardReadTest(unittest.TestCase):
+    """The reads of the sweep (who else touched a board) live in _core.py, with a doctor check."""
+
+    def setUp(self):
+        self.core = load()
+        self.tid = test_calling_mom.with_conn(lambda c: test_calling_mom.kb.create_task(c, title="read me", assignee="w"))
+        test_calling_mom.with_conn(lambda c: test_calling_mom.kb.add_comment(c, self.tid, "default", "hello"))
+
+    def test_board_activity_lists_every_card_with_its_comments_and_events(self):
+        cards = test_calling_mom.with_conn(self.core.board_activity)
+        task, comments, events = next(c for c in cards if c[0].id == self.tid)
+        self.assertEqual(([c.author for c in comments], "created" in [e.kind for e in events]), (["default"], True))
+
+    def test_the_last_event_of_a_kind_and_none_when_there_is_none(self):
+        found = test_calling_mom.with_conn(lambda c: self.core.last_event_id(c, self.tid, "created"))
+        self.assertIsInstance(found, int)
+        self.assertIsNone(test_calling_mom.with_conn(lambda c: self.core.last_event_id(c, self.tid, "no_such_kind")))
+
+    def test_the_doctor_check_reads_the_first_board_and_says_nothing_when_it_works(self):
+        with mock.patch.object(self.core, "list_board_slugs", return_value=["default"]):
+            self.assertIsNone(self.core.check_board_read())
+
+    def test_the_doctor_check_without_a_board_has_nothing_to_read(self):
+        with mock.patch.object(self.core, "list_board_slugs", return_value=[]):
+            self.assertIsNone(self.core.check_board_read())
+
+    def test_the_doctor_check_names_the_error_when_the_read_breaks(self):
+        with mock.patch.object(self.core, "list_board_slugs", return_value=["default"]), \
+                mock.patch.object(self.core, "board_activity", side_effect=AttributeError("list_events is gone")):
+            self.assertEqual(self.core.check_board_read(), "AttributeError: list_events is gone")
+
+
 class HookBudgetTest(unittest.TestCase):
     """Hermes bounds hot-path hooks by plugins.hook_callback_timeout; the plugin sizes all its waits from it."""
 

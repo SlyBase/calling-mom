@@ -182,9 +182,10 @@ def _get(cfg, dotted, default=None):
     return cfg
 
 
-def updates(mom, olymp, boards, cfg, answer=None) -> dict:
+def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None) -> dict:
     """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay.
-    ``answer`` None leaves the answer block alone; True/False switches "Mom answers worker questions" on/off."""
+    ``answer`` None leaves the answer block alone; True/False switches "Mom answers worker questions" on/off.
+    ``chat_waits`` None leaves the count block alone; True/False switches the counting of your waits in chat."""
     pairs = [p for p in (mom, olymp) if p]
     upd = {
         "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
@@ -199,6 +200,8 @@ def updates(mom, olymp, boards, cfg, answer=None) -> dict:
         upd["calling_mom.answer.enabled"] = answer
         if answer:
             upd["calling_mom.answer.boards"] = _boards(_get(cfg, "calling_mom.answer.boards", []), boards)
+    if chat_waits is not None:
+        upd["calling_mom.count.chat_waits"] = chat_waits
     return upd
 
 
@@ -213,9 +216,9 @@ def apply_updates(cfg, upd) -> dict:
     return out
 
 
-def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None):
+def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None):
     """Ask (or take a preset), return ``(updates, summary_lines)``. Writes nothing. ``answer`` True/False skips the
-    question "Let Mom answer worker questions before they reach you?"."""
+    question "Let Mom answer worker questions before they reach you?", ``chat_waits`` the one about counting your waits in chat."""
     if preset:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
@@ -235,15 +238,22 @@ def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), a
                       [("no: every question goes to me", False),
                        ("yes: on the same boards (she answers only what the card settles, anything else becomes a brief for you)", True)],
                       ask, say, other=False, choose=choose, default=int(was_on))
-    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer)
+    if chat_waits is None:
+        was_on = bool(_get(cfg, "calling_mom.count.chat_waits", False))
+        chat_waits = pick("Count how long you wait on prompts in chat?",
+                          [("no", False), ("yes: kind, seconds and outcome of each wait; never the prompt or your answer", True)],
+                          ask, say, other=False, choose=choose, default=int(was_on))
+    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits)
 
 
-def _result(cfg, mom, olymp, boards, answer=None):
-    upd = updates(mom, olymp, boards, cfg, answer)
+def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None):
+    upd = updates(mom, olymp, boards, cfg, answer, chat_waits)
     summary = [f"mom     : {mom[1]} ({mom[0]})", f"olymp   : {f'{olymp[1]} ({olymp[0]})' if olymp else 'off'}",
                f"boards  : {', '.join(upd['calling_mom.advisor.boards']) or '(none)'}"]
     if answer is not None:
         summary.append(f"answer  : on (boards: {', '.join(upd['calling_mom.answer.boards'])})" if answer else "answer  : off")
+    if chat_waits is not None:
+        summary.append("chat    : waits counted (kind, seconds, outcome; never the text)" if chat_waits else "chat    : waits not counted")
     return upd, summary
 
 
@@ -326,6 +336,7 @@ def status_lines(cm, spent, errors=None) -> list:
     ans = cm.get("answer") or {}
     answer_boards = ans.get("boards") or []
     lines.append(f"answer  : on, boards: {', '.join(answer_boards) or '(none)'}" if ans.get("enabled") else "answer  : off")
+    lines.append(f"count   : chat waits {'on' if (cm.get('count') or {}).get('chat_waits') else 'off'} (kind, seconds, outcome; never the text)")
     if ans.get("enabled") and not answer_boards:
         lines.append("warning : answer is on but no board is listed, Mom answers nothing (run: hermes calling-mom setup)")
     if adv.get("enabled") and not boards:
@@ -368,9 +379,10 @@ def _sweep_check(sweeps):
     return "warn", f"{len(active)} active sweep jobs: {ids}. Keep one: hermes cron remove <id> in that home"
 
 
-def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
+def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False) -> list:
     """``[(name, "ok"|"warn"|"fail", detail)]``. Live calls only if the static checks passed.
-    ``sweeps`` = ``find_sweeps()`` result; None skips the cron check."""
+    ``sweeps`` = ``find_sweeps()`` result; None skips the cron check.
+    ``board_read`` = ``_core.check_board_read()`` result (None: the board reads work, text: the error); False skips the check."""
     out = []
 
     def add(name, status, detail=""):
@@ -408,6 +420,9 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None) -> list:
         add("advisor", "warn", "off or no board opted in: nothing is sent to the mom or olymp")
     if sweeps is not None:
         add("sweep cron", *_sweep_check(sweeps))
+    if board_read is not False:
+        add("board read", "ok" if board_read is None else "fail",
+            "" if board_read is None else f"{board_read}: Hermes changed what the sweep reads, outside help is not counted")
     if static_ok:
         tiers = [("mom call", sp, sm)] + ([("olymp call", mp, mm)] if olymp_on else [])
         for name, prov, model in tiers:
@@ -447,6 +462,7 @@ class Env:
     answer: Optional[Callable] = None  # the plugin's answer_card
     report: Optional[Callable] = None  # the plugin's attention_report: (days, board, since, until) -> dict
     precedents_path: Optional[Callable] = None  # () -> Path of logs/calling-mom-precedents.jsonl
+    board_read: Optional[Callable] = None  # () -> None when the sweep's board reads work, else the error text
 
 
 def _blocks(env):
@@ -454,7 +470,7 @@ def _blocks(env):
     return (cfg.get("calling_mom") or {}), (_get(cfg, "plugins.entries.calling-mom.llm", {}) or {})
 
 
-def _plan(env, cfg, preset, mom, olymp, boards, answer=None):
+def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None):
     """Updates and summary: from flags when they say everything, otherwise by asking."""
     routes = env.routes()
     if (olymp or boards) and not (mom or preset):
@@ -467,7 +483,7 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None):
                 raise SetupError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
             pair_mom, pair_olymp = PRESETS[preset]["mom"], PRESETS[preset]["olymp"]
         chosen = parse_boards(boards) if boards else ([] if _get(cfg, "calling_mom.advisor.boards") else ["*"])
-        return _result(cfg, pair_mom, pair_olymp, chosen, answer)
+        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits)
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
                          "optionally --olymp, --boards and --cron/--no-cron.")
@@ -475,13 +491,13 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None):
     if hint:
         env.say(hint)
     return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes,
-                 answer=answer)
+                 answer=answer, chat_waits=chat_waits)
 
 
-def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None) -> int:
+def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None) -> int:
     cfg = env.load()
     try:
-        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer)
+        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits)
     except SetupError as exc:
         env.say(str(exc))
         return 2
@@ -560,7 +576,7 @@ def cmd_precedents(env, action="list", pid=None) -> int:
 
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
-    checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps())
+    checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps(), env.board_read() if env.board_read else False)
     for name, status, detail in checks:
         env.say(f"{ {'ok': 'OK  ', 'warn': 'WARN', 'fail': 'FAIL'}[status] }  {name:<17} {detail}".rstrip())
     return exit_code(checks)
@@ -604,7 +620,7 @@ def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
                errors=lambda: count_errors(log_path()), answer=answer,
                report=lambda days, board, since=None, until=None: build_report(days, board, since=since, until=until),
-               precedents_path=lambda: precedents.path_for(log_path()))
+               precedents_path=lambda: precedents.path_for(log_path()), board_read=core.check_board_read)
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -618,6 +634,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
                    help="create the sweep cron job (default: yes, unless one exists)")
     s.add_argument("--answer", action=argparse.BooleanOptionalAction, default=None,
                    help="let Mom answer worker questions on these boards (default: ask; with flags, keep the current choice)")
+    s.add_argument("--chat-waits", action=argparse.BooleanOptionalAction, default=None,
+                   help="count how long you wait on prompts in chat: kind, seconds, outcome (default: ask; with flags, keep the current choice)")
     s.add_argument("--yes", action="store_true", help="accepted for scripts; setup never asks before writing")
     a = sub.add_parser("answer", help="answer a card that carries Mom's brief or a pre-flight HOLD")
     a.add_argument("task", metavar="TASK", help="the card id")
@@ -644,7 +662,7 @@ def dispatch(args, spent, effective, log_path, core, answer=None, build_report=N
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron,
-                         answer=args.answer)
+                         answer=args.answer, chat_waits=args.chat_waits)
     if cmd == "answer":
         return cmd_answer(env, args.task, board=args.board or core.kb.get_current_board(), text=args.text,
                           accept=args.accept, allow_once=args.allow_once)
