@@ -3,7 +3,7 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
-## [1.4.0] - unreleased
+## [1.4.0] - 2026-11-06
 
 ### Added
 - **Demo kit** (`scripts/demo.py --assignee <profile> [--board B] [--reset]`): four cards on a board of their own, in a
@@ -83,6 +83,14 @@ versioning: [SemVer](https://semver.org/).
   `kanban_complete` is blocked with `verify running` until the result is in; a result is valid only for the workspace
   state it ran on (git HEAD plus `git status` hash, otherwise no file edit since the start). Default `verify.timeout_s`
   is now 600 (was 120). The `verify` log row has a `state` (`started`, `pass`, `fail`, `timeout`, `stale`) and `ms`.
+
+### Compatibility
+- `requires_hermes` stays `>=0.22`. The agent half (hooks, pre-flight, Mom answers, precedents, report, CLI) runs on
+  0.22. Only the card badges need the Desktop app 0.22.6 (the badge slot `KANBAN_CARD_AREAS.badges` is not in
+  0.22.5): `desktop/plugin.js` checks for the slot and an older app loads the page without badges. Raising the floor
+  to 0.22.6 would lock out 0.22.x users of the agent half to protect one cosmetic feature.
+- The release archive now ships `desktop/` and `dashboard/`; CI compiles every module and script and checks that the
+  archive list names every imported module and plugin directory.
 
 ## [1.3.2] - 2026-11-03
 

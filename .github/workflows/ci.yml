@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   static:
-    # The full gate (184 tests, 100 % coverage, copy drift) needs a Hermes venv and is run
+    # The full gate (all tests, 100 % coverage, copy drift) needs a Hermes venv and is run
     # by `check.py` on the host -- see README "Release gate". CI covers what a bare runner can.
     name: static checks
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: compile every module
-        run: python -m py_compile __init__.py _core.py metrics.py signals.py test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py cli.py rules.py report.py test_report.py precedents.py test_precedents.py test_rules.py test_dashboard.py dashboard/plugin_api.py scripts/demo.py test_demo.py linecov.py check.py
+        run: python -m py_compile __init__.py _core.py metrics.py signals.py test_signals.py test_calling_mom.py test_core.py test_metrics.py test_matrix.py test_cli.py cli.py rules.py report.py test_report.py precedents.py test_precedents.py test_rules.py test_dashboard.py dashboard/plugin_api.py scripts/demo.py scripts/smoke.py scripts/sweep.py test_demo.py linecov.py check.py
 
       - name: plugin manifest is valid YAML with the required keys
         run: |
@@ -59,10 +59,11 @@ jobs:
       - name: release archive ships every module the plugin imports
         run: |
           python - <<'PY'
-          import re
+          import os, re
           src = open("__init__.py").read()
           needed = set(re.findall(r'spec_from_file_location\("[^"]+", Path\(__file__\)\.with_name\("([^"]+)"\)', src))
           needed |= {m + ".py" for m in re.findall(r"^\s+from \. import (\w+)", src, re.M)}
+          needed |= {d for d in ("desktop", "dashboard") if os.path.isdir(d)}
           release = open(".github/workflows/release.yml").read()
           missing = sorted(f for f in needed if f not in release)
           assert needed and not missing, f"release.yml archive misses: {missing} (found {sorted(needed)})"
