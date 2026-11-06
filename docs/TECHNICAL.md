@@ -3,9 +3,9 @@
 The everyday guide is the [README](../README.md). This page holds the details: every config key, security model,
 metrics, how the risk list was built, what was measured, and how to develop and release.
 
-## New in 1.4 at a glance
+## New in 1.4 and 1.5 at a glance
 
-One page for what 1.4 added. The details are in the sections named in each row.
+One page for what 1.4 and 1.5 added. The details are in the sections named in each row.
 
 **Options** (under `calling_mom:` in `config.yaml`; defaults in `__init__.py` `DEFAULTS`):
 
@@ -22,7 +22,17 @@ One page for what 1.4 added. The details are in the sections named in each row.
 | `verify.timeout_s` | `600` (was 120) | `verify:` runs in the background, so a long command is fine. | Hook deadlines |
 | `advisor.timeout_s` | `40` | Limit for one advice call. It runs off the hot path, see the budget rule. | Hook deadlines |
 
+Options added in 1.5:
+
+| Key | Default | What it does | Section |
+|---|---|---|---|
+| `count.chat_waits` | `false` | Count the time you wait on a prompt in chat (kind, seconds, outcome; never the text). `setup --chat-waits`. | Attention report |
+| `mom_fallback` | `{provider: "", model: ""}` | Answers when Mom's provider is limited or down. `setup --fallback PROVIDER/MODEL\|route:NAME\|none`. Olymp has none. | Quota, fallback, stalled cards, pace |
+| `stall_minutes` | `15` | A running card without a heartbeat this long gets one `[stalled]` comment per run (`0` = off). Nothing is reclaimed. | Quota, fallback, stalled cards, pace |
+
 Settings read from Hermes, not from this plugin: `plugins.hook_callback_timeout` (default 30 s) is the hook budget.
+
+**Commands** added in 1.5: `hermes calling-mom pace --board B --max N [--dry-run] [--undo]`, `hermes calling-mom report --since/--until`.
 
 **Commands** added in 1.4: `hermes calling-mom answer <task>` (`--accept`, `--text`, `--allow-once`, `--board`),
 `hermes calling-mom precedents [list | forget <id> | clear]`, `hermes calling-mom report [--days N] [--board X] [--json]`,
@@ -388,7 +398,7 @@ backend routes above live in the gateway and work either way. On the machine tha
 
 ```bash
 mkdir -p ~/.hermes/desktop-plugins/calling-mom
-curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.4.1/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.5.0/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
 ```
 
 then **⌘K -> Reload desktop plugins**, and enable it under **Capabilities -> Plugins**. Card badges need Desktop

@@ -3,7 +3,7 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
-## [Unreleased] - 1.5.0 work
+## [1.5.0] - 2026-11-06
 
 ### Added
 - **Honest count, WP1** (`docs/SPEC-1.5.md`). The report shows what reaches you, not only what Mom does.
@@ -65,6 +65,8 @@ versioning: [SemVer](https://semver.org/).
   `calling_mom_advice_feedback_total` has the label `result` (was `verdict`). Rows of 1.4 are read as before:
   `followed` counts as `acted`, `rejected` as `unknown`.
 - Log rows may carry their own `ts` (the time of the event, not of the sweep).
+- `plugin.yaml` `version` is 1.5.0. README and TECHNICAL.md point the Desktop-on-another-machine `curl` at `v1.5.0`
+  (the Desktop half changed in 1.5). The 1.4.2 dashboard hotfix of `main` is part of this release.
 
 ## [1.4.2] - 2026-11-06
 

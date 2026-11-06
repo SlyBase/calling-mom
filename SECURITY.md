@@ -24,7 +24,7 @@ The plugin runs inside a Hermes Kanban worker and talks to LLM providers. Assets
 
 ## Data flows
 
-Every flow that carries data out of the process or into a file, in 1.4. "Remote" means a model provider you configured
+Every flow that carries data out of the process or into a file, in 1.5. "Remote" means a model provider you configured
 for Mom or Olymp. Each prompt passes Hermes' `redact_for_egress` and the URL-credential scrub first. `[local-only]` on a
 card stops every flow marked "remote" for that card.
 

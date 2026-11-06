@@ -318,7 +318,7 @@ On the machine that runs the Desktop app:
 
 ```bash
 mkdir -p ~/.hermes/desktop-plugins/calling-mom
-curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.4.1/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.5.0/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
 ```
 
 Then press **⌘K**, choose **Reload desktop plugins**, and switch Calling Mom on under **Capabilities -> Plugins** if it
