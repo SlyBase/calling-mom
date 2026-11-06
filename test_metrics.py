@@ -83,6 +83,13 @@ class RenderTest(unittest.TestCase):
         self.assertIn('calling_mom_stuck_signals_total{signal="same_error"} 2', out)
         self.assertIn('calling_mom_stuck_signals_total{signal="loop"} 1', out)
 
+    def test_verify_lifecycle_rows_do_not_count_as_results(self):
+        rows = ROWS + [{"kind": "verify", "state": "started"}, {"kind": "verify", "state": "stale"},
+                       {"kind": "verify", "state": "pass", "ok": True}, {"kind": "verify", "state": "timeout", "ok": False}]
+        out = lines(self.render(rows=rows))
+        self.assertIn('calling_mom_verify_total{result="pass"} 2', out)
+        self.assertIn('calling_mom_verify_total{result="fail"} 2', out)
+
     def test_verify_results_and_ignored(self):
         out = lines(self.render())
         self.assertIn('calling_mom_verify_total{result="pass"} 1', out)

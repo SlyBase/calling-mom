@@ -696,5 +696,125 @@ class CommandWiringTest(unittest.TestCase):
         self.assertIn("FAIL", s.text)
 
 
+class AnswerSetupTest(unittest.TestCase):
+    """setup asks: "Let Mom answer worker questions before they reach you?" (off until you say yes)."""
+
+    def test_updates_without_an_answer_choice_leave_the_answer_block_alone(self):
+        upd = cli.updates((SUB, "claude-sonnet-5-5"), None, ["coding"], {})
+        self.assertFalse([k for k in upd if k.startswith("calling_mom.answer")])
+
+    def test_yes_turns_it_on_for_the_chosen_boards_and_keeps_earlier_ones(self):
+        cfg = {"calling_mom": {"answer": {"boards": ["old"]}}}
+        upd = cli.updates((SUB, "claude-sonnet-5-5"), None, ["coding"], cfg, answer=True)
+        self.assertEqual((upd["calling_mom.answer.enabled"], upd["calling_mom.answer.boards"]), (True, ["old", "coding"]))
+
+    def test_no_turns_it_off_and_keeps_the_board_list(self):
+        upd = cli.updates((SUB, "claude-sonnet-5-5"), None, ["coding"], {}, answer=False)
+        self.assertEqual(upd["calling_mom.answer.enabled"], False)
+        self.assertNotIn("calling_mom.answer.boards", upd)
+
+    def test_the_question_is_asked_after_the_board_and_enter_means_no(self):
+        s = Script("2", "1", "2", "2", "2", "")
+        upd, summary = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIn("Let Mom answer worker questions before they reach you?", s.text)
+        self.assertEqual(upd["calling_mom.answer.enabled"], False)
+        self.assertIn("answer  : off", summary)
+
+    def test_yes_in_the_interactive_setup(self):
+        s = Script("2", "1", "2", "2", "2", "2")
+        upd, summary = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertEqual((upd["calling_mom.answer.enabled"], upd["calling_mom.answer.boards"]), (True, ["coding"]))
+        self.assertIn("answer  : on (boards: coding)", summary)
+
+    def test_a_setup_that_already_answers_keeps_yes_as_the_default(self):
+        cfg = {"calling_mom": {"answer": {"enabled": True, "boards": ["coding"]}}}
+        s = Script("", "", "", "", "", "")
+        upd, _ = cli.setup(cfg, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertEqual(upd["calling_mom.answer.enabled"], True)
+
+    def test_the_flag_answers_for_you_and_no_question_is_asked(self):
+        s = Script("2", "1", "2", "2", "2")
+        upd, _ = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say, answer=True)
+        self.assertEqual(upd["calling_mom.answer.enabled"], True)
+        self.assertNotIn("Let Mom answer", s.text)
+
+    def test_flags_set_the_answer_without_a_question(self):
+        saved = {}
+        s = Script()
+        e = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                    cron=lambda: None, sweeps=lambda: [], interactive=False)
+        self.assertEqual(cli.cmd_setup(e, mom="openrouter/x/y", boards="default", answer=True, cron=False), 0)
+        self.assertEqual(saved["calling_mom"]["answer"], {"enabled": True, "boards": ["default"]})
+        self.assertIn("answer  : on", s.text)
+
+    def test_flags_without_the_answer_flag_leave_it_alone(self):
+        saved = {}
+        e = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=Script().ask,
+                    say=Script().say, cron=lambda: None, sweeps=lambda: [], interactive=False)
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", cron=False)
+        self.assertNotIn("answer", saved["calling_mom"])
+
+    def test_status_says_whether_mom_answers_and_where(self):
+        base = StatusTest.CFG
+        on = "\n".join(cli.status_lines({**base, "answer": {"enabled": True, "boards": ["coding"]}}, {}))
+        off = "\n".join(cli.status_lines(base, {}))
+        self.assertIn("answer  : on, boards: coding", on)
+        self.assertIn("answer  : off", off)
+        self.assertIn("answer  : on", "\n".join(cli.status_lines({**base, "answer": {"enabled": True, "boards": []}}, {})))
+        self.assertIn("no board", "\n".join(cli.status_lines({**base, "answer": {"enabled": True, "boards": []}}, {})))
+
+
+class AnswerCommandTest(unittest.TestCase):
+    """`hermes calling-mom answer <task> [--accept | --text ... | --allow-once]`"""
+
+    def env(self, result):
+        s, calls = Script(), []
+
+        def answer(board, task, text=None, **kw):
+            calls.append((board, task, text, kw))
+            return result
+
+        e = cli.Env(load=lambda: {}, save=lambda c: None, providers=lambda: [], boards=lambda: [], spent=lambda: {},
+                    probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say, cron=lambda: None,
+                    sweeps=lambda: [], answer=answer)
+        return e, s, calls
+
+    def test_the_arguments_reach_answer_card_as_the_cli(self):
+        e, s, calls = self.env({"ok": True, "task_id": "t_1", "unblocked": True})
+        self.assertEqual(cli.cmd_answer(e, "t_1", board="coding", text="Use B", allow_once=True), 0)
+        self.assertEqual(calls, [("coding", "t_1", "Use B", {"by": "cli", "accept": False, "allow_once": True})])
+        self.assertIn("t_1", s.text)
+
+    def test_accept(self):
+        e, s, calls = self.env({"ok": True, "task_id": "t_1", "unblocked": True})
+        cli.cmd_answer(e, "t_1", board="coding", accept=True)
+        self.assertEqual(calls[0][3]["accept"], True)
+
+    def test_a_refusal_prints_the_reason_and_exits_with_1(self):
+        e, s, _ = self.env({"ok": False, "status": 409, "error": "t_1 is not blocked (it is ready)"})
+        self.assertEqual(cli.cmd_answer(e, "t_1", board="coding", text="x"), 1)
+        self.assertIn("not blocked", s.text)
+
+    def test_an_answer_that_could_not_unblock_says_so(self):
+        e, s, _ = self.env({"ok": True, "task_id": "t_1", "unblocked": False})
+        self.assertEqual(cli.cmd_answer(e, "t_1", board="coding", text="x"), 0)
+        self.assertIn("could not", s.text)
+
+    def test_the_parser_knows_the_command(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        cli.setup_parser(parser)
+        args = parser.parse_args(["answer", "t_9", "--board", "coding", "--text", "Use B"])
+        self.assertEqual((args.cm_cmd, args.task, args.board, args.text, args.accept, args.allow_once),
+                         ("answer", "t_9", "coding", "Use B", False, False))
+        args = parser.parse_args(["answer", "t_9", "--accept", "--allow-once"])
+        self.assertEqual((args.accept, args.allow_once, args.board), (True, True, None))
+        self.assertEqual(parser.parse_args(["setup", "--answer"]).answer, True)
+        self.assertEqual(parser.parse_args(["setup", "--no-answer"]).answer, False)
+        self.assertIsNone(parser.parse_args(["setup"]).answer)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -78,6 +78,30 @@ _WATCH = [re.compile(p, re.I) for p in WATCH_COMMANDS]
 _FILES = [re.compile(p, re.I) for p in CRITICAL_FILES]
 
 
+# Questions only the owner can answer (WP3): when the question or the card touches one, Mom never answers, she may
+# only write a brief. Words are matched whole, so "tokenizer" is not a credential. Deliberately broad: a false hit
+# costs the owner one question, a miss lets Mom decide something that is not hers.
+HUMAN_TOPICS = {
+    "credentials": [r"\b(?:passwords?|passphrases?|credentials?|secrets?|api[ _-]?keys?|access[ _-]?tokens?|auth[ _-]?tokens?|"
+                    r"private[ _-]?keys?|ssh[ _-]?keys?|2fa|mfa|one-time (?:code|password))\b"],
+    "money": [r"\b(?:pay|payments?|invoices?|billing|purchase|buy|refunds?|credit card|iban|wire transfer)\b",
+              r"[$€£]\s?\d", r"\b\d+(?:[.,]\d+)?\s?(?:usd|eur|dollars?|euros?)\b"],
+    "legal": [r"\b(?:contracts?|legal|lawyers?|attorney|nda|gdpr|terms of service|license agreements?|liability|lawsuit)\b"],
+    "personal_data": [r"\b(?:personal data|pii|home address(?:es)?|passports?|social security|medical records?|health data|"
+                      r"date of birth)\b"],
+    "publishing": [r"\b(?:publish|announce|tweet|press release|on my behalf|in my name|in your name|on your behalf)\b",
+                   r"\bpost\b[^\n]{0,40}\b(?:on|to)\s+(?:x|twitter|linkedin|reddit|hacker news|mastodon)\b",
+                   r"\bsend\b[^\n]{0,20}\be-?mails?\s+to\b"],
+}
+_HUMAN = {topic: [re.compile(p, re.I) for p in patterns] for topic, patterns in HUMAN_TOPICS.items()}
+
+
+def human_topic(text):
+    """Name of the first owner-only topic in ``text`` (see ``HUMAN_TOPICS``), or None."""
+    text = str(text or "")
+    return next((topic for topic, rx in _HUMAN.items() if any(r.search(text) for r in rx)), None)
+
+
 def classify(command, extra=(), critical=None, watch=None):
     """``"critical"``, ``"watch"`` or None for a shell command line. ``critical``/``watch`` replace the defaults
     (regex strings); ``extra`` adds critical regexes."""

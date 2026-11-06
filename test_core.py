@@ -37,7 +37,7 @@ def private_imports(path):
 class OneDoorTest(unittest.TestCase):
     def test_only_core_imports_hermes_internals(self):
         files = [p for p in HERE.glob("*.py") if not p.name.startswith("test_") and p.name not in {"_core.py", "linecov.py", "check.py"}]
-        files += list((HERE / "scripts").glob("*.py"))
+        files += list((HERE / "scripts").glob("*.py")) + list((HERE / "dashboard").glob("*.py"))
         offenders = [hit for p in files for hit in private_imports(p) if p.name != "smoke.py"]
         self.assertEqual(offenders, [], "route these through _core.py")
 
@@ -82,6 +82,35 @@ class MissingInternalsTest(unittest.TestCase):
         self.assertEqual(core.list_providers({}), [])
         self.assertEqual(core.list_board_slugs(), [])
         self.assertFalse(core.has_menu())
+
+
+class HookBudgetTest(unittest.TestCase):
+    """Hermes bounds hot-path hooks by plugins.hook_callback_timeout; the plugin sizes all its waits from it."""
+
+    def budget(self, plugins):
+        cfg = {} if plugins is None else {"plugins": plugins}
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            return load().hook_budget()
+
+    def test_default_is_hermes_default(self):
+        self.assertEqual(self.budget(None), 30)
+        self.assertEqual(self.budget({}), 30)
+        self.assertEqual(self.budget({"hook_callback_timeout": None}), 30)
+
+    def test_configured_value_is_used(self):
+        self.assertEqual(self.budget({"hook_callback_timeout": 12}), 12)
+        self.assertEqual(self.budget({"hook_callback_timeout": "7.5"}), 7.5)
+
+    def test_value_is_clamped_to_1_and_600(self):
+        self.assertEqual(self.budget({"hook_callback_timeout": 0}), 1)
+        self.assertEqual(self.budget({"hook_callback_timeout": 0.2}), 1)
+        self.assertEqual(self.budget({"hook_callback_timeout": 5000}), 600)
+
+    def test_junk_and_negative_values_fall_back_like_hermes_does(self):
+        for junk in ("soon", [5], -3):
+            with self.subTest(junk=junk):
+                self.assertEqual(self.budget({"hook_callback_timeout": junk}), 30)
+        self.assertEqual(self.budget("not a dict"), 30)
 
 
 class HelpersTest(unittest.TestCase):

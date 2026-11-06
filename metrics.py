@@ -60,7 +60,8 @@ def render(rows, spend, caps, boards, now) -> str:
     signals = Counter({s: 0 for s in _SIGNALS})
     for r in rows:
         signals.update(r.get("signals") or [])
-    verify = [r for r in rows if r.get("kind") == "verify"]
+    # a verify run logs "started" and "stale" too: only a finished run is a result
+    verify = [r for r in rows if r.get("kind") == "verify" and r.get("state") not in ("started", "stale")]
     ignored = Counter(r.get("why") or "unknown" for r in rows if r.get("kind") == "verify_ignored")
     # initialised, not just counted: the series must exist from the first push, otherwise
     # `increase()` stays empty and the "parked but not escalated" alert can never fire

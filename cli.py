@@ -1,4 +1,4 @@
-"""User-facing commands of the plugin: ``hermes calling-mom setup | status | doctor``.
+"""User-facing commands of the plugin: ``hermes calling-mom setup | status | doctor | answer | report | precedents``.
 
 Pure logic first (testable with fake I/O), Hermes wiring last (``make_env``).
 """
@@ -12,6 +12,22 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+try:
+    from . import report
+except ImportError:  # loaded by path (tests, plugin doctor): no package context
+    import importlib.util
+    _report_spec = importlib.util.spec_from_file_location("calling_mom_report", Path(__file__).with_name("report.py"))
+    report = importlib.util.module_from_spec(_report_spec)
+    _report_spec.loader.exec_module(report)
+
+try:
+    from . import precedents
+except ImportError:  # loaded by path (tests, plugin doctor): no package context
+    import importlib.util
+    _precedents_spec = importlib.util.spec_from_file_location("calling_mom_precedents", Path(__file__).with_name("precedents.py"))
+    precedents = importlib.util.module_from_spec(_precedents_spec)
+    _precedents_spec.loader.exec_module(precedents)
 
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
@@ -166,8 +182,9 @@ def _get(cfg, dotted, default=None):
     return cfg
 
 
-def updates(mom, olymp, boards, cfg) -> dict:
-    """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay."""
+def updates(mom, olymp, boards, cfg, answer=None) -> dict:
+    """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay.
+    ``answer`` None leaves the answer block alone; True/False switches "Mom answers worker questions" on/off."""
     pairs = [p for p in (mom, olymp) if p]
     upd = {
         "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
@@ -178,6 +195,10 @@ def updates(mom, olymp, boards, cfg) -> dict:
         LLM_KEY + "allowed_models": _merge_list(_get(cfg, LLM_KEY + "allowed_models", []), [m for _, m in pairs]),
         LLM_KEY + "allowed_providers": _merge_list(_get(cfg, LLM_KEY + "allowed_providers", []), [p for p, _ in pairs]),
     }
+    if answer is not None:
+        upd["calling_mom.answer.enabled"] = answer
+        if answer:
+            upd["calling_mom.answer.boards"] = _boards(_get(cfg, "calling_mom.answer.boards", []), boards)
     return upd
 
 
@@ -192,8 +213,9 @@ def apply_updates(cfg, upd) -> dict:
     return out
 
 
-def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=()):
-    """Ask (or take a preset), return ``(updates, summary_lines)``. Writes nothing."""
+def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None):
+    """Ask (or take a preset), return ``(updates, summary_lines)``. Writes nothing. ``answer`` True/False skips the
+    question "Let Mom answer worker questions before they reach you?"."""
     if preset:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
@@ -207,13 +229,21 @@ def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=()):
                            current=cur["olymp"] if cur["olymp"][0] else None, choose=choose, routes=routes)
     chosen = ["*"] if not boards else pick("Which board may use the advisor?", [(b, [b]) for b in boards], ask, say,
                                            none_label="all boards", other=False, choose=choose)
-    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"])
+    if answer is None:
+        was_on = bool(_get(cfg, "calling_mom.answer.enabled", False))
+        answer = pick("Let Mom answer worker questions before they reach you?",
+                      [("no: every question goes to me", False),
+                       ("yes: on the same boards (she answers only what the card settles, anything else becomes a brief for you)", True)],
+                      ask, say, other=False, choose=choose, default=int(was_on))
+    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer)
 
 
-def _result(cfg, mom, olymp, boards):
-    upd = updates(mom, olymp, boards, cfg)
+def _result(cfg, mom, olymp, boards, answer=None):
+    upd = updates(mom, olymp, boards, cfg, answer)
     summary = [f"mom     : {mom[1]} ({mom[0]})", f"olymp   : {f'{olymp[1]} ({olymp[0]})' if olymp else 'off'}",
                f"boards  : {', '.join(upd['calling_mom.advisor.boards']) or '(none)'}"]
+    if answer is not None:
+        summary.append(f"answer  : on (boards: {', '.join(upd['calling_mom.answer.boards'])})" if answer else "answer  : off")
     return upd, summary
 
 
@@ -293,6 +323,11 @@ def status_lines(cm, spent, errors=None) -> list:
         lines.append("olymp   : off")
     boards = adv.get("boards") or []
     lines.append(f"advisor : {'on' if adv.get('enabled') else 'OFF'}, boards: {', '.join(boards) or '(none)'}")
+    ans = cm.get("answer") or {}
+    answer_boards = ans.get("boards") or []
+    lines.append(f"answer  : on, boards: {', '.join(answer_boards) or '(none)'}" if ans.get("enabled") else "answer  : off")
+    if ans.get("enabled") and not answer_boards:
+        lines.append("warning : answer is on but no board is listed, Mom answers nothing (run: hermes calling-mom setup)")
     if adv.get("enabled") and not boards:
         lines.append("warning : advisor is on but no board is opted in, nothing is sent (run: hermes calling-mom setup)")
     if errors and errors[0]:
@@ -409,6 +444,9 @@ class Env:
     routes: Callable = lambda: []      # usable delegation routes (see routes_from)
     choose: Optional[Callable] = None  # menu callback; None = numbered lists
     interactive: bool = True           # False: no terminal, never wait for an answer
+    answer: Optional[Callable] = None  # the plugin's answer_card
+    report: Optional[Callable] = None  # the plugin's attention_report: (days, board) -> dict
+    precedents_path: Optional[Callable] = None  # () -> Path of logs/calling-mom-precedents.jsonl
 
 
 def _blocks(env):
@@ -416,7 +454,7 @@ def _blocks(env):
     return (cfg.get("calling_mom") or {}), (_get(cfg, "plugins.entries.calling-mom.llm", {}) or {})
 
 
-def _plan(env, cfg, preset, mom, olymp, boards):
+def _plan(env, cfg, preset, mom, olymp, boards, answer=None):
     """Updates and summary: from flags when they say everything, otherwise by asking."""
     routes = env.routes()
     if (olymp or boards) and not (mom or preset):
@@ -429,20 +467,21 @@ def _plan(env, cfg, preset, mom, olymp, boards):
                 raise SetupError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
             pair_mom, pair_olymp = PRESETS[preset]["mom"], PRESETS[preset]["olymp"]
         chosen = parse_boards(boards) if boards else ([] if _get(cfg, "calling_mom.advisor.boards") else ["*"])
-        return _result(cfg, pair_mom, pair_olymp, chosen)
+        return _result(cfg, pair_mom, pair_olymp, chosen, answer)
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
                          "optionally --olymp, --boards and --cron/--no-cron.")
     hint = delegation_hint(cfg)
     if hint:
         env.say(hint)
-    return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes)
+    return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes,
+                 answer=answer)
 
 
-def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None) -> int:
+def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None) -> int:
     cfg = env.load()
     try:
-        upd, summary = _plan(env, cfg, preset, mom, olymp, boards)
+        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer)
     except SetupError as exc:
         env.say(str(exc))
         return 2
@@ -476,6 +515,42 @@ def cmd_status(env) -> int:
     return 0
 
 
+def cmd_answer(env, task, board=None, text=None, accept=False, allow_once=False) -> int:
+    """A person answers a card that carries Mom's brief or a pre-flight HOLD (see ``answer_card``)."""
+    out = env.answer(board, task, text, by="cli", accept=accept, allow_once=allow_once)
+    if not out.get("ok"):
+        env.say(f"Not answered: {out.get('error')}")
+        return 1
+    env.say(f"Answered {task}." if out.get("unblocked") else f"Answer written to {task}, but the card could not be unblocked.")
+    return 0
+
+
+def cmd_report(env, days=7, board=None, as_json=False) -> int:
+    """What reached whom and what it cost, over the last ``days`` (see ``report.build``)."""
+    out = env.report(days, board)
+    env.say(json.dumps(out, indent=2) if as_json else report.render(out))
+    return 0
+
+
+def cmd_precedents(env, action="list", pid=None) -> int:
+    """The answers Mom may reuse (see ``precedents.py``): list them, forget one, or clear them all."""
+    path = env.precedents_path()
+    if action == "clear":
+        env.say(f"Cleared {precedents.clear(path)} precedent(s).")
+    elif action == "forget":
+        if not precedents.forget(path, pid):
+            env.say(f"No precedent {pid or '(no id given)'}. List them with: hermes calling-mom precedents")
+            return 1
+        env.say(f"Forgot {pid}.")
+    else:
+        rows = precedents.read(path)
+        for e in rows:
+            env.say(f"{e['id']}  {e['board']}  {e['task']}\n  Q: {e['question']}\n  A: {e['answer']}")
+        if not rows:
+            env.say("No precedents yet. They appear when you answer one of Mom's briefs.")
+    return 0
+
+
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
     checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps())
@@ -486,7 +561,7 @@ def cmd_doctor(env) -> int:
 
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
-def make_env(spent, effective, log_path, core, ask=input, say=print):  # pragma: no cover - needs a live Hermes
+def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None):  # pragma: no cover - needs a live Hermes
     def providers():
         return core.list_providers(core.load_config())
 
@@ -520,7 +595,8 @@ def make_env(spent, effective, log_path, core, ask=input, say=print):  # pragma:
                routes=lambda: routes_from(core.load_config())[0],
                choose=core.menu if interactive and core.has_menu() else None, interactive=interactive,
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
-               errors=lambda: count_errors(log_path()))
+               errors=lambda: count_errors(log_path()), answer=answer, report=build_report,
+               precedents_path=lambda: precedents.path_for(log_path()))
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -532,15 +608,38 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     s.add_argument("--boards", metavar="A,B", help="boards that may use the advisor, or * (default: keep, else all)")
     s.add_argument("--cron", action=argparse.BooleanOptionalAction, default=None,
                    help="create the sweep cron job (default: yes, unless one exists)")
+    s.add_argument("--answer", action=argparse.BooleanOptionalAction, default=None,
+                   help="let Mom answer worker questions on these boards (default: ask; with flags, keep the current choice)")
     s.add_argument("--yes", action="store_true", help="accepted for scripts; setup never asks before writing")
+    a = sub.add_parser("answer", help="answer a card that carries Mom's brief or a pre-flight HOLD")
+    a.add_argument("task", metavar="TASK", help="the card id")
+    a.add_argument("--board", help="the card's board (default: the current board)")
+    a.add_argument("--accept", action="store_true", help="take Mom's recommendation from the brief")
+    a.add_argument("--text", help="your answer, written to the card as '[you via calling-mom] ...'")
+    a.add_argument("--allow-once", action="store_true", help="let the held command run once")
+    r = sub.add_parser("report", help="what reached you, what did not, what it cost")
+    r.add_argument("--days", type=int, default=7, help="the window in days (default 7)")
+    r.add_argument("--board", help="only this board")
+    r.add_argument("--json", action="store_true", help="print the numbers as JSON")
+    p = sub.add_parser("precedents", help="the answers of yours that Mom may reuse: list, forget one, clear all")
+    p.add_argument("action", nargs="?", choices=["list", "forget", "clear"], default="list")
+    p.add_argument("id", nargs="?", help="the precedent id (for forget)")
     sub.add_parser("status", help="show the effective setup and today's usage")
     sub.add_parser("doctor", help="check the setup and make one real call to each model")
     parser.set_defaults(cm_cmd=None)
 
 
-def dispatch(args, spent, effective, log_path, core):  # pragma: no cover - argparse glue
-    env = make_env(spent, effective, log_path, core)
+def dispatch(args, spent, effective, log_path, core, answer=None, build_report=None):  # pragma: no cover - argparse glue
+    env = make_env(spent, effective, log_path, core, answer=answer, build_report=build_report)
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
-        return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron)
+        return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron,
+                         answer=args.answer)
+    if cmd == "answer":
+        return cmd_answer(env, args.task, board=args.board or core.kb.get_current_board(), text=args.text,
+                          accept=args.accept, allow_once=args.allow_once)
+    if cmd == "report":
+        return cmd_report(env, days=args.days, board=args.board, as_json=args.json)
+    if cmd == "precedents":
+        return cmd_precedents(env, args.action, args.id)
     return {"status": cmd_status, "doctor": cmd_doctor}[cmd](env)
