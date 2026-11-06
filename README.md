@@ -1,12 +1,12 @@
-![Calling mom: Thetis rises from the sea to answer Achilles, Mount Olympus far above](assets/calling-mom-banner.jpg)
+![Calling Mom: Thetis rises from the sea to answer Achilles, Mount Olympus far above](assets/calling-mom-banner.jpg)
 
 <sub>*Homer, Iliad I: the hero Achilles is stuck and calls his mother, the sea goddess Thetis, who rises from the sea to help; only once does she climb to Olympus to ask Zeus. The plugin works the same way. Your **main model** is Achilles: it does the work. When it is stuck or about to do something risky, it **calls mom** (Thetis), a good, affordable model that answers that one question, and she does so often. Only in a rare high-stakes case does mom say "this is too big for me" and send the question up to **olymp** (Zeus), the strongest and most expensive model, who is asked rarely and has a hard limit.*</sub>
 
-# Calling mom
+# Calling Mom
 
 [![ci](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml)
 
-**Your attention is the most expensive model in the stack. Calling mom calls it last.**
+**Your attention is the most expensive model in the stack. Calling Mom calls it last.**
 
 A [Hermes](https://hermes-agent.nousresearch.com) plugin for Kanban. A cheap model works your cards. When it is stuck
 or about to do something risky, a better model steps in. Only what neither can settle reaches you.
@@ -64,9 +64,9 @@ approval setting (Mom's HOLD stopped the retry, and the worker undid the change)
 
 ## What you will see
 
-**The Calling mom page** in Hermes Desktop: the ladder with the numbers of the last 7 days, a *Needs you* list, and recent activity.
+**The Calling Mom page** in Hermes Desktop: the ladder with the numbers of the last 7 days, a *Needs you* list, and recent activity.
 
-![The Calling mom page: the ladder worker, Mom, Olymp, you with counts](assets/screenshots/calling-mom-page.png)
+![The Calling Mom page: the ladder worker, Mom, Olymp, you with counts](assets/screenshots/calling-mom-page.png)
 
 **Badges on Kanban cards**: `mom`, `olymp`, `held`, `for you`, `verified`, `verify failed`. At most two per card.
 
@@ -87,7 +87,7 @@ it, 5 to 6 November 2026). The `You` block counts what reached the person, **inc
 on the board**, because that is attention too:
 
 ```
-Calling mom, 2026-11-05T00:00Z to 2026-11-06T03:00Z, board coding
+Calling Mom, 2026-11-05T00:00Z to 2026-11-06T03:00Z, board coding
 Worker  1103 tool calls in 21 runs, 14 stuck signals; 0 API calls, 0 tokens in / 0 out
 Mom     38 calls: 0 questions answered, 0 pre-flight checks (0 holds), 0 verify passed / 0 failed
 Olymp   0 calls, 0 of 6 today
@@ -95,8 +95,7 @@ You     0 briefs, 0 answers, 0 holds released
         outside help  9 comments (default 7, daidalos 2) · 24 board changes (unattributed) · 1 card waiting on a person
         chat waits    not observed (calling_mom.count.chat_waits is off)
 Advice  36 calls: 0 followed · 22 acted · 0 ignored · 14 unknown
-Cost    Mom 128,372 in / 17,655 out tokens on a subscription (no per-token price), Olymp 0 calls
-```
+Cost    Mom 128,372 in / 17,655 out tokens on a subscription (no per-token price), Olymp 0 calls```
 
 The worker used 1,103 tool calls and fired 14 stuck signals. Mom gave 36 pieces of advice. Version 1.4 called 22 of them
 "followed" because some action came next. Those rows carry no anchors, so no evidence can be shown for them: they read
@@ -268,7 +267,7 @@ Hermes Desktop shows the ladder instead of making you read card comments:
 
 - **Badges on Kanban cards** (at most two each): `mom`, `olymp`, `held`, `for you`, `verified`, `verify failed`.
   Needs Hermes Desktop 0.22.6 or later; an older app loads the page without badges.
-- **The "Calling mom" page** (sidebar): the ladder worker, Mom, Olymp, you with the last 7 days, a **Needs you** list
+- **The "Calling Mom" page** (sidebar): the ladder worker, Mom, Olymp, you with the last 7 days, a **Needs you** list
   and recent activity. Each brief has **Accept recommendation** and **Answer...**; each held command has
   **Allow once** and **Keep blocked**. One click and the card continues.
 - **A status-bar chip**: Mom's calls today and what waits for you. A click opens the page.
@@ -284,11 +283,26 @@ hermes plugins enable calling-mom      # the Python half, including the backend 
 Then switch the Desktop half on in **Capabilities -> Plugins**. Desktop copies it from the installed package and
 ships it off until you say so.
 
-**The gateway is on another machine?** Desktop cannot read that machine's plugin folder. Install the Python half there
-as above, then in Desktop open **Install from Git**, enter `SlyBase/calling-mom` and tick the **Desktop** target (or
-open `hermes://plugin/install?repo=SlyBase/calling-mom&enable=1` and pick the Desktop component). Until then the
-Plugins page shows the Desktop half as "unavailable (remote backend)". If the chip reads `mom offline`, the app
-cannot reach the backend routes: check that the plugin is enabled, then run `hermes gateway restart` once.
+If the chip reads `mom offline`, the app cannot reach the backend routes: check that the plugin is enabled, then run
+`hermes gateway restart` once.
+
+### Desktop on another machine
+
+Does the Desktop app run on a different machine than the gateway (a Mac connected to a server, say)? Then the app
+shows no Calling Mom page, no badges and no chip, although the plugin works on the server. The app loads Desktop
+plugins from **its own disk** only (the Desktop plugin SDK calls them "app-level": one root for every profile,
+gateway or remote machine the window connects to), and Hermes does not copy the Desktop half to a host that Desktop
+only reaches over SSH. The Python half on the server (hooks, backend routes) is fine and needs nothing.
+
+On the machine that runs the Desktop app:
+
+```bash
+mkdir -p ~/.hermes/desktop-plugins/calling-mom
+curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.4.1/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+```
+
+Then press **⌘K**, choose **Reload desktop plugins**, and switch Calling Mom on under **Capabilities -> Plugins** if it
+is off. Card badges need Desktop 0.22.6 or later. Repeat the `curl` after a plugin update.
 
 Nothing new leaves your machine: the page reads the plugin log and your boards through your own gateway. The only
 write is your click on a button, see [SECURITY.md](SECURITY.md).
@@ -338,6 +352,6 @@ Kill switch: set `CALLING_MOM=off`. Every other option is in the [technical refe
 - [Technical reference](docs/TECHNICAL.md): all options, record kinds, the hook budget rule, the demo kit, metrics, how the risk list was built, what was measured, development and release
 - [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md)
 
-The idea behind the ladder comes from DeepSeek Harness's [*Exploring Super-agent Design*](https://x.com/DeepSeekHarness/article/2116857257245987236): Calling mom is its watchdog and two-stage filter, for Hermes Kanban.
+The idea behind the ladder comes from DeepSeek Harness's [*Exploring Super-agent Design*](https://x.com/DeepSeekHarness/article/2116857257245987236): Calling Mom is its watchdog and two-stage filter, for Hermes Kanban.
 
 MIT licensed.

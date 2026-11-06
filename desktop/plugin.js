@@ -1,4 +1,4 @@
-// Calling mom, the Desktop half: card badges, the "Calling mom" page, a status-bar chip.
+// Calling Mom, the Desktop half: card badges, the "Calling Mom" page, a status-bar chip.
 // Plain ESM, no JSX, no build step. It talks to dashboard/plugin_api.py only (ctx.rest), never to app internals.
 import * as sdk from '@hermes/plugin-sdk'
 import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
@@ -278,10 +278,10 @@ function Page() {
   return h(
     'div',
     { style: { height: '100%', overflowY: 'auto', padding: '20px 24px 32px' } },
-    h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling mom'),
+    h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
     h('div', { style: { ...muted, fontSize: '0.8125rem', marginBottom: 16 } }, 'Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last 7 days.'),
     s.error &&
-      h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
+      h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
     h(Ladder, { summary: s.summary, count: open.length }),
     s.summary &&
@@ -328,7 +328,7 @@ function Chip() {
     'button',
     {
       type: 'button',
-      title: s.error ? 'The Calling mom backend is not reachable' : 'Calling mom: calls today and items waiting for you',
+      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: calls today and items waiting for you',
       onClick: () => host.navigate(PATH),
       style: { padding: '0 6px', fontSize: '0.6875rem', color: count ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)' }
     },
@@ -340,13 +340,13 @@ function Chip() {
 
 export default {
   id: 'calling-mom',
-  name: 'Calling mom',
+  name: 'Calling Mom',
   register(context) {
     ctx = context
     update({ kept: ctx.storage.get('kept', []) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling mom', codicon: 'heart' } },
+      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },
       { id: 'chip', area: STATUSBAR_AREAS.right, order: 140, render: () => h(Chip) }
     ])
     refresh()
