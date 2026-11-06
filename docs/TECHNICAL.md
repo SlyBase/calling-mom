@@ -1,6 +1,6 @@
 # Calling Mom: technical reference
 
-The everyday guide is the [README](../README.md). This page holds the details: every config key, security model,
+The everyday guide is the [README](../README.md). This page holds the details: every signal, every config key, security model,
 metrics, how the risk list was built, what was measured, and how to develop and release.
 
 ## New in 1.4 and 1.5 at a glance
@@ -424,6 +424,64 @@ The Pushgateway keeps the last push, so alert on the age of `calling_mom_last_pu
 ### One log for all profiles
 
 The observation log, sweep watermark and spend ledger live under the installation root (`<hermes root>/logs/`), not under a profile home: the gateway escalates reactively, the cron sweeps, and both must land in ONE file or the metrics only see half the story. `CALLING_MOM_LOG`, `CALLING_MOM_STATE`, `CALLING_MOM_SPEND` still override the paths. The log is tail-trimmed at 5 MB.
+
+
+## Signals, one by one
+
+Which event makes Mom speak. The README shows the short version.
+
+| Signal | Who sends it | What Mom does |
+|---|---|---|
+| The main model **gives up** on a card ("capability" block), or the card keeps **crashing** | the main model / the board | The whole card is handed to Mom's model, once. |
+| The **same error 3 times in a row** | the main model | A short tip: probable cause, next steps. |
+| The **same command 3 times** (going in circles) | the main model | A short tip to get out of the loop. |
+| **Broken tool calls 3 times** | the main model | A short tip. |
+| A **risky command or file** (merge, release, force push, `terraform apply`, `kubectl delete`, `DROP TABLE`, broad `rm -rf`, secrets, ...) | the main model | A review: the biggest risk, what to double-check. |
+| A command that **changes** another machine (`ssh`, `scp`, `pct`, `qm`; a read-only look such as `ls` or `pgrep` is no review) | the main model | One short look per card. |
+| **`SECOND-OPINION: <question>`** as a card comment (or the `second_opinion` tool) | the main model | Mom answers the question. |
+| It says **"done"** | the main model | A check: does the result match what the card asked? Missing parts go back once. |
+| Card marker **`[crit]`** | you | The card runs on Mom's model from the start. |
+| Card marker **`[review]`** | you | A separate reviewer reads the result. |
+| A **question** (`kanban_block`, kind `needs_input`), answers on | the main model | Mom answers first, see "Mom answers first". |
+| A **`verify: <command>`** line on the card | you | The command must pass before the card can finish. No model needed. It runs in the background (up to 10 minutes); the worker is told to call `kanban_complete` again until the result is in. |
+
+Mom's answer appears **in the card** as a comment and is shown to the main model. If Mom is slow, the worker is never held
+up: her answer goes to the card when it arrives and reaches the main model with its next tool result, marked `[late advice]`.
+
+## Reuse your Advanced Delegation models
+
+If you use the official [*Advanced Delegation*](https://hermes-agent.nousresearch.com/docs/plugins/advanced-delegation)
+plugin, `setup` reads its model routes (`fast`, `deep`, `local` ...) and offers them for Mom and Olymp:
+
+```bash
+hermes calling-mom setup                                      # asks "one of your delegation routes, or by hand?"
+hermes calling-mom setup --mom route:fast --olymp route:deep  # no questions
+```
+
+The values are **copied once**, nothing stays linked: change a route later and Mom does not follow (run `setup` again).
+A route needs a provider and a model; routes with only a `base_url` are not offered.
+
+## A real report
+
+From the author's own install (board `coding`, 5 to 6 November 2026, while 1.4 was built on it). The `You` block counts
+what reached the person, **including what other people and agents did on the board**, because that is attention too.
+
+```
+Calling Mom, 2026-11-05T00:00Z to 2026-11-06T03:00Z, board coding
+Worker  1103 tool calls in 21 runs, 14 stuck signals; 0 API calls, 0 tokens in / 0 out
+Mom     38 calls: 0 questions answered, 0 pre-flight checks (0 holds), 0 verify passed / 0 failed
+Olymp   0 calls, 0 of 6 today
+You     0 briefs, 0 answers, 0 holds released
+        outside help  9 comments (default 7, daidalos 2) · 24 board changes (unattributed) · 1 card waiting on a person
+        chat waits    not observed (calling_mom.count.chat_waits is off)
+Advice  36 calls: 0 followed · 22 acted · 0 ignored · 14 unknown
+Cost    Mom 128,372 in / 17,655 out tokens on a subscription (no per-token price), Olymp 0 calls
+```
+
+Version 1.4 called 22 pieces of advice "followed" because some action came next. Those rows carry no anchors, so they
+read `acted` now, and the 14 without a verdict read `unknown`. From 1.5 on, `followed` needs a later tool call that uses a
+command, path or tool Mom named. A Claude subscription has no per-token price, so the cost line gives tokens and says so.
+Options: `--days 7`, `--since 2026-11-05 --until 2026-11-06T03:00`, `--board X`, `--json` (dates are ISO and UTC).
 
 
 ## What we measured, and what we did not
