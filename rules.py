@@ -11,11 +11,14 @@ Where the list comes from (nothing here is invented from scratch):
   ``git -C . push``. We match a regex anywhere in the command text, so wrappers and paths cannot hide a hit.
 * Real worker runs: ``curl -X PUT .../merge`` and ``curl -X POST .../dispatches`` bypassed a ``gh``-only list.
 
-Two tiers. **critical** = irreversible or public, reviewed with its own budget. **watch** = privileged access to
-another machine (ssh, pct, qm): worth one look, but it must never use up the budget of the critical tier.
+Two tiers. **critical** = irreversible or public, reviewed with its own budget; since 1.4 it is asked BEFORE it runs
+(pre-flight). It includes quitting an app a person may be using and copying into a Library folder (1.5, audit t_de8aec31).
+**watch** = privileged WRITE access to another machine (ssh, pct, qm): worth one look, but it must never use up the budget
+of the critical tier. A command that only reads (``ls``, ``cat``, ``grep``, ``pgrep``...) is no watch at all (``read_only``).
 Add your own with ``categories.architecture.commands_extra`` (regexes); nothing here needs editing.
 """
 import re
+import shlex
 
 _FLAGS = r"(?:\s+-{1,2}[\w=./:@-]+(?:\s+[\w=./:@-]+)?){0,8}"  # kubectl -n prod / --context p / git -C dir (loose)
 
@@ -25,6 +28,12 @@ def _gap(stop, chars=r"[^\n]"):
     the regex slow; stopping at the next `stop` word, so each start scans only to its neighbour (linear, not cubic)."""
     return rf"(?:(?!\b(?:{stop})\b){chars}){{0,256}}"
 
+
+NO_SEP = r"[^\n;&|]"  # one simple command
+_COPY = "cp|mv|rsync|scp|ditto|ln"
+# A Library folder (the person's, or the system's) as a target: `~/Library/`, `$HOME/Library/`, `/Users/me/Library/`,
+# `/Library/`, also after `host:`. It must follow at least one other argument, so `cp ~/Library/a /tmp/` (a read) is no hit.
+_LIBRARY = r"\s(?:[\w.@-]{1,64}:)?[\"']?(?:~|\$HOME|\$\{HOME\}|/Users/[\w.-]{1,64})?/Library/"
 
 _GH_WRITE = r"(?:-X\s*|--request[= ]\s*|--method[= ]\s*)(?:PUT|POST|PATCH|DELETE)\b"
 
@@ -66,12 +75,74 @@ CRITICAL_COMMANDS = [
     r"\binfisical\s+secrets\s+(?:set|delete)\b", r"\bcertbot\b", rf"\broute53\b{_gap('route53')}\bchange-resource-record-sets\b",
     # --- recursive delete of a broad or unverifiable target (not `rm -f one-file`, not `rm -rf node_modules`) ---
     r"\brm\s+(?:-\w+\s+)*-\w*[rRf]\w*\s+(?:-\w+\s+)*(?:--\s+)?[\"']?(?:/|~|\$|\.\.?(?:/|\s|$)|\*)",
+    # --- quit an app a person may be using; copy or link into a Library folder (also over ssh) ---------------
+    rf"\bosascript\b{_gap('osascript', r'[\s\S]')}\bquit\b", r"\b(?:killall|pkill)\b",
+    rf"\b(?:{_COPY})\b(?:\s+-{{1,2}}[\w=./:@-]{{1,64}}){{0,8}}\s+(?!-)\S{{1,256}}{_gap(_COPY, NO_SEP)}{_LIBRARY}",
     # --- guards switched off, tunnels, instance metadata --------------------------------------------
     rf"\bcurl\b{_gap(CURL)}\s(?:-k|--insecure)\b", r"--(?:no-verify|dangerously-skip-permissions|no-sandbox|yes-always)\b",
     r"\bngrok\b", r"\bcloudflared\s+tunnel\b", rf"\bssh\b{_gap('ssh')}\s-R\b", r"169\.254\.169\.254",
 ]
 
 WATCH_COMMANDS = [r"\b(?:ssh|scp|rsync|pct|qm)\s"]
+
+# What only looks: the first word of every simple command must be one of these (a second word where it matters).
+_READ = frozenset("""pgrep ps ls cat head tail grep egrep fgrep wc echo printf pwd id whoami uname date df du stat file which
+    sort uniq cut tr basename dirname readlink hostname uptime sw_vers free lsblk lscpu journalctl dmesg sleep true false test [ cd for done fi case esac in find sed awk curl wget""".split())
+_READ_SUB = {"pct": {"list", "status", "config"}, "qm": {"list", "status", "config"}}
+_SSH_VALUE = frozenset("-b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w".split())  # options that take a value
+_SEGMENT_START = frozenset({"do", "then", "else", "elif", "if", "while", "!", "{"})
+_WRITE_FLAGS = {"sed": re.compile(r"^-\w*i"), "find": re.compile(r"^-(?:delete|exec|execdir|ok|fprint\w*|fls)$"),
+                "curl": re.compile(r"^(?:-\w*[oOdTFX]|--(?:output|remote-name|data\S*|upload-file|form|request)\b)"),
+                "wget": re.compile(r"^(?:-\w*[OP]|--(?:output-document|directory-prefix|post-data|post-file)\b)")}
+_HARMLESS_REDIRECT = re.compile(r"(?:\d|&)?>>?\s{0,4}(?:/dev/null|&\d)\b")  # `2>/dev/null`, `>/dev/null`, `2>&1`
+
+
+def read_only(command, _depth=0) -> bool:
+    """True when ``command`` (a shell line, also through ``ssh host '...'``, ``pct exec N -- ...``, ``timeout 60 ...``)
+    only looks: every simple command starts with a reading word, no output goes to a file, nothing else runs.
+    Unknown, unparseable or longer than 4000 characters is not read-only (a review is cheaper than a missed write)."""
+    text = str(command or "")
+    if not text.strip() or len(text) > 4000 or _depth > 3:  # ponytail: ceiling; a longer line is always reviewed
+        return False
+    text = _HARMLESS_REDIRECT.sub(" ", text.replace("\n", " ; "))
+    lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lex.whitespace_split, lex.commenters = True, ""  # a `#` is a word here: a comment must not hide a later write
+    try:
+        words = list(lex)
+    except ValueError:
+        return False
+    if any(">" in w for w in words):  # a redirect that survived writes a file
+        return False
+    segments, current = [], []
+    for w in words:
+        if set(w) <= set("();|&") and w:  # a separator
+            segments.append(current)
+            current = []
+        else:
+            current.append(w)
+    return all(_segment_reads(seg, _depth) for seg in segments + [current])
+
+
+def _segment_reads(words, depth) -> bool:
+    while words and (re.fullmatch(r"\w+=\S*", words[0]) or words[0] in _SEGMENT_START | {"time"}):
+        words = words[1:]
+    if not words:  # empty (`;;`, `$(`...): nothing runs here
+        return True
+    head, rest = words[0], words[1:]
+    if head == "timeout" and rest and re.fullmatch(r"\d+[smhd]?", rest[0]):
+        return _segment_reads(rest[1:], depth) if rest[1:] else False
+    if head == "ssh":
+        args = list(rest)
+        while args and args[0].startswith("-"):
+            args = args[2:] if args[0] in _SSH_VALUE else args[1:]
+        return len(args) > 1 and read_only(" ".join(args[1:]), depth + 1)  # args[0] is the host
+    if head == "pct" and rest[:1] == ["exec"]:
+        return "--" in rest and read_only(" ".join(rest[rest.index("--") + 1:]), depth + 1)
+    if head in _READ_SUB:
+        return rest[:1] != [] and rest[0] in _READ_SUB[head]
+    flag = _WRITE_FLAGS.get(head)
+    return head in _READ and not (flag and any(flag.search(a) for a in rest))
+
 
 _CRITICAL = [re.compile(p, re.I) for p in CRITICAL_COMMANDS]
 _WATCH = [re.compile(p, re.I) for p in WATCH_COMMANDS]
@@ -111,7 +182,7 @@ def classify(command, extra=(), critical=None, watch=None):
     if any(r.search(text) for r in crit):
         return "critical"
     wat = _WATCH if watch is None else [re.compile(p, re.I) for p in watch]
-    return "watch" if any(r.search(text) for r in wat) else None
+    return "watch" if any(r.search(text) for r in wat) and not read_only(text) else None
 
 
 def is_critical_file(path, patterns=None):

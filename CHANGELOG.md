@@ -46,7 +46,21 @@ versioning: [SemVer](https://semver.org/).
     `status` and `doctor` show provider health and the fallback.
   - `docs/UPSTREAM.md`: five requests to Hermes, each naming the code that would use it.
 
+- **Pre-action gaps, WP3** (`docs/SPEC-1.5.md`, owner's audit t_de8aec31). Three holes in the risk list, found when a worker quit a
+  production app and installed a plugin on a person's Mac with no question first.
+  - **New critical rules** (asked before they run, also inside `ssh host '...'`): quitting an app (`osascript ... quit`,
+    `killall`, `pkill`) and `cp`/`mv`/`rsync`/`scp`/`ditto`/`ln` into `~/Library/`, `$HOME/Library/`, `/Users/<name>/Library/` or
+    `/Library/` (the Library path must be a target, so copying FROM it is not a hit). Every pattern is bounded.
+  - **`watch` budget only for writes.** `rules.read_only()` reads the command with `shlex`: when every simple command starts with
+    a reading word (`ls`, `cat`, `grep`, `pgrep`, `sed -n`, `find` without `-delete`/`-exec`, a `curl` that only fetches, `pct`/`qm`
+    `list|status|config`...) and nothing writes a file, `ssh`/`pct`/`qm` is no `watch` and costs no budget. Unknown, unparseable
+    or longer than 4000 characters counts as a write. `scp`/`rsync` stay `watch`.
+  - **The words for an unclear approval.** The worker tip says: not sure the card allows it? `kanban_block(kind='needs_input')` or
+    `SECOND-OPINION:`, do not guess. The pre-flight reviewer holds a quit or a Library install that the task does not name and
+    names "ask the owner first" as the alternative.
+
 ### Changed
+- `watch` no longer fires for read-only `ssh`/`pct`/`qm` commands (see above). Add your own with `categories.watch` patterns as before.
 - `report` JSON: `mom.tips_followed` / `tips_rejected` are gone; see `advice` (`followed`, `acted`, `ignored`, `unknown`).
   `calling_mom_advice_feedback_total` has the label `result` (was `verdict`). Rows of 1.4 are read as before:
   `followed` counts as `acted`, `rejected` as `unknown`.

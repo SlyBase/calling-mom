@@ -162,7 +162,14 @@ command was allowed, as designed.
 
 ## Where the risk list comes from
 
-`rules.py` is built from what existing agents already decided, not invented: the **Claude Code** auto-mode classifier publishes its "blocked by default" list (production deploys, force push, destructive git, `terraform destroy`, secret-manager writes, IAM grants, merging unapproved PRs, bot commands in comments, `--insecure`, tunnels, the cloud metadata endpoint); **OpenAI Codex** flags forced `rm` and looks through `sudo`/`env`/`bash -c`; Claude's docs warn that prefix rules miss `/usr/bin/curl` and `git -C . push`, so we match a regex anywhere in the command. The **DeepSeek Harness** relies on a sandbox and approval policy, not on a command list. `test_rules.py` is the table (critical / watch / routine, including false-positive guards such as `git push origin feat/x` or `rm -f one-file`).
+`rules.py` is built from what existing agents already decided, not invented: the **Claude Code** auto-mode classifier publishes its "blocked by default" list (production deploys, force push, destructive git, `terraform destroy`, secret-manager writes, IAM grants, merging unapproved PRs, bot commands in comments, `--insecure`, tunnels, the cloud metadata endpoint); **OpenAI Codex** flags forced `rm` and looks through `sudo`/`env`/`bash -c`; Claude's docs warn that prefix rules miss `/usr/bin/curl` and `git -C . push`, so we match a regex anywhere in the command. The **DeepSeek Harness** relies on a sandbox and approval policy, not on a command list. `test_rules.py` is the table (critical / watch / read-only / routine, including false-positive guards such as `git push origin feat/x` or `rm -f one-file`).
+
+1.5 added three critical patterns after an audit (a worker quit a production app and installed a plugin over `ssh` with no question
+first): `osascript ... quit`, `killall`/`pkill`, and `cp`/`mv`/`rsync`/`scp`/`ditto`/`ln` with a `Library/` path as a target (not as the
+source). `watch` is for writes only: `rules.read_only()` splits the line with `shlex`, looks through `ssh host '...'`, `pct exec N -- ...` and
+`timeout N`, and calls it read-only when every simple command starts with a reading word and no redirect writes a file. A `#` is a word, not a
+comment (a comment must not hide a later write). Known gaps: `make install` and `installer -pkg` (the target is not in the command),
+redirects and downloads into a Library folder (`> ~/Library/x`, `curl -o`), and `kill <pid>`. The replay of the audited runs is in the PR of WP3; no shipped code reads transcripts.
 
 
 ## Compatibility

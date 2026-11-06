@@ -115,7 +115,7 @@ Your own numbers: `hermes calling-mom report` (`--days 7`, `--since 2026-11-05 -
 | The **same command 3 times** (going in circles) | the main model | A short tip to get out of the loop. |
 | **Broken tool calls 3 times** | the main model | A short tip. |
 | A **risky command or file** (merge, release, force push, `terraform apply`, `kubectl delete`, `DROP TABLE`, `rm -rf` of broad folders, secrets, ...) | the main model | A review: the biggest risk, what to double-check. |
-| A command on **another machine** (`ssh`, `scp`, `pct`, `qm`) | the main model | One short look per card. |
+| A command that **changes** another machine (`ssh`, `scp`, `pct`, `qm`; a read-only look such as `ls` or `pgrep` is no review) | the main model | One short look per card. |
 | **`SECOND-OPINION: <question>`** as a card comment (or the `second_opinion` tool) | the main model | Mom answers the question. |
 | It says **"done"** | the main model | A check: does the result match what the card asked? Missing parts go back once. |
 | Card marker **`[crit]`** | you | The card runs on Mom's model from the start. |
@@ -261,7 +261,7 @@ If a helper cannot be reached (dead key, not logged in) you get **one** comment,
 `[advisor unavailable] ... Check the setup: hermes calling-mom doctor`.
 
 **Before** a command that the risk list marks critical (force push, branch delete, `terraform apply`, `kubectl
-delete`, `DROP TABLE`, a broad `rm -rf`, ...) a Kanban worker may run, Mom looks at it once. If she says hold,
+delete`, `DROP TABLE`, a broad `rm -rf`, quitting an app with `osascript`/`killall`/`pkill`, a copy into `~/Library/`, ...) a Kanban worker may run, Mom looks at it once. If she says hold,
 the card gets:
 
 ```
