@@ -55,11 +55,16 @@ class RenderTest(unittest.TestCase):
             self.assertIn(f"# TYPE {n} ", text, n)
             self.assertIn(f"# HELP {n} ", text, n)
 
-    def test_advice_feedback_counts_followed_and_rejected_from_the_first_push(self):
+    def test_advice_feedback_counts_the_four_results_from_the_first_push(self):
         out = lines(self.render())
-        self.assertIn('calling_mom_advice_feedback_total{verdict="followed"} 0', out)
-        rows = ROWS + [{"kind": "advice_feedback", "verdict": "rejected"}]
-        self.assertIn('calling_mom_advice_feedback_total{verdict="rejected"} 1', lines(self.render(rows=rows)))
+        for result in ("followed", "acted", "ignored", "unknown"):
+            self.assertIn(f'calling_mom_advice_feedback_total{{result="{result}"}} 0', out)
+        rows = ROWS + [{"kind": "advice_feedback", "result": "followed"}, {"kind": "advice_feedback", "result": "ignored"},
+                       {"kind": "advice_feedback", "verdict": "followed"}, {"kind": "advice_feedback", "verdict": "rejected"}]
+        out = lines(self.render(rows=rows))
+        self.assertEqual([x for x in out if x.startswith("calling_mom_advice_feedback_total{")],
+                         ['calling_mom_advice_feedback_total{result="acted"} 1', 'calling_mom_advice_feedback_total{result="followed"} 1',
+                          'calling_mom_advice_feedback_total{result="ignored"} 1', 'calling_mom_advice_feedback_total{result="unknown"} 1'])
 
     def test_provider_failures_and_olymp_calls_are_counted_from_the_first_push(self):
         out = lines(self.render())

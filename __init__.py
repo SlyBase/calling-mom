@@ -1662,11 +1662,15 @@ def _log_path() -> Path:
     return Path(get_default_hermes_root()) / "logs" / "calling-mom.jsonl"
 
 
-def attention_report(days=7, board=None, rows=None, now=None) -> dict:
+def attention_report(days=7, board=None, rows=None, now=None, since=None, until=None) -> dict:
     """The numbers behind ``hermes calling-mom report`` and ``GET /summary`` (see ``report.build``).
 
-    ``board`` keeps that board's rows plus the rows of its cards; Olymp also shows today's calls against the daily cap."""
+    ``board`` keeps that board's rows plus the rows of its cards; Olymp also shows today's calls against the daily cap.
+    The window is ``since`` up to ``until`` (ISO date or date-time, UTC), else ``days`` back from ``until`` or now.
+    Outside help is observed only on boards the sweep has read, chat waits only with ``calling_mom.count.chat_waits`` on."""
     now = time.time() if now is None else now
+    end = report.parse_when(until) if until else None
+    start = report.parse_when(since) if since else (end or now) - days * 86400
     tasks = ()
     if board is not None:
         try:
@@ -1674,9 +1678,12 @@ def attention_report(days=7, board=None, rows=None, now=None) -> dict:
                 tasks = {t.id for t in kb.list_tasks(conn, include_archived=True)}
         except Exception:  # a board we cannot read: its own rows still count
             pass
-    out = report.build(report.read(_log_path()) if rows is None else rows, since=now - days * 86400, board=board, tasks=tasks)
+    out = report.build(report.read(_log_path()) if rows is None else rows, since=start, until=end, board=board, tasks=tasks)
     out["olymp"] |= {"today": _spent_today()["olymp"], "cap": settings()["olymp"]["max_per_day"]}
-    return {"days": days, "board": board, **out}
+    scanned = _load_holds().get("touches") or {}
+    out["you"]["outside"]["observed"] = (board in scanned) if board else bool(scanned)
+    out["you"]["chat_waits"]["observed"] = bool(settings()["count"]["chat_waits"])
+    return {"days": None if since else days, "since": report.iso(start), "until": report.iso(end) if end else None, "board": board, **out}
 
 
 def _worker_key():

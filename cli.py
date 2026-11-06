@@ -445,7 +445,7 @@ class Env:
     choose: Optional[Callable] = None  # menu callback; None = numbered lists
     interactive: bool = True           # False: no terminal, never wait for an answer
     answer: Optional[Callable] = None  # the plugin's answer_card
-    report: Optional[Callable] = None  # the plugin's attention_report: (days, board) -> dict
+    report: Optional[Callable] = None  # the plugin's attention_report: (days, board, since, until) -> dict
     precedents_path: Optional[Callable] = None  # () -> Path of logs/calling-mom-precedents.jsonl
 
 
@@ -525,9 +525,16 @@ def cmd_answer(env, task, board=None, text=None, accept=False, allow_once=False)
     return 0
 
 
-def cmd_report(env, days=7, board=None, as_json=False) -> int:
-    """What reached whom and what it cost, over the last ``days`` (see ``report.build``)."""
-    out = env.report(days, board)
+def cmd_report(env, days=7, board=None, as_json=False, since=None, until=None) -> int:
+    """What reached whom and what it cost, over the last ``days`` or from ``since`` to ``until`` (see ``report.build``)."""
+    for value in (since, until):
+        try:
+            if value:
+                report.parse_when(value)
+        except ValueError:
+            env.say(f"Not a date: {value!r}. Use an ISO date or date-time in UTC, for example 2026-11-05 or 2026-11-06T03:00.")
+            return 2
+    out = env.report(days, board, since, until)
     env.say(json.dumps(out, indent=2) if as_json else report.render(out))
     return 0
 
@@ -595,7 +602,8 @@ def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None
                routes=lambda: routes_from(core.load_config())[0],
                choose=core.menu if interactive and core.has_menu() else None, interactive=interactive,
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
-               errors=lambda: count_errors(log_path()), answer=answer, report=build_report,
+               errors=lambda: count_errors(log_path()), answer=answer,
+               report=lambda days, board, since=None, until=None: build_report(days, board, since=since, until=until),
                precedents_path=lambda: precedents.path_for(log_path()))
 
 
@@ -618,7 +626,9 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     a.add_argument("--text", help="your answer, written to the card as '[you via calling-mom] ...'")
     a.add_argument("--allow-once", action="store_true", help="let the held command run once")
     r = sub.add_parser("report", help="what reached you, what did not, what it cost")
-    r.add_argument("--days", type=int, default=7, help="the window in days (default 7)")
+    r.add_argument("--days", type=int, default=7, help="the window in days, back from --until or now (default 7)")
+    r.add_argument("--since", help="start of the window: an ISO date or date-time, UTC (replaces --days)")
+    r.add_argument("--until", help="end of the window, not included: an ISO date or date-time, UTC (default: now)")
     r.add_argument("--board", help="only this board")
     r.add_argument("--json", action="store_true", help="print the numbers as JSON")
     p = sub.add_parser("precedents", help="the answers of yours that Mom may reuse: list, forget one, clear all")
@@ -639,7 +649,7 @@ def dispatch(args, spent, effective, log_path, core, answer=None, build_report=N
         return cmd_answer(env, args.task, board=args.board or core.kb.get_current_board(), text=args.text,
                           accept=args.accept, allow_once=args.allow_once)
     if cmd == "report":
-        return cmd_report(env, days=args.days, board=args.board, as_json=args.json)
+        return cmd_report(env, days=args.days, board=args.board, as_json=args.json, since=args.since, until=args.until)
     if cmd == "precedents":
         return cmd_precedents(env, args.action, args.id)
     return {"status": cmd_status, "doctor": cmd_doctor}[cmd](env)

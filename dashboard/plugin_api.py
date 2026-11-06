@@ -123,11 +123,18 @@ def needs_you():
 
 
 @router.get("/summary")
-def summary(days: int = Query(7, ge=1, le=90)):
-    """The attention report (``hermes calling-mom report``) plus what only the Desktop shows: today, waiting, recent."""
+def summary(days: int = Query(7, ge=1, le=90), since: str | None = None, until: str | None = None):
+    """The attention report (``hermes calling-mom report``) plus what only the Desktop shows: today, waiting, recent.
+    ``since`` and ``until`` (ISO date or date-time, UTC) replace the window of ``days``."""
     now = time.time()
-    rows = _rows(now - days * DAY)
-    out = mom().attention_report(days, rows=rows, now=now)
+    try:
+        end = mom().report.parse_when(until) if until else None
+        start = mom().report.parse_when(since) if since else (end or now) - days * DAY
+    except ValueError:
+        raise HTTPException(400, "since and until must be an ISO date or date-time in UTC, for example 2026-11-05 or 2026-11-06T03:00")
+    rows = _rows()
+    out = mom().attention_report(days, rows=rows, now=now, since=since, until=until)
+    rows = [r for r in rows if r.get("ts", 0) >= start and (end is None or r.get("ts", 0) < end)]
     out["today"] = {"mom_calls": mom().report.build(rows, since=now - now % DAY)["mom"]["calls"]}
     out["you"]["waiting"] = len(_needs_you())
     return {**out, "recent": _recent(rows)}
