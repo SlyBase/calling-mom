@@ -26,6 +26,29 @@ def load_config() -> dict:
         return {}
 
 
+def board_activity(conn) -> list:
+    """``[(task, comments, events)]`` of every card of the connected board (archived ones too), read only.
+    The sweep counts who else touched the board from this (``touches.py``)."""
+    return [(t, kb.list_comments(conn, t.id), kb.list_events(conn, t.id)) for t in kb.list_tasks(conn, include_archived=True)]
+
+
+def last_event_id(conn, task_id, kind) -> "int | None":
+    """Store id of the newest event of ``kind`` on a card: how a write calling-mom just made is told apart from outside help."""
+    ids = [e.id for e in kb.list_events(conn, task_id) if e.kind == kind]
+    return ids[-1] if ids else None
+
+
+def check_board_read() -> "str | None":
+    """None when the board reads the sweep needs work on the first live board, else the error (``doctor`` shows it)."""
+    try:
+        for slug in list_board_slugs()[:1]:
+            with kb.scoped_current_board(slug), kbc.connect_closing() as conn:
+                board_activity(conn)
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def hook_budget() -> float:
     """Seconds Hermes gives a bounded hook (``plugins.hook_callback_timeout``, default 30), clamped to 1..600.
 

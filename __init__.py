@@ -82,6 +82,13 @@ except ImportError:  # loaded by path (tests, plugin doctor)
     precedents = importlib.util.module_from_spec(_precedents_spec)
     _precedents_spec.loader.exec_module(precedents)
 
+try:
+    from . import touches
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _touches_spec = importlib.util.spec_from_file_location("calling_mom_touches", Path(__file__).with_name("touches.py"))
+    touches = importlib.util.module_from_spec(_touches_spec)
+    _touches_spec.loader.exec_module(touches)
+
 DEFAULTS = {
     "model": "deepseek/deepseek-v4.1-flash-1017",
     "provider": "openrouter",
@@ -95,6 +102,7 @@ DEFAULTS = {
     },
     "review": {"marker": "[review]", "reviewer": "reviewer"},  # [review] cards finish via the reviewer profile ("" = off)
     "metrics": {"pushgateways": [], "instance": "hermes"},  # Pushgateway base URLs, tried in order ([] = off)
+    "count": {"chat_waits": False},  # time you wait on a prompt in chat (kind, seconds, outcome; never the text). Off until setup asks.
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
     "human_marker": "[human]",  # such cards are for a person: Mom never answers their questions
     "advisor": {  # one short question to the strong model at the point where the worker is stuck
@@ -222,11 +230,25 @@ class _connect:
         return self._stack.__exit__(*exc)
 
 
-def _pin_strong(conn, task, why: str, reason: str = "other") -> None:
+def _own_write(conn, task_id, what, board) -> None:
+    """Log a board write calling-mom made itself (``pin``, ``unblock``), so the sweep does not count its event as outside help."""
+    event = {"pin": "model_override_set", "unblock": "unblocked"}[what]
+    _trace_row("own_write", task=task_id, board=board, what=what, store_id=_core.last_event_id(conn, task_id, event))
+
+
+def _unblock(conn, task_id, board) -> bool:
+    released = kb.unblock_task(conn, task_id)
+    if released:
+        _own_write(conn, task_id, "unblock", board)
+    return released
+
+
+def _pin_strong(conn, task, why: str, reason: str = "other", board=None) -> None:
     """Pin the card to the strong model. ``reason`` feeds the escalation metric:
     ``crit`` (marker at claim), ``blocked`` (worker gave up), ``breaker`` (crash park)."""
     cfg = settings()
     kb.set_model_override(conn, task.id, cfg["model"], provider=cfg["provider"])
+    _own_write(conn, task.id, "pin", board)
     kb.add_comment(conn, task.id, AUTHOR, f"Escalated to {cfg['model']} — {why}.")
     _trace_row("escalated", task=task.id, reason=reason)
     logger.info("calling-mom: %s -> %s (%s)", task.id, cfg["model"], why)
@@ -247,7 +269,7 @@ def on_claimed(task_id=None, board=None, **_):
             marker = settings()["marker"].lower()
             text = f"{task.title or ''}\n{task.body or ''}".lower()
             if marker and marker in text:
-                _pin_strong(conn, task, "critical card", reason="crit")
+                _pin_strong(conn, task, "critical card", reason="crit", board=board)
     except Exception as exc:  # pragma: no cover - never break dispatch
         logger.warning("calling-mom: claim hook failed for %s: %s", task_id, exc)
 
@@ -273,8 +295,8 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
             if task.model_override == settings()["model"]:
                 return  # the strong model already had its attempt
             why = f"blocked ({reason.strip()[:200]})" if reason and reason.strip() else "blocked"
-            _pin_strong(conn, task, why, reason="blocked")
-            kb.unblock_task(conn, task_id)
+            _pin_strong(conn, task, why, reason="blocked", board=board)
+            _unblock(conn, task_id, board)
     except Exception as exc:  # pragma: no cover - never break the board
         logger.warning("calling-mom: block hook failed for %s: %s", task_id, exc)
 
@@ -323,6 +345,10 @@ def _load_marks() -> dict:
         return {}
 
 
+TOUCH_EVERY_S = 30  # the dispatcher ticks often; reading every card of a board is not needed that often
+_last_scan: dict = {}  # board -> time of its last touch scan
+
+
 def sweep(board=None) -> list:
     """Escalate cards the crash circuit-breaker parked (``gave_up``); the breaker fires no block hook.
 
@@ -355,15 +381,74 @@ def sweep(board=None) -> list:
                     or signals.is_infra(payload.get("error") or task.last_failure_error)
                 ):
                     continue
-                _pin_strong(conn, task, f"circuit breaker ({str(payload.get('error') or '')[:150]})", reason="breaker")
-                kb.unblock_task(conn, task.id)
+                _pin_strong(conn, task, f"circuit breaker ({str(payload.get('error') or '')[:150]})", reason="breaker", board=board)
+                _unblock(conn, task.id, board)
                 done.append(task.id)
             marks[key] = last
             _state_path().parent.mkdir(parents=True, exist_ok=True)
             _state_path().write_text(json.dumps(marks))
     except Exception as exc:  # pragma: no cover - never break the caller
         logger.warning("calling-mom: sweep failed on board %s: %s", board, exc)
+    if board and _opted_in(board) and time.time() - _last_scan.get(board, 0) >= TOUCH_EVERY_S:
+        _last_scan[board] = time.time()
+        try:
+            _record_touches(board)
+        except Exception as exc:  # counting must never break the sweep
+            logger.warning("calling-mom: touches not counted on board %s: %s", board, exc)
     return done
+
+
+def _record_touches(board) -> None:
+    """Count who else touched ``board`` (``touch`` rows, ids and counts only, dedupe by store id) and which cards reached
+    a person. Read-only on the board. The watermark per board lives in the state file; the first sweep takes the whole
+    history. A card waiting in triage or blocked is written when it enters and written again, with ``wait_s``, when it leaves."""
+    state = _load_holds()
+    mine = {"comment": 0, "event": 0, "question": 0, "waiting": {}} | ((state.get("touches") or {}).get(board) or {})
+    with _connect(board) as conn:
+        cards = _core.board_activity(conn)
+    log = report.read(_log_path())
+    own = {r["store_id"] for r in log if r.get("kind") == "own_write" and r.get("board") == board and r.get("store_id") is not None}
+    by_id = {t.id: (t, events) for t, _, events in cards}
+
+    def emit(task, what, store_id, ts, wait=None):
+        _trace_row("touch", ts=ts, task=task.id, board=board, src="event", what=what, store_id=store_id,
+                   **({} if wait is None else {"wait_s": wait}))
+
+    def enter(task, events, what, store_id, ts, status):
+        wait = touches.wait_s(task, events, store_id, ts, status)
+        emit(task, what, store_id, ts, wait)
+        if wait is None:
+            mine["waiting"][f"event:{store_id}"] = [task.id, what, store_id, ts]
+
+    for task, comments, events in cards:
+        for c in comments:
+            row = touches.comment_touch(task, c) if c.id > mine["comment"] else None
+            if row:
+                _trace_row("touch", board=board, **row)
+        for e in events:
+            row = touches.event_touch(task, e) if e.id > mine["event"] and e.id not in own else None
+            if row:
+                _trace_row("touch", board=board, **row)
+        for event_id, ts in touches.triage_entries(events):
+            if event_id > mine["event"]:
+                enter(task, events, "triage", event_id, ts, "triage")
+    for q in (r for r in log if r.get("kind") == "question" and r.get("board") == board and r.get("ts", 0) > mine["question"]):
+        task, events = by_id.get(q.get("task"), (None, []))
+        block = touches.question_block(events, q["ts"]) if touches.reached_person(q) else None
+        if block:
+            enter(task, events, "to_person", *block, "blocked")
+    for key, (task_id, what, store_id, ts) in list(mine["waiting"].items()):
+        task, events = by_id.get(task_id, (None, []))
+        wait = None if task is None else touches.wait_s(task, events, store_id, ts, "triage" if what == "triage" else "blocked")
+        if task is None or wait is not None:  # the card left, or is gone
+            del mine["waiting"][key]
+            if task is not None:
+                emit(task, what, store_id, ts, wait)
+    mine["comment"] = max([c.id for _, comments, _ in cards for c in comments] + [mine["comment"]])
+    mine["event"] = max([e.id for _, _, events in cards for e in events] + [mine["event"]])
+    mine["question"] = max([r.get("ts", 0) for r in log if r.get("kind") == "question"] + [mine["question"]])
+    state.setdefault("touches", {})[board] = mine
+    _write_state(state)
 
 
 def sweep_all() -> list:
@@ -398,8 +483,8 @@ def _escalate_parked_task(task, payload, board) -> bool:
         fresh = kb.get_task(conn, task.id)
         if fresh is None or fresh.status != "blocked":
             return False
-        _pin_strong(conn, fresh, "circuit breaker (%s)" % (str(payload.get("error") or "")[:150]), reason="breaker")
-        kb.unblock_task(conn, fresh.id)
+        _pin_strong(conn, fresh, "circuit breaker (%s)" % (str(payload.get("error") or "")[:150]), reason="breaker", board=board)
+        _unblock(conn, fresh.id, board)
     return True
 
 
@@ -1205,7 +1290,7 @@ def _answer_question(cfg, task_id, board, reason, run_id) -> None:
         return log("error", "comment")
     if kind == "answer":
         with _connect(board) as conn:
-            if not kb.unblock_task(conn, task_id):
+            if not _unblock(conn, task_id, board):
                 return log("error", "unblock")
     log("answered" if kind == "answer" else "human", why if kind == "human" else None, by)
 
@@ -1309,7 +1394,7 @@ def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False
         if allow_once:
             for hold in holds:
                 _release_hold(board, task_id, hold["cmd_hash"], by=by)
-        released = kb.unblock_task(conn, task_id)
+        released = _unblock(conn, task_id, board)
     data = _load_holds()
     if briefs:
         data.setdefault("answered", {})[task_id] = briefs[-1].id
