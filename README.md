@@ -205,6 +205,26 @@ what is configured. Without a terminal, `setup` never waits: a missing flag ends
 to pass. `hermes calling-mom setup --preset subscription` still works too. `setup` also creates the sweep cron job
 (`calling-mom: sweep - ...`, once; skip it with `--no-cron`).
 
+### When a quota stops everything
+
+A subscription session limit or a dead key used to stop the workers and Mom with no word on the card. Now:
+
+- A worker that stops on a usage limit gets one `[quota]` comment per limit window: which provider, about when it resets
+  (UTC), and that the work is kept. Hermes retries by itself.
+- While a provider is limited or down, Mom and Olymp do not call it. The one `[advisor unavailable]` comment says until when.
+  One profile's broken login never silences another profile's Mom.
+- **Mom fallback.** `hermes calling-mom setup --fallback openrouter/deepseek/deepseek-v4.1-flash` (or `route:NAME`, or
+  `none`; `setup` also asks) names a second model that answers while Mom's provider is limited or down. The comment header
+  says `(<provider>, fallback)`. Olymp has no fallback: an expensive model is never replaced silently.
+- **Stalled cards.** A card that is `running` without a heartbeat for `calling_mom.stall_minutes` (default 15, `0` = off)
+  gets one `[stalled]` comment with the reclaim command, a `stalled` badge on the Desktop board and an entry in *Needs you*.
+  The plugin never reclaims a card by itself.
+- **Pace.** `hermes calling-mom pace --board B --max 1 --dry-run` prints how it would keep at most one card ready or running
+  (the rest wait behind parent links, in priority and age order). Without `--dry-run` it writes those links;
+  `--undo` removes exactly the links it added.
+
+`hermes calling-mom status` and `doctor` show which providers are limited or down and the fallback.
+
 ### Optional: reuse your Advanced Delegation models
 
 If you use the official [*Advanced Delegation*](https://hermes-agent.nousresearch.com/docs/plugins/advanced-delegation)
@@ -316,6 +336,9 @@ write is your click on a button, see [SECURITY.md](SECURITY.md).
 - **Your answers are kept as text.** With answers on, your reply to one of Mom's briefs is stored (redacted, 500 characters each) in `logs/calling-mom-precedents.jsonl` and shown to Mom for similar questions. It is the only place the plugin keeps prose. See and delete it with `hermes calling-mom precedents`; turn it off with `answer.precedents: false`.
 - **Who else touched your board is counted, not read.** For opted-in boards the sweep reads the comments and events of your Kanban store, read only. It keeps counts and ids: the author id of a comment (a profile or surface such as `default` or `desktop`), the kind of a board event (link, reclaim, assign, ...), times. Never the comment text. The store records no actor for board events, so the report says `unattributed`; what the plugin writes itself is logged as `own_write` and not counted.
 - **Chat waits are a separate switch** (`calling_mom.count.chat_waits`, off by default, `setup` asks). With it on, the plugin observes Hermes' `on_human_input_request` and `on_human_input_resolved` in any session of this profile and keeps the kind of wait (clarify, approval, sudo, other), its seconds and its outcome. Never the prompt or your answer.
+- **Provider errors are parsed, not kept.** For Mom and Olymp calls and for `api_request_error` in worker sessions of opted-in boards the plugin keeps only a class (rate limit, auth, key limit), a reset time, the provider and the model, per profile, in `calling-mom-state.json`. The error text never reaches the log or the state file.
+- **The fallback sees what Mom sees.** `mom_fallback` receives the same redacted excerpts as Mom, under Mom's caps.
+- **`pace` writes card links, only when you run it.** It shows its plan first (`--dry-run`), and `--undo` removes exactly the links it added. No other part of the plugin links or unlinks cards. Stalled cards are read from the heartbeat the Kanban store keeps; nothing is reclaimed.
 - **The Desktop page and the report stay on your machine.** They read the plugin log and your boards through your own gateway. The only write is your click on a button.
 - **The demo is local.** It uses a scratch folder and a bare git remote inside it, never a real remote.
 - Secrets (tokens, keys, passwords, credentials in URLs) are **blanked out** before anything is sent.
@@ -334,6 +357,8 @@ calling_mom:
   olymp: {provider: claude-subscription-directsdk-experimental, model: claude-opus-5-5}   # leave empty for no Olymp
   advisor: {enabled: true, boards: [my-board]}
   answer: {enabled: true, boards: [my-board]}   # optional: Mom answers worker questions first
+  mom_fallback: {provider: openrouter, model: deepseek/deepseek-v4.1-flash-1017}   # optional: answers while Mom's provider is limited or down
+  stall_minutes: 15                             # optional: flag a running card without a heartbeat (0 = off)
 ```
 
 Hermes only lets a plugin use a model you have granted (`plugins.entries.calling-mom.llm.*`); `setup` does that too.

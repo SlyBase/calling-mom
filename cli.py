@@ -184,11 +184,12 @@ def _get(cfg, dotted, default=None):
     return cfg
 
 
-def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None) -> dict:
+def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None) -> dict:
     """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay.
     ``answer`` None leaves the answer block alone; True/False switches "Mom answers worker questions" on/off.
-    ``chat_waits`` None leaves the count block alone; True/False switches the counting of your waits in chat."""
-    pairs = [p for p in (mom, olymp) if p]
+    ``chat_waits`` None leaves the count block alone; True/False switches the counting of your waits in chat.
+    ``fallback`` None leaves Mom's fallback alone; False clears it; a (provider, model) pair sets it and grants it like Mom."""
+    pairs = [p for p in (mom, olymp, fallback) if p]
     upd = {
         "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
         "calling_mom.olymp.provider": olymp[0] if olymp else "", "calling_mom.olymp.model": olymp[1] if olymp else "",
@@ -204,6 +205,8 @@ def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None) -> dict:
             upd["calling_mom.answer.boards"] = _boards(_get(cfg, "calling_mom.answer.boards", []), boards)
     if chat_waits is not None:
         upd["calling_mom.count.chat_waits"] = chat_waits
+    if fallback is not None:
+        upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"] = fallback or ("", "")
     return upd
 
 
@@ -218,9 +221,10 @@ def apply_updates(cfg, upd) -> dict:
     return out
 
 
-def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None):
+def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None, fallback=None):
     """Ask (or take a preset), return ``(updates, summary_lines)``. Writes nothing. ``answer`` True/False skips the
-    question "Let Mom answer worker questions before they reach you?", ``chat_waits`` the one about counting your waits in chat."""
+    question "Let Mom answer worker questions before they reach you?", ``chat_waits`` the one about counting your waits in chat,
+    ``fallback`` (False or a pair) the one about Mom's fallback."""
     if preset:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
@@ -245,17 +249,26 @@ def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), a
         chat_waits = pick("Count how long you wait on prompts in chat?",
                           [("no", False), ("yes: kind, seconds and outcome of each wait; never the prompt or your answer", True)],
                           ask, say, other=False, choose=choose, default=int(was_on))
-    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits)
+    if fallback is None:
+        current = (_get(cfg, "calling_mom.mom_fallback.provider") or None, _get(cfg, "calling_mom.mom_fallback.model"))
+        wanted = pick("Set a fallback for Mom (it answers when her provider is limited or down)?",
+                      [("no", False), ("yes: a second provider, so a limit does not silence the advice", True)],
+                      ask, say, other=False, choose=choose, default=int(all(current)))
+        fallback = _pick_pair("Mom fallback", listing, ask, say, current=current if current[0] else None, choose=choose,
+                              routes=routes) if wanted else False
+    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits, fallback)
 
 
-def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None):
-    upd = updates(mom, olymp, boards, cfg, answer, chat_waits)
+def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None):
+    upd = updates(mom, olymp, boards, cfg, answer, chat_waits, fallback)
     summary = [f"mom     : {mom[1]} ({mom[0]})", f"olymp   : {f'{olymp[1]} ({olymp[0]})' if olymp else 'off'}",
                f"boards  : {', '.join(upd['calling_mom.advisor.boards']) or '(none)'}"]
     if answer is not None:
         summary.append(f"answer  : on (boards: {', '.join(upd['calling_mom.answer.boards'])})" if answer else "answer  : off")
     if chat_waits is not None:
         summary.append("chat    : waits counted (kind, seconds, outcome; never the text)" if chat_waits else "chat    : waits not counted")
+    if fallback is not None:
+        summary.append(f"fallback: {fallback[1]} ({fallback[0]})" if fallback else "fallback: off")
     return upd, summary
 
 
@@ -323,7 +336,7 @@ def count_errors(path, now=None):
     return count, last
 
 
-def status_lines(cm, spent, errors=None) -> list:
+def status_lines(cm, spent, errors=None, health=None) -> list:
     sp, sm = mom_pair(cm)
     olymp = cm.get("olymp") or {}
     adv = cm.get("advisor") or {}
@@ -333,6 +346,8 @@ def status_lines(cm, spent, errors=None) -> list:
                      f"max {olymp.get('max_per_card', '?')} per card")
     else:
         lines.append("olymp   : off")
+    fb = cm.get("mom_fallback") or {}
+    lines.append(f"fallback: {fb['model']} ({fb['provider']})" if fb.get("model") and fb.get("provider") else "fallback: off")
     boards = adv.get("boards") or []
     lines.append(f"advisor : {'on' if adv.get('enabled') else 'OFF'}, boards: {', '.join(boards) or '(none)'}")
     ans = cm.get("answer") or {}
@@ -345,6 +360,8 @@ def status_lines(cm, spent, errors=None) -> list:
         lines.append("warning : advisor is on but no board is opted in, nothing is sent (run: hermes calling-mom setup)")
     if errors and errors[0]:
         lines.append(f"errors  : {errors[0]} advisor call(s) failed today, last: {errors[1]}. Run: hermes calling-mom doctor")
+    if health is not None:
+        lines.append("health  : " + ("; ".join(health) if health else "all providers ok"))
     lines.append(f"spend   : ${spent.get('usd', 0):.4f} / ${adv.get('daily_usd_cap', '?')}, "
                  f"{spent.get('tokens', 0)} / {adv.get('daily_token_cap', '?')} tokens today (mom only)")
     return lines
@@ -381,9 +398,9 @@ def _sweep_check(sweeps):
     return "warn", f"{len(active)} active sweep jobs: {ids}. Keep one: hermes cron remove <id> in that home"
 
 
-def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False) -> list:
+def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False, health=None) -> list:
     """``[(name, "ok"|"warn"|"fail", detail)]``. Live calls only if the static checks passed.
-    ``sweeps`` = ``find_sweeps()`` result; None skips the cron check.
+    ``sweeps`` = ``find_sweeps()`` result; None skips the cron check. ``health`` = lines of the providers that are limited or down now.
     ``board_read`` = ``_core.check_board_read()`` result (None: the board reads work, text: the error); False skips the check."""
     out = []
 
@@ -404,8 +421,13 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False
     olymp_on = bool(mm and mp)
     add("olymp pair", "ok" if (olymp_on or not (mm or mp)) else "fail",
         f"{mm} ({mp})" if olymp_on else ("off" if not (mm or mp) else "model AND provider are needed"))
-    need_models = [m for m in (sm, mm) if m]
-    need_providers = [p for p in (sp, mp) if p]
+    fb = cm.get("mom_fallback") or {}
+    fp, fm = fb.get("provider") or "", fb.get("model") or ""
+    fb_on = bool(fp and fm)
+    if fp or fm:
+        add("fallback pair", "ok" if fb_on else "fail", f"{fm} ({fp})" if fb_on else "model AND provider are needed (run: hermes calling-mom setup)")
+    need_models = [m for m in (sm, mm, fm) if m]
+    need_providers = [p for p in (sp, mp, fp) if p]
     miss_m = [m for m in need_models if m not in (llm.get("allowed_models") or [])]
     miss_p = [p for p in need_providers if p not in (llm.get("allowed_providers") or [])]
     flags = llm.get("allow_model_override") is True and llm.get("allow_provider_override") is True
@@ -420,13 +442,15 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False
         add("advisor", "ok", "boards: " + ", ".join(adv["boards"]))
     else:
         add("advisor", "warn", "off or no board opted in: nothing is sent to the mom or olymp")
+    if health:
+        add("provider health", "warn", "; ".join(health))
     if sweeps is not None:
         add("sweep cron", *_sweep_check(sweeps))
     if board_read is not False:
         add("board read", "ok" if board_read is None else "fail",
             "" if board_read is None else f"{board_read}: Hermes changed what the sweep reads, outside help is not counted")
     if static_ok:
-        tiers = [("mom call", sp, sm)] + ([("olymp call", mp, mm)] if olymp_on else [])
+        tiers = [("mom call", sp, sm)] + ([("olymp call", mp, mm)] if olymp_on else []) + ([("fallback call", fp, fm)] if fb_on else [])
         for name, prov, model in tiers:
             try:
                 probe(prov, model)
@@ -465,6 +489,8 @@ class Env:
     report: Optional[Callable] = None  # the plugin's attention_report: (days, board, since, until) -> dict
     precedents_path: Optional[Callable] = None  # () -> Path of logs/calling-mom-precedents.jsonl
     board_read: Optional[Callable] = None  # () -> None when the sweep's board reads work, else the error text
+    pace: Optional[Callable] = None        # the plugin's pace_board: (board, n, dry_run=, undo=) -> {ok, lines, error}
+    health: Optional[Callable] = None      # () -> lines of the providers that are limited or down now
 
 
 def _blocks(env):
@@ -472,11 +498,16 @@ def _blocks(env):
     return (cfg.get("calling_mom") or {}), (_get(cfg, "plugins.entries.calling-mom.llm", {}) or {})
 
 
-def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None):
+def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fallback=None):
     """Updates and summary: from flags when they say everything, otherwise by asking."""
     routes = env.routes()
-    if (olymp or boards) and not (mom or preset):
-        raise SetupError("--olymp and --boards need --mom (or --preset)")
+    if fallback is not None:
+        fallback = False if fallback.strip().lower() == "none" else parse_pair(fallback, routes)
+        pair = mom_pair((cfg.get("calling_mom") or {}))
+        if not (mom or preset) and not (olymp or boards) and all(pair):
+            mom = "/".join(pair)  # `--fallback` alone: keep the Mom that is configured
+    if (olymp or boards or fallback is not None) and not (mom or preset):
+        raise SetupError("--olymp, --boards and --fallback need --mom (or --preset)")
     if mom or (preset and (boards or not env.interactive)):
         if mom:
             pair_mom, pair_olymp = resolve(mom, olymp, cfg, routes)
@@ -485,7 +516,7 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None):
                 raise SetupError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
             pair_mom, pair_olymp = PRESETS[preset]["mom"], PRESETS[preset]["olymp"]
         chosen = parse_boards(boards) if boards else ([] if _get(cfg, "calling_mom.advisor.boards") else ["*"])
-        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits)
+        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits, fallback)
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
                          "optionally --olymp, --boards and --cron/--no-cron.")
@@ -493,13 +524,13 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None):
     if hint:
         env.say(hint)
     return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes,
-                 answer=answer, chat_waits=chat_waits)
+                 answer=answer, chat_waits=chat_waits, fallback=fallback)
 
 
-def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None) -> int:
+def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None, fallback=None) -> int:
     cfg = env.load()
     try:
-        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits)
+        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits, fallback)
     except SetupError as exc:
         env.say(str(exc))
         return 2
@@ -529,7 +560,7 @@ def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cr
 
 def cmd_status(env) -> int:
     cm, _ = _blocks(env)
-    for line in status_lines(cm, env.spent(), env.errors() if env.errors else None):
+    for line in status_lines(cm, env.spent(), env.errors() if env.errors else None, env.health() if env.health else None):
         env.say(line)
     return 0
 
@@ -558,6 +589,22 @@ def cmd_report(env, days=7, board=None, as_json=False, since=None, until=None) -
     return 0
 
 
+def cmd_pace(env, board, n, dry_run=False, undo=False) -> int:
+    """Keep at most ``n`` cards of ``board`` ready or running by chaining the rest with parent links; ``--undo`` removes
+    exactly the links pace added (see the plugin's ``pace_board``)."""
+    out = env.pace(board, n, dry_run=dry_run, undo=undo)
+    for line in out["lines"]:
+        env.say(line)
+    if not out.get("ok"):
+        env.say(f"Not paced: {out.get('error')}")
+        return 1
+    if dry_run:
+        env.say("Dry run: nothing was written.")
+    elif not undo and out.get("added"):
+        env.say(f"Added {out['added']} link(s). Take them away again with: hermes calling-mom pace --board {board} --undo")
+    return 0
+
+
 def cmd_precedents(env, action="list", pid=None) -> int:
     """The answers Mom may reuse (see ``precedents.py``): list them, forget one, or clear them all."""
     path = env.precedents_path()
@@ -579,7 +626,8 @@ def cmd_precedents(env, action="list", pid=None) -> int:
 
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
-    checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps(), env.board_read() if env.board_read else False)
+    checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps(), env.board_read() if env.board_read else False,
+                        env.health() if env.health else None)
     for name, status, detail in checks:
         env.say(f"{ {'ok': 'OK  ', 'warn': 'WARN', 'fail': 'FAIL'}[status] }  {name:<17} {detail}".rstrip())
     env.say("INFO  " + DESKTOP_HINT)  # an info line: it never changes the exit code
@@ -588,7 +636,7 @@ def cmd_doctor(env) -> int:
 
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
-def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None):  # pragma: no cover - needs a live Hermes
+def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None, pace=None, health=None):  # pragma: no cover - needs a live Hermes
     def providers():
         return core.list_providers(core.load_config())
 
@@ -624,7 +672,7 @@ def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
                errors=lambda: count_errors(log_path()), answer=answer,
                report=lambda days, board, since=None, until=None: build_report(days, board, since=since, until=until),
-               precedents_path=lambda: precedents.path_for(log_path()), board_read=core.check_board_read)
+               precedents_path=lambda: precedents.path_for(log_path()), board_read=core.check_board_read, pace=pace, health=health)
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -640,6 +688,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
                    help="let Mom answer worker questions on these boards (default: ask; with flags, keep the current choice)")
     s.add_argument("--chat-waits", action=argparse.BooleanOptionalAction, default=None,
                    help="count how long you wait on prompts in chat: kind, seconds, outcome (default: ask; with flags, keep the current choice)")
+    s.add_argument("--fallback", metavar="PROVIDER/MODEL", help="answers when Mom's provider is limited or down: provider/model, route:NAME "
+                   "or none (default: ask; alone, it keeps the Mom that is configured)")
     s.add_argument("--yes", action="store_true", help="accepted for scripts; setup never asks before writing")
     a = sub.add_parser("answer", help="answer a card that carries Mom's brief or a pre-flight HOLD")
     a.add_argument("task", metavar="TASK", help="the card id")
@@ -653,6 +703,11 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     r.add_argument("--until", help="end of the window, not included: an ISO date or date-time, UTC (default: now)")
     r.add_argument("--board", help="only this board")
     r.add_argument("--json", action="store_true", help="print the numbers as JSON")
+    k = sub.add_parser("pace", help="keep at most N cards of a board ready or running (chains the rest with parent links)")
+    k.add_argument("--board", required=True, help="the board to pace")
+    k.add_argument("--max", type=int, help="at most this many cards ready or running")
+    k.add_argument("--dry-run", action="store_true", help="print the plan and write nothing")
+    k.add_argument("--undo", action="store_true", help="remove exactly the links pace added")
     p = sub.add_parser("precedents", help="the answers of yours that Mom may reuse: list, forget one, clear all")
     p.add_argument("action", nargs="?", choices=["list", "forget", "clear"], default="list")
     p.add_argument("id", nargs="?", help="the precedent id (for forget)")
@@ -661,12 +716,14 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     parser.set_defaults(cm_cmd=None)
 
 
-def dispatch(args, spent, effective, log_path, core, answer=None, build_report=None):  # pragma: no cover - argparse glue
-    env = make_env(spent, effective, log_path, core, answer=answer, build_report=build_report)
+def dispatch(args, spent, effective, log_path, core, answer=None, build_report=None, pace=None, health=None):  # pragma: no cover - argparse glue
+    env = make_env(spent, effective, log_path, core, answer=answer, build_report=build_report, pace=pace, health=health)
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron,
-                         answer=args.answer, chat_waits=args.chat_waits)
+                         answer=args.answer, chat_waits=args.chat_waits, fallback=args.fallback)
+    if cmd == "pace":
+        return cmd_pace(env, args.board, args.max, dry_run=args.dry_run, undo=args.undo)
     if cmd == "answer":
         return cmd_answer(env, args.task, board=args.board or core.kb.get_current_board(), text=args.text,
                           accept=args.accept, allow_once=args.allow_once)

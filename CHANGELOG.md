@@ -24,11 +24,44 @@ versioning: [SemVer](https://semver.org/).
     (no per-token price)". What was not observed says `not observed`, never 0. The Desktop `You` rung shows the
     outside-help counts. `doctor` has a `board read` check.
 
+- **Quota and pacing, WP2** (`docs/SPEC-1.5.md`). A quota stall now says why and until when; the manual chores become a comment
+  or one command.
+  - **Provider health.** Errors are classified as rate limit, auth, key limit or other (`quota.py`), from the plugin's own Mom and
+    Olymp calls and from `api_request_error` in worker sessions of opted-in boards. A Claude subscription message such as
+    `You've hit your session limit · resets 1:50pm (UTC)` gives the reset time (UTC only; anything else is "unknown", 30 minutes).
+    Health is kept per profile and provider in `calling-mom-state.json`; an auth or key-limit error is `down for 30 min`. While a
+    provider is limited or down, Mom and Olymp calls to it are skipped without a model call and the single
+    `[advisor unavailable]` comment says until when. The error text is parsed and dropped: it reaches neither the log nor the state file.
+  - **`[quota]` comments.** `on_kanban_worker_exited` with `outcome == "rate_limited"`: one comment per card and limit window
+    (`[quota] <provider> hit its usage limit; resets about HH:MM UTC. The dispatcher retries by itself; the work in <workspace> is kept.`).
+  - **Mom fallback.** `calling_mom.mom_fallback: {provider, model}` (`setup --fallback PROVIDER/MODEL|route:NAME|none`, or the
+    new setup question) answers when Mom's provider is limited or down; the comment header says `(<provider>, fallback)`. It is granted like Mom,
+    gets the same redacted excerpts, counts against Mom's caps, and `doctor` makes one real call to it. Olymp has no fallback.
+  - **Stalled cards.** The sweep flags a running card without a heartbeat for `calling_mom.stall_minutes` (default 15, 0 = off):
+    one `[stalled]` comment and one `stall` row per run, a `stalled` badge and a Needs you entry in the Desktop half (read only).
+    It never reclaims by itself.
+  - **`hermes calling-mom pace --board B --max N [--dry-run] [--undo]`** keeps at most N cards ready or running by chaining the
+    rest with parent links. It prints its plan first; `--undo` removes exactly the links it added. Its writes are logged as `own_write`.
+  - **Report.** A `Quota` line (limits and their length, cards paused, Mom calls skipped, fallback answers) and a `Stalled` line.
+    `status` and `doctor` show provider health and the fallback.
+  - `docs/UPSTREAM.md`: five requests to Hermes, each naming the code that would use it.
+
 ### Changed
 - `report` JSON: `mom.tips_followed` / `tips_rejected` are gone; see `advice` (`followed`, `acted`, `ignored`, `unknown`).
   `calling_mom_advice_feedback_total` has the label `result` (was `verdict`). Rows of 1.4 are read as before:
   `followed` counts as `acted`, `rejected` as `unknown`.
 - Log rows may carry their own `ts` (the time of the event, not of the sweep).
+
+## [1.4.2] - 2026-11-06
+
+### Added
+- **The page shows what is climbing right now**: a new `Active` section (between "Needs you" and "Recent activity") lists the running/ready cards of your opted-in boards with their last comment, newest last-activity first. A card with no comment shows "No comment yet". New read-only route `GET /active` (the last comment is the last signal, as-is; the body is cut to 200 chars).
+- **Card identity in the lists**: "Recent activity" (and the Active list) show the card **title + board** as the visible line; the `task_id` is now a small, muted, mono suffix. A card that is no longer on the board falls back to its `task_id`.
+- **A time-window selector** (7 / 14 / 30 / 90 days) in the page header drives the poll (`/summary?days=<n>`) and the "Last N days" subline; the choice is kept in `ctx.storage` and survives reloads.
+- **Collapsible sections**: each page section (Needs you, Active, Recent activity) toggles on header click (chevron). Defaults: Needs you open, Active open, Recent activity collapsed.
+
+### Changed
+- The `GET /summary` recent rows carry a `title` (joined from the boards), so the page can show the card name instead of its id.
 
 ## [1.4.1] - 2026-11-06
 

@@ -116,6 +116,52 @@ class BoardReadTest(unittest.TestCase):
             self.assertEqual(self.core.check_board_read(), "AttributeError: list_events is gone")
 
 
+class QuotaReadTest(unittest.TestCase):
+    """WP2 reads: the cards that run (stalled check), the links between cards (pace), the profile a process works for."""
+
+    def setUp(self):
+        self.core = load()
+        kb = test_calling_mom.kb
+        self.a = test_calling_mom.with_conn(lambda c: kb.create_task(c, title="parent", assignee="w"))
+        self.b = test_calling_mom.with_conn(lambda c: kb.create_task(c, title="child", assignee="w", parents=[self.a]))
+
+    def test_running_cards_are_only_the_running_ones(self):
+        def run(conn):
+            with conn:
+                conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (self.a,))
+            return [t.id for t in self.core.running_cards(conn)]
+        self.assertIn(self.a, test_calling_mom.with_conn(run))
+        self.assertNotIn(self.b, test_calling_mom.with_conn(run))
+
+    def test_board_links_are_parent_child_pairs(self):
+        tasks, links = test_calling_mom.with_conn(self.core.board_cards)
+        self.assertIn((self.a, self.b), links)
+        self.assertEqual({self.a, self.b} <= {t.id for t in tasks}, True)
+
+    def test_link_and_unlink_report_what_happened(self):
+        c = test_calling_mom.with_conn(lambda c: test_calling_mom.kb.create_task(c, title="third", assignee="w"))
+        test_calling_mom.with_conn(lambda conn: self.core.link(conn, self.b, c))
+        self.assertTrue(test_calling_mom.with_conn(lambda conn: self.core.unlink(conn, self.b, c)))
+        self.assertFalse(test_calling_mom.with_conn(lambda conn: self.core.unlink(conn, self.b, c)))
+        with self.assertRaises(ValueError):   # a link that would close a cycle is refused by Hermes
+            test_calling_mom.with_conn(lambda conn: self.core.link(conn, self.b, self.a))
+
+    def test_the_doctor_check_covers_the_new_reads(self):
+        with mock.patch.object(self.core, "list_board_slugs", return_value=["default"]), \
+                mock.patch.object(self.core, "running_cards", side_effect=AttributeError("last_heartbeat_at is gone")):
+            self.assertEqual(self.core.check_board_read(), "AttributeError: last_heartbeat_at is gone")
+
+    def test_the_profile_name_is_the_one_hermes_names(self):
+        with mock.patch("hermes_cli.profiles.current_profile_name", return_value="daidalos"):
+            self.assertEqual(load().profile_name(), "daidalos")
+        with mock.patch("hermes_cli.profiles.current_profile_name", return_value=None):
+            self.assertEqual(load().profile_name(), "default")
+
+    def test_without_the_profile_module_the_profile_is_default(self):
+        with mock.patch("hermes_cli.profiles.current_profile_name", side_effect=RuntimeError("gone")):
+            self.assertEqual(load().profile_name(), "default")
+
+
 class HookBudgetTest(unittest.TestCase):
     """Hermes bounds hot-path hooks by plugins.hook_callback_timeout; the plugin sizes all its waits from it."""
 

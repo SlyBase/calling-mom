@@ -14,7 +14,7 @@ router = APIRouter()
 DAY = 86400
 _plugin = None
 _FINISHED = ("pass", "fail", "timeout")  # a verify row is a result only in these states
-BADGES = ("held", "for you", "verify failed", "olymp", "mom", "verified")  # most urgent first; a card shows the first two
+BADGES = ("held", "for you", "stalled", "verify failed", "olymp", "mom", "verified")  # most urgent first; a card shows the first two
 _SHOWN = {  # rows worth a line in the activity list
     "advisor": lambda r: not r.get("noop"),
     "question": lambda r: r.get("outcome") in ("answered", "human"),
@@ -42,10 +42,41 @@ def _rows(since=0):
 
 def _recent(rows, limit=10):
     shown = [r for r in rows if _SHOWN.get(r.get("kind"), lambda _: False)(r)]
+    titles = _titles()
     return [{"ts": r["ts"], "kind": r["kind"], "task": r.get("task"), "board": r.get("board"),
              "detail": r.get("outcome") or r.get("verdict") or r.get("state") or r.get("via") or r.get("category") or r.get("reason"),
-             "by": r.get("by") or ("olymp" if r.get("olymp") else None)}
+             "by": r.get("by") or ("olymp" if r.get("olymp") else None),
+             "title": titles.get(r.get("task"))}
             for r in reversed(shown[-limit:])]
+
+
+def _titles():
+    """Task id -> card title over the opted-in boards: a log row names only the id, so the page joins the title here."""
+    return {t.id: t.title for b in mom()._core.list_board_slugs() if mom()._opted_in(b) for t, _ in _board(b)}
+
+
+def _active():
+    """Running/ready cards on the opted-in boards, with their last comment (null for a card that has none), newest last-activity first."""
+    items = []
+    for board in mom()._core.list_board_slugs():
+        if mom()._opted_in(board):
+            items.extend(_active_tasks(board))
+    return sorted(items, key=lambda i: -i.pop("_last_activity"))
+
+
+def _active_tasks(board):
+    """The running/ready cards of one board, each with its last comment and its last-activity stamp."""
+    with mom()._connect(board) as conn:
+        out = []
+        for t in mom().kb.list_tasks(conn):
+            if t.status in ("running", "ready"):
+                comments = mom().kb.list_comments(conn, t.id)
+                last = comments[-1] if comments else None
+                out.append({
+                    "board": board, "task_id": t.id, "title": t.title, "status": t.status,
+                    "last_comment": {"author": last.author, "body": (last.body or "")[:200], "created_at": last.created_at} if last else None,
+                    "_last_activity": max([t.created_at or 0] + [c.created_at for c in comments])})
+        return out
 
 
 def _board(board):
@@ -74,9 +105,23 @@ def _waiting(board, cards, state, now):
     return items
 
 
+def _stalled(board, cards, now):
+    """The running cards of a board without a heartbeat for ``calling_mom.stall_minutes``, read only (the sweep comments, a person reclaims)."""
+    quota, minutes = mom().quota, mom().settings()["stall_minutes"]
+    return [{"board": board, "task_id": t.id, "title": t.title, "brief": None, "holds": [], "can_accept": False,
+             "stalled": {"minutes": quota.minutes_silent(t, now),
+                         "reclaim": f"hermes kanban --board {board} reclaim {t.id} --reason stalled"},
+             "age_s": max(0, int(now - quota.last_beat(t)))}
+            for t in quota.stalled([t for t, _ in cards], now, minutes)]
+
+
 def _needs_you():
     state, now = mom()._load_holds(), time.time()
-    items = [i for b in mom()._core.list_board_slugs() if mom()._opted_in(b) for i in _waiting(b, _board(b), state, now)]
+    items = []
+    for b in mom()._core.list_board_slugs():
+        if mom()._opted_in(b):
+            cards_ = _board(b)
+            items += _waiting(b, cards_, state, now) + _stalled(b, cards_, now)
     return sorted(items, key=lambda i: -i["age_s"])
 
 
@@ -106,9 +151,11 @@ def cards(board: str | None = None):
     activity, state, now, out = _activity(_rows()), mom()._load_holds(), time.time(), {}
     for slug in slugs:
         cards_ = _board(slug)
-        waiting = {i["task_id"]: i for i in _waiting(slug, cards_, state, now)} if mom()._opted_in(slug) else {}
+        opted = mom()._opted_in(slug)
+        waiting = {i["task_id"]: i for i in _waiting(slug, cards_, state, now)} if opted else {}
+        stalled = {i["task_id"] for i in _stalled(slug, cards_, now)} if opted else set()
         for task, _ in cards_:
-            names = set(activity.get(task.id, ()))
+            names = set(activity.get(task.id, ())) | ({"stalled"} if task.id in stalled else set())
             if task.id in waiting:
                 names |= ({"for you"} if waiting[task.id]["brief"] else set()) | ({"held"} if waiting[task.id]["holds"] else set())
             picked = [n for n in BADGES if n in names][:2]
@@ -120,6 +167,12 @@ def cards(board: str | None = None):
 @router.get("/needs-you")
 def needs_you():
     return _needs_you()
+
+
+@router.get("/active")
+def active():
+    """The cards climbing right now: running/ready on the opted-in boards, with their last comment, newest last-activity first."""
+    return _active()
 
 
 @router.get("/summary")
