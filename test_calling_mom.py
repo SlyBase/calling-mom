@@ -2016,6 +2016,14 @@ class PreflightTest(AdvisorFixture, unittest.TestCase):
         self.assertIn("fix the parser", user)
         self.assertIn(self.CMD, user)
 
+    def test_the_reviewer_is_told_to_hold_a_history_rewrite_on_a_shared_branch_even_when_the_card_asks(self):
+        # Live demo runs: Mom said GO to `git push --force[-with-lease] origin main` because the card asked for it.
+        self.run_cmd()
+        system = self.llm.calls[0]["messages"][0]["content"]
+        self.assertIn("shared branch", system)
+        self.assertIn("--force-with-lease", system)
+        self.assertIn("even when the task asks", system)
+
     def test_the_question_carries_the_last_steps(self):
         plugin._history[plugin._worker_key()] = [
             {"tool": "terminal", "args": "{\"command\": \"ls\"}", "ok": True, "text": "ok"}
