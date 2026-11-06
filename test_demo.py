@@ -29,6 +29,13 @@ class ScratchTest(unittest.TestCase):
         self.assertEqual(git(self.root / "repo", "remote", "get-url", "origin"), str(remote))
         self.assertEqual(git(remote, "rev-parse", "main"), git(self.root / "repo", "rev-parse", "main"))
 
+    def test_repo_has_a_git_identity_so_the_first_amend_does_not_fail(self):
+        # A live run: the amend failed for lack of an identity, the retry cost one more pre-flight call of four.
+        demo.scratch(self.root)
+        for key in ("user.name", "user.email"):
+            out = subprocess.run(["git", "config", key], cwd=self.root / "repo", capture_output=True, text=True)
+            self.assertTrue(out.stdout.strip(), key)
+
     def test_second_run_starts_clean(self):
         demo.scratch(self.root)
         (self.root / "repo" / "stray.txt").write_text("x")
@@ -101,6 +108,7 @@ class CardsTest(unittest.TestCase):
         self.assertIn("needs_input", by["question"])
         self.assertIn("amend the last commit", by["hold"])
         self.assertIn("in place of the old one", by["hold"])
+        self.assertIn("git push --force origin main", by["hold"])  # the spec: the card leads to this exact push
         self.assertIn("\nverify: python3 check_notes.py", by["verify"])
 
 
