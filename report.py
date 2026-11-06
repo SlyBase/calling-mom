@@ -3,11 +3,14 @@
 One function, ``build``, behind ``hermes calling-mom report`` and ``GET /summary``. It counts rows of the plugin's own
 log (hashes and numbers, no prose), so the same log always gives the same report. ``render`` turns the result into text.
 
-Limits, on purpose: Mom's cost is a lower bound (the first, escalating call of an Olymp advice is not logged), and the
-price per token is one blended number (Mom's dollars over her tokens, input and output together).
+Every number comes from a recorded row, and each section names its source. What was not observed is said so, never
+shown as zero. Limits, on purpose: Mom's cost is a lower bound (the first, escalating call of an Olymp advice is not
+logged), and the price per token is one blended number (Mom's dollars over her tokens, input and output together).
 """
+import datetime
 import json
 import statistics
+from collections import Counter
 
 _FINISHED = ("pass", "fail", "timeout")  # a verify row is a result only in these states
 
@@ -49,12 +52,63 @@ def read(path) -> list:
     return rows
 
 
-def build(rows, since=0, board=None, tasks=()) -> dict:
-    """The numbers of one window: rows from ``since`` (epoch seconds) on, optionally of one board.
+def parse_when(text) -> int:
+    """Epoch seconds of an ISO date or date-time (``2026-11-05``, ``2026-11-06T03:00``). No offset means UTC. Raises ValueError."""
+    when = datetime.datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
+    return int((when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)).timestamp())
 
-    A row belongs to ``board`` when it says so or when its card is in ``tasks`` (tool and advice rows carry no board)."""
-    rows = [r for r in rows if r.get("ts", 0) >= since
-            and (board is None or r.get("board") == board or r.get("task") in tasks)]
+
+def iso(ts) -> str:
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
+_OUTSIDE_SOURCE = "kanban store (task_comments, task_events), read by the sweep"
+_ADVICE_RESULT = {"followed": "acted"}  # before 1.5 "followed" meant "the worker did something next": that is `acted` now
+_REACHED = ("triage", "to_person")
+
+
+def _touches(rows) -> list:
+    """Touch rows once per thing: the same store id written twice (a card that waited, then left) counts once, the last row wins."""
+    kept = {}
+    for n, r in enumerate(r for r in rows if r.get("kind") == "touch"):
+        kept[(r.get("board"), r.get("src"), r.get("store_id") if r.get("store_id") is not None else f"row{n}")] = r
+    return list(kept.values())
+
+
+def _outside(rows, own) -> dict:
+    touch = _touches(rows)
+    comments = Counter(r.get("author") or "unknown" for r in touch if r.get("src") == "comment")
+    changes = Counter(r.get("what") for r in touch if r.get("src") == "event" and r.get("what") not in _REACHED)
+    reached = [r for r in touch if r.get("what") in _REACHED]
+    return {"comments": sum(comments.values()), "authors": dict(comments), "changes": sum(changes.values()),
+            "changes_by": dict(changes), "actor": "unattributed", "to_person": len(reached),
+            "waiting": sum(1 for r in reached if r.get("wait_s") is None), "own_writes": len(own), "source": _OUTSIDE_SOURCE}
+
+
+def _chat_waits(rows) -> dict:
+    waits = [r for r in _touches(rows) if r.get("src") == "chat"]
+    seconds = [int(r["wait_s"]) for r in waits if isinstance(r.get("wait_s"), (int, float))]
+    return {"count": len(waits), "total_s": sum(seconds), "longest_s": max(seconds, default=0),
+            "by_kind": dict(Counter(r.get("wait") or "other" for r in waits)),
+            "source": "on_human_input_request / on_human_input_resolved"}
+
+
+def _advice(rows) -> dict:
+    """Delivered advice (a silent NO_ACTION answer is none) and what became of it. Advice without a verdict is unknown."""
+    calls = sum(1 for r in rows if r.get("kind") == "advisor" and not r.get("noop"))
+    results = Counter(r.get("result") or _ADVICE_RESULT.get(r.get("verdict")) for r in rows if r.get("kind") == "advice_feedback")
+    known = {k: results[k] for k in ("followed", "acted", "ignored")}
+    return {"calls": calls, **known, "unknown": max(0, calls - sum(known.values())),
+            "source": "advisor rows and advice_feedback rows"}
+
+
+def build(rows, since=0, board=None, tasks=(), until=None) -> dict:
+    """The numbers of one window: rows from ``since`` up to (not including) ``until`` (epoch seconds), optionally of one board.
+
+    A row belongs to ``board`` when it says so or when its card is in ``tasks`` (tool and advice rows carry no board).
+    Chat waits belong to you, not to a board."""
+    rows = [r for r in rows if r.get("ts", 0) >= since and (until is None or r.get("ts", 0) < until)
+            and (board is None or r.get("board") == board or r.get("task") in tasks or r.get("src") == "chat")]
     of = lambda kind, **want: [r for r in rows if r.get("kind") == kind and all(r.get(k) in v for k, v in want.items())]
     calls = [r for r in rows if "kind" not in r]
     usage, advice, olymp_advice = of("worker_usage"), of("advisor"), [r for r in of("advisor") if r.get("olymp")]
@@ -78,13 +132,13 @@ def build(rows, since=0, board=None, tasks=()) -> dict:
                 "answered": sum(1 for r in questions if r["outcome"] == "answered" and r.get("by") == "mom"),
                 "checked": len(checks), "holds": sum(1 for r in checks if r["verdict"] == "hold"),
                 "verified": sum(1 for r in verify if r["state"] == "pass"),
-                "verify_failed": sum(1 for r in verify if r["state"] != "pass"),
-                "tips_followed": len(of("advice_feedback", verdict=("followed",))),
-                "tips_rejected": len(of("advice_feedback", verdict=("rejected",)))},
+                "verify_failed": sum(1 for r in verify if r["state"] != "pass")},
         "olymp": {"calls": olymp_calls},
         "you": {"briefs": sum(1 for r in questions if r["outcome"] == "human"), "answered": len(answers),
                 "holds_released": sum(1 for r in answers if r.get("allow_once")),
-                "median_answer_s": int(statistics.median(waits)) if waits else None},
+                "median_answer_s": int(statistics.median(waits)) if waits else None,
+                "outside": _outside(rows, of("own_write")), "chat_waits": _chat_waits(rows)},
+        "advice": _advice(rows),
         "cost": {"mom_usd": round(mom_usd, 6), "mom_tokens_in": mom_in, "mom_tokens_out": mom_out,
                  "olymp_calls": olymp_calls,
                  "worker_tokens": worker_tokens,
@@ -103,24 +157,48 @@ def _n(count, word):
     return f"{count} {word}" + ("" if count == 1 else "s")
 
 
+def _window(r) -> str:
+    if r.get("days") is not None:
+        return f"last {_n(r['days'], 'day')}"
+    return f"{r['since']} to {r['until']}" if r.get("until") else f"since {r['since']}"
+
+
+def _outside_line(o) -> str:
+    if o.get("observed") is False:
+        return "not observed (no sweep has read this board: opt it in, then run the sweep)"
+    who = f" ({', '.join(f'{a} {n}' for a, n in sorted(o['authors'].items(), key=lambda kv: (-kv[1], kv[0])))})" if o["authors"] else ""
+    return (f"{_n(o['comments'], 'comment')}{who} · {_n(o['changes'], 'board change')} ({o['actor']}) · "
+            f"{_n(o['waiting'], 'card')} waiting on a person")
+
+
+def _chat_line(cw) -> str:
+    if cw.get("observed") is False:
+        return "not observed (calling_mom.count.chat_waits is off)"
+    kinds = f" ({', '.join(f'{k} {n}' for k, n in sorted(cw['by_kind'].items()))})" if cw["by_kind"] else ""
+    return (f"{_n(cw['count'], 'wait')}, {duration(cw['total_s'])} in total, longest {duration(cw['longest_s'])}{kinds}"
+            if cw["count"] else "0 waits")
+
+
 def render(r) -> str:
     """The text of ``hermes calling-mom report``. ``r`` is ``build`` plus ``days`` (and ``board``, ``olymp.today/cap``)."""
-    w, m, o, y, c = r["worker"], r["mom"], r["olymp"], r["you"], r["cost"]
-    head = f"Calling mom, last {_n(r['days'], 'day')}" + (f", board {r['board']}" if r.get("board") else "")
+    w, m, o, y, c, a = r["worker"], r["mom"], r["olymp"], r["you"], r["cost"], r["advice"]
+    head = f"Calling mom, {_window(r)}" + (f", board {r['board']}" if r.get("board") else "")
     olymp = _n(o["calls"], "call") + (f", {o['today']} of {o['cap']} today" if "cap" in o else "")
-    price = f"${c['mom_usd']:.4f}" if c["mom_usd"] else "no price reported"  # a provider without a price is not free
+    tokens = f"{c['mom_tokens_in']:,} in / {c['mom_tokens_out']:,} out tokens"
+    price = f"${c['mom_usd']:.4f} ({tokens})" if c["mom_usd"] else f"{tokens} on a subscription (no per-token price)"  # no price is not free
     wait = f" (median {duration(y['median_answer_s'])})" if y["median_answer_s"] is not None else ""
     lines = [
         head,
         f"Worker  {_n(w['tool_calls'], 'tool call')} in {_n(w['runs'], 'run')}, {_n(w['signals'], 'stuck signal')}; "
         f"{_n(w['api_calls'], 'API call')}, {w['tokens_in']:,} tokens in / {w['tokens_out']:,} out",
         f"Mom     {_n(m['calls'], 'call')}: {_n(m['answered'], 'question')} answered, {_n(m['checked'], 'pre-flight check')} "
-        f"({_n(m['holds'], 'hold')}), {m['verified']} verify passed / {m['verify_failed']} failed, "
-        f"tips followed {m['tips_followed']} / rejected {m['tips_rejected']}",
+        f"({_n(m['holds'], 'hold')}), {m['verified']} verify passed / {m['verify_failed']} failed",
         f"Olymp   {olymp}",
         f"You     {_n(y['briefs'], 'brief')}, {_n(y['answered'], 'answer')}{wait}, {_n(y['holds_released'], 'hold')} released",
-        f"Cost    Mom {price} ({c['mom_tokens_in']:,} in / {c['mom_tokens_out']:,} out tokens), "
-        f"Olymp {_n(c['olymp_calls'], 'call')}",
+        f"        outside help  {_outside_line(y['outside'])}",
+        f"        chat waits    {_chat_line(y['chat_waits'])}",
+        f"Advice  {_n(a['calls'], 'call')}: {a['followed']} followed · {a['acted']} acted · {a['ignored']} ignored · {a['unknown']} unknown",
+        f"Cost    Mom {price}, Olymp {_n(c['olymp_calls'], 'call')}",
     ]
     if c["all_on_mom_usd"] is not None:
         lines.append(f"        Every call on Mom would have cost ${c['all_on_mom_usd']:.4f} ({c['worker_tokens']:,} worker tokens)")

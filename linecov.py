@@ -16,7 +16,7 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent  # measure the copy this file lives in
 
-targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "rules.py", PLUGIN / "report.py", PLUGIN / "precedents.py", PLUGIN / "__init__.py",
+targets = {PLUGIN / "signals.py", PLUGIN / "metrics.py", PLUGIN / "cli.py", PLUGIN / "rules.py", PLUGIN / "report.py", PLUGIN / "precedents.py", PLUGIN / "touches.py", PLUGIN / "feedback.py", PLUGIN / "__init__.py",
            PLUGIN / "dashboard" / "plugin_api.py"}
 hit = {p: set() for p in targets}
 

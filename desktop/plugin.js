@@ -143,6 +143,12 @@ function Rung({ name, big, unit, lines, accent }) {
   )
 }
 
+function outsideLine(outside) {
+  return !outside || outside.observed === false
+    ? 'outside help: not observed'
+    : `outside help: ${outside.comments} comments · ${outside.changes} board changes`
+}
+
 function Ladder({ summary, count }) {
   if (!summary) {
     return null
@@ -168,7 +174,7 @@ function Ladder({ summary, count }) {
     arrow('a2'),
     h(Rung, { name: 'Olymp', big: olymp.calls, unit: 'calls', lines: [`${olymp.today} of ${olymp.cap} today`] }),
     arrow('a3'),
-    h(Rung, { name: 'You', big: count, unit: 'waiting for you', accent: count > 0, lines: [`${you.briefs} briefs · ${you.answered} answered`] })
+    h(Rung, { name: 'You', big: count, unit: 'waiting for you', accent: count > 0, lines: [`${you.briefs} briefs · ${you.answered} answered`, outsideLine(you.outside)] })
   )
 }
 

@@ -20,4 +20,6 @@ provides_hooks:
   - on_kanban_dispatch_tick
   - pre_tool_call
   - post_api_request
+  - on_human_input_request
+  - on_human_input_resolved
 author: SlyBase

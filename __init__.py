@@ -22,6 +22,7 @@ Config (config.yaml, all optional)::
 Kill switch: ``CALLING_MOM=off`` in the environment.
 """
 
+import atexit
 import contextlib
 import hashlib
 import importlib.util
@@ -82,6 +83,20 @@ except ImportError:  # loaded by path (tests, plugin doctor)
     precedents = importlib.util.module_from_spec(_precedents_spec)
     _precedents_spec.loader.exec_module(precedents)
 
+try:
+    from . import feedback
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _feedback_spec = importlib.util.spec_from_file_location("calling_mom_feedback", Path(__file__).with_name("feedback.py"))
+    feedback = importlib.util.module_from_spec(_feedback_spec)
+    _feedback_spec.loader.exec_module(feedback)
+
+try:
+    from . import touches
+except ImportError:  # loaded by path (tests, plugin doctor)
+    _touches_spec = importlib.util.spec_from_file_location("calling_mom_touches", Path(__file__).with_name("touches.py"))
+    touches = importlib.util.module_from_spec(_touches_spec)
+    _touches_spec.loader.exec_module(touches)
+
 DEFAULTS = {
     "model": "deepseek/deepseek-v4.1-flash-1017",
     "provider": "openrouter",
@@ -95,6 +110,7 @@ DEFAULTS = {
     },
     "review": {"marker": "[review]", "reviewer": "reviewer"},  # [review] cards finish via the reviewer profile ("" = off)
     "metrics": {"pushgateways": [], "instance": "hermes"},  # Pushgateway base URLs, tried in order ([] = off)
+    "count": {"chat_waits": False},  # time you wait on a prompt in chat (kind, seconds, outcome; never the text). Off until setup asks.
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
     "human_marker": "[human]",  # such cards are for a person: Mom never answers their questions
     "advisor": {  # one short question to the strong model at the point where the worker is stuck
@@ -147,16 +163,13 @@ _watch_used: dict = {}  # (task, run) -> `watch` reviews so far (a NO_ACTION ans
 _arch_seen: set = set()  # (task, run, path-or-command) already reviewed
 _redirected: set = set()  # (task, run) whose completion was already handed to the reviewer
 _completion_checked: set = set()  # (task, run) whose completion summary was already checked
-_awaiting_reply: set = set()  # (task, run) that got advice; the next worker reply says if it helped
+_pending: dict = {}  # (task, run) -> advice delivered to the worker with its anchors, not judged yet (see _delivered)
 _lock = threading.Lock()
 _inflight: dict = {}  # (task, run) -> advice call on its background thread (at most one per run)
 _late: dict = {}  # (task, run) -> advice that missed its tool result, delivered with the next one
 _verify_runs: dict = {}  # (task, run) -> the current verify command (see _Verify)
 _edits: dict = {}  # (task, run) -> file-editing tool calls so far (workspace state outside git)
 _EDIT_TOOLS = {"write_file", "patch"}
-_REFUTED = re.compile(
-    r"disprov|refut|ruled out|widerleg|not the (cause|issue|problem)|already (resolved|fixed|verified|done)|"
-    r"does(n't| not) apply|is (wrong|incorrect)", re.I)
 _ctx = None  # plugin context, gives access to ctx.llm
 ADVISOR = "advisor"  # author of comments written by versions before 1.3.1; new ones carry the worker's profile
 _UNAVAILABLE = "[advisor unavailable]"
@@ -222,11 +235,25 @@ class _connect:
         return self._stack.__exit__(*exc)
 
 
-def _pin_strong(conn, task, why: str, reason: str = "other") -> None:
+def _own_write(conn, task_id, what, board) -> None:
+    """Log a board write calling-mom made itself (``pin``, ``unblock``), so the sweep does not count its event as outside help."""
+    event = {"pin": "model_override_set", "unblock": "unblocked"}[what]
+    _trace_row("own_write", task=task_id, board=board, what=what, store_id=_core.last_event_id(conn, task_id, event))
+
+
+def _unblock(conn, task_id, board) -> bool:
+    released = kb.unblock_task(conn, task_id)
+    if released:
+        _own_write(conn, task_id, "unblock", board)
+    return released
+
+
+def _pin_strong(conn, task, why: str, reason: str = "other", board=None) -> None:
     """Pin the card to the strong model. ``reason`` feeds the escalation metric:
     ``crit`` (marker at claim), ``blocked`` (worker gave up), ``breaker`` (crash park)."""
     cfg = settings()
     kb.set_model_override(conn, task.id, cfg["model"], provider=cfg["provider"])
+    _own_write(conn, task.id, "pin", board)
     kb.add_comment(conn, task.id, AUTHOR, f"Escalated to {cfg['model']} — {why}.")
     _trace_row("escalated", task=task.id, reason=reason)
     logger.info("calling-mom: %s -> %s (%s)", task.id, cfg["model"], why)
@@ -247,7 +274,7 @@ def on_claimed(task_id=None, board=None, **_):
             marker = settings()["marker"].lower()
             text = f"{task.title or ''}\n{task.body or ''}".lower()
             if marker and marker in text:
-                _pin_strong(conn, task, "critical card", reason="crit")
+                _pin_strong(conn, task, "critical card", reason="crit", board=board)
     except Exception as exc:  # pragma: no cover - never break dispatch
         logger.warning("calling-mom: claim hook failed for %s: %s", task_id, exc)
 
@@ -273,8 +300,8 @@ def on_blocked(task_id=None, board=None, reason=None, **_):
             if task.model_override == settings()["model"]:
                 return  # the strong model already had its attempt
             why = f"blocked ({reason.strip()[:200]})" if reason and reason.strip() else "blocked"
-            _pin_strong(conn, task, why, reason="blocked")
-            kb.unblock_task(conn, task_id)
+            _pin_strong(conn, task, why, reason="blocked", board=board)
+            _unblock(conn, task_id, board)
     except Exception as exc:  # pragma: no cover - never break the board
         logger.warning("calling-mom: block hook failed for %s: %s", task_id, exc)
 
@@ -323,6 +350,10 @@ def _load_marks() -> dict:
         return {}
 
 
+TOUCH_EVERY_S = 30  # the dispatcher ticks often; reading every card of a board is not needed that often
+_last_scan: dict = {}  # board -> time of its last touch scan
+
+
 def sweep(board=None) -> list:
     """Escalate cards the crash circuit-breaker parked (``gave_up``); the breaker fires no block hook.
 
@@ -355,15 +386,74 @@ def sweep(board=None) -> list:
                     or signals.is_infra(payload.get("error") or task.last_failure_error)
                 ):
                     continue
-                _pin_strong(conn, task, f"circuit breaker ({str(payload.get('error') or '')[:150]})", reason="breaker")
-                kb.unblock_task(conn, task.id)
+                _pin_strong(conn, task, f"circuit breaker ({str(payload.get('error') or '')[:150]})", reason="breaker", board=board)
+                _unblock(conn, task.id, board)
                 done.append(task.id)
             marks[key] = last
             _state_path().parent.mkdir(parents=True, exist_ok=True)
             _state_path().write_text(json.dumps(marks))
     except Exception as exc:  # pragma: no cover - never break the caller
         logger.warning("calling-mom: sweep failed on board %s: %s", board, exc)
+    if board and _opted_in(board) and time.time() - _last_scan.get(board, 0) >= TOUCH_EVERY_S:
+        _last_scan[board] = time.time()
+        try:
+            _record_touches(board)
+        except Exception as exc:  # counting must never break the sweep
+            logger.warning("calling-mom: touches not counted on board %s: %s", board, exc)
     return done
+
+
+def _record_touches(board) -> None:
+    """Count who else touched ``board`` (``touch`` rows, ids and counts only, dedupe by store id) and which cards reached
+    a person. Read-only on the board. The watermark per board lives in the state file; the first sweep takes the whole
+    history. A card waiting in triage or blocked is written when it enters and written again, with ``wait_s``, when it leaves."""
+    state = _load_holds()
+    mine = {"comment": 0, "event": 0, "question": 0, "waiting": {}} | ((state.get("touches") or {}).get(board) or {})
+    with _connect(board) as conn:
+        cards = _core.board_activity(conn)
+    log = report.read(_log_path())
+    own = {r["store_id"] for r in log if r.get("kind") == "own_write" and r.get("board") == board and r.get("store_id") is not None}
+    by_id = {t.id: (t, events) for t, _, events in cards}
+
+    def emit(task, what, store_id, ts, wait=None):
+        _trace_row("touch", ts=ts, task=task.id, board=board, src="event", what=what, store_id=store_id,
+                   **({} if wait is None else {"wait_s": wait}))
+
+    def enter(task, events, what, store_id, ts, status):
+        wait = touches.wait_s(task, events, store_id, ts, status)
+        emit(task, what, store_id, ts, wait)
+        if wait is None:
+            mine["waiting"][f"event:{store_id}"] = [task.id, what, store_id, ts]
+
+    for task, comments, events in cards:
+        for c in comments:
+            row = touches.comment_touch(task, c) if c.id > mine["comment"] else None
+            if row:
+                _trace_row("touch", board=board, **row)
+        for e in events:
+            row = touches.event_touch(task, e) if e.id > mine["event"] and e.id not in own else None
+            if row:
+                _trace_row("touch", board=board, **row)
+        for event_id, ts in touches.triage_entries(events):
+            if event_id > mine["event"]:
+                enter(task, events, "triage", event_id, ts, "triage")
+    for q in (r for r in log if r.get("kind") == "question" and r.get("board") == board and r.get("ts", 0) > mine["question"]):
+        task, events = by_id.get(q.get("task"), (None, []))
+        block = touches.question_block(events, q["ts"]) if touches.reached_person(q) else None
+        if block:
+            enter(task, events, "to_person", *block, "blocked")
+    for key, (task_id, what, store_id, ts) in list(mine["waiting"].items()):
+        task, events = by_id.get(task_id, (None, []))
+        wait = None if task is None else touches.wait_s(task, events, store_id, ts, "triage" if what == "triage" else "blocked")
+        if task is None or wait is not None:  # the card left, or is gone
+            del mine["waiting"][key]
+            if task is not None:
+                emit(task, what, store_id, ts, wait)
+    mine["comment"] = max([c.id for _, comments, _ in cards for c in comments] + [mine["comment"]])
+    mine["event"] = max([e.id for _, _, events in cards for e in events] + [mine["event"]])
+    mine["question"] = max([r.get("ts", 0) for r in log if r.get("kind") == "question"] + [mine["question"]])
+    state.setdefault("touches", {})[board] = mine
+    _write_state(state)
 
 
 def sweep_all() -> list:
@@ -398,8 +488,8 @@ def _escalate_parked_task(task, payload, board) -> bool:
         fresh = kb.get_task(conn, task.id)
         if fresh is None or fresh.status != "blocked":
             return False
-        _pin_strong(conn, fresh, "circuit breaker (%s)" % (str(payload.get("error") or "")[:150]), reason="breaker")
-        kb.unblock_task(conn, fresh.id)
+        _pin_strong(conn, fresh, "circuit breaker (%s)" % (str(payload.get("error") or "")[:150]), reason="breaker", board=board)
+        _unblock(conn, fresh.id, board)
     return True
 
 
@@ -735,7 +825,7 @@ def _advise_soon(key, category, signal, note="", t0=None) -> "str | None":
             box["abandoned"] = True
             return None
     if box["text"]:
-        _awaiting_reply.add(key)
+        _delivered(key, box["text"])
     return box["text"]
 
 
@@ -745,9 +835,9 @@ def _take_late(key) -> "str | None":
         items = _late.pop(key, None)
     if not items:
         return None
-    for _, signal, started in items:
+    for text, signal, started in items:
         _trace_row("advice_late", task=key[0], run=key[1], signal=signal, ms=int((time.monotonic() - started) * 1000))
-    _awaiting_reply.add(key)
+        _delivered(key, text)
     return "\n\n".join(f"[late advice] {text}" for text, _, _ in items)
 
 
@@ -1205,7 +1295,7 @@ def _answer_question(cfg, task_id, board, reason, run_id) -> None:
         return log("error", "comment")
     if kind == "answer":
         with _connect(board) as conn:
-            if not kb.unblock_task(conn, task_id):
+            if not _unblock(conn, task_id, board):
                 return log("error", "unblock")
     log("answered" if kind == "answer" else "human", why if kind == "human" else None, by)
 
@@ -1309,7 +1399,7 @@ def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False
         if allow_once:
             for hold in holds:
                 _release_hold(board, task_id, hold["cmd_hash"], by=by)
-        released = kb.unblock_task(conn, task_id)
+        released = _unblock(conn, task_id, board)
     data = _load_holds()
     if briefs:
         data.setdefault("answered", {})[task_id] = briefs[-1].id
@@ -1541,7 +1631,7 @@ def handle_second_opinion(args, **_):
     advice = _advise(key, "architecture", "second_opinion", note=note) if _enabled() else None
     if not advice:
         return json.dumps({"error": "second opinion unavailable (disabled, budget used, local-only card, or provider error)"})
-    _awaiting_reply.add(key)
+    _delivered(key, advice)
     return json.dumps({"opinion": advice.split("] ", 1)[-1]})
 
 
@@ -1572,11 +1662,15 @@ def _log_path() -> Path:
     return Path(get_default_hermes_root()) / "logs" / "calling-mom.jsonl"
 
 
-def attention_report(days=7, board=None, rows=None, now=None) -> dict:
+def attention_report(days=7, board=None, rows=None, now=None, since=None, until=None) -> dict:
     """The numbers behind ``hermes calling-mom report`` and ``GET /summary`` (see ``report.build``).
 
-    ``board`` keeps that board's rows plus the rows of its cards; Olymp also shows today's calls against the daily cap."""
+    ``board`` keeps that board's rows plus the rows of its cards; Olymp also shows today's calls against the daily cap.
+    The window is ``since`` up to ``until`` (ISO date or date-time, UTC), else ``days`` back from ``until`` or now.
+    Outside help is observed only on boards the sweep has read, chat waits only with ``calling_mom.count.chat_waits`` on."""
     now = time.time() if now is None else now
+    end = report.parse_when(until) if until else None
+    start = report.parse_when(since) if since else (end or now) - days * 86400
     tasks = ()
     if board is not None:
         try:
@@ -1584,9 +1678,12 @@ def attention_report(days=7, board=None, rows=None, now=None) -> dict:
                 tasks = {t.id for t in kb.list_tasks(conn, include_archived=True)}
         except Exception:  # a board we cannot read: its own rows still count
             pass
-    out = report.build(report.read(_log_path()) if rows is None else rows, since=now - days * 86400, board=board, tasks=tasks)
+    out = report.build(report.read(_log_path()) if rows is None else rows, since=start, until=end, board=board, tasks=tasks)
     out["olymp"] |= {"today": _spent_today()["olymp"], "cap": settings()["olymp"]["max_per_day"]}
-    return {"days": days, "board": board, **out}
+    scanned = _load_holds().get("touches") or {}
+    out["you"]["outside"]["observed"] = (board in scanned) if board else bool(scanned)
+    out["you"]["chat_waits"]["observed"] = bool(settings()["count"]["chat_waits"])
+    return {"days": None if since else days, "since": report.iso(start), "until": report.iso(end) if end else None, "board": board, **out}
 
 
 def _worker_key():
@@ -1624,6 +1721,8 @@ def on_tool_result(tool_name="", args=None, result=None, status=None, error_type
         text = error_message or (result if isinstance(result, str) else "")
         _remember(key, tool_name, args or {}, ok, text)
         event = tracker.feed(tool_name, args or {}, ok, text, error_type)
+        if tool_name != "second_opinion":  # its own call is the delivery of its advice, not a reaction to it
+            _observe_call(key, tool_name, args)
         row = {"ts": int(time.time()), "task": key[0], "run": key[1], "pid": os.getpid(), **event}
         path = _log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1652,15 +1751,74 @@ def _log_usage(key, usage) -> None:
 
 
 def on_api_response(assistant_message=None, usage=None, **_):
-    """post_api_request: tokens of a worker request; the first worker text after advice tells whether it was followed or refuted."""
-    key = _worker_key()
-    _log_usage(key, usage)
-    content = str(getattr(assistant_message, "content", "") or "").strip()
-    if key not in _awaiting_reply or not content:
+    """post_api_request: the tokens of a worker request (the report prices them)."""
+    _log_usage(_worker_key(), usage)
+
+
+def _feedback_row(key, result, advice, hit=None) -> None:
+    _trace_row("advice_feedback", task=key[0], run=key[1], result=result, anchors=len(advice["anchors"]),
+               match=hit.hash if hit else None)
+
+
+def _delivered(key, text) -> None:
+    """Advice reached the worker. Its anchors (commands, paths, tool names in backticks) stay in memory for the run;
+    advice without any gives no evidence either way and is ``unknown`` at once."""
+    advice = {"anchors": feedback.anchors(text), "acted": False}
+    if advice["anchors"]:
+        _pending.setdefault(key, []).append(advice)
+    else:
+        _feedback_row(key, "unknown", advice)
+
+
+def _observe_call(key, tool_name, args) -> None:
+    """A tool call of the run: a call that uses an anchor makes the advice ``followed``; any other call is only action."""
+    for advice in list(_pending.get(key, ())):
+        hit = next((a for a in advice["anchors"] if feedback.matches(a, tool_name, args)), None)
+        if hit:
+            _pending[key].remove(advice)
+            _feedback_row(key, "followed", advice, hit)
+        else:
+            advice["acted"] = True
+
+
+def _flush_feedback(only=None) -> None:
+    """The run ends (this process exits): advice with no match is ``acted`` when the worker did anything after it, else ``ignored``.
+    ponytail: a worker killed hard never flushes; its open advice is not counted, rather than guessed."""
+    for key in [only] if only else list(_pending):
+        for advice in _pending.pop(key, ()):
+            _feedback_row(key, "acted" if advice["acted"] else "ignored", advice)
+
+
+_waits: dict = {}  # request id -> monotonic start of a human-input wait in this process
+_WAIT_KINDS = ("clarify", "approval", "sudo")
+
+
+def _chat_waits_on() -> bool:
+    return _enabled() and settings()["count"]["chat_waits"]
+
+
+def _word(value, allowed=None) -> str:
+    """A short lowercase word from a Hermes payload field, else ``other``: nothing free-form reaches the log."""
+    value = str(value or "")
+    return value if (value in allowed if allowed else re.fullmatch(r"[a-z_]{1,24}", value)) else "other"
+
+
+def on_human_input_request(request_id="", **_):
+    """``on_human_input_request``: a prompt is about to wait for you (clarify, approval, sudo). Counts when the start
+    happened; the prompt text in the payload is never read. Observer, never raises."""
+    if request_id and _chat_waits_on():
+        if len(_waits) >= 100:  # ponytail: a prompt that never resolves leaks one entry; the oldest goes at 100
+            _waits.pop(next(iter(_waits)))
+        _waits[str(request_id)] = time.monotonic()
+
+
+def on_human_input_resolved(request_id="", kind="", outcome="", **_):
+    """``on_human_input_resolved``: the wait ended. One ``touch`` row: kind, seconds, outcome. Never the prompt or the answer."""
+    if not _chat_waits_on():
         return
-    _awaiting_reply.discard(key)
-    # ponytail: keyword heuristic; a wrong label only skews the ratio, it never changes the run
-    _trace_row("advice_feedback", task=key[0], verdict="rejected" if _REFUTED.search(content[:2000]) else "followed")
+    start = _waits.pop(str(request_id), None)
+    _trace_row("touch", src="chat", what="chat_wait", wait=_word(kind, _WAIT_KINDS), outcome=_word(outcome), store_id=str(request_id)[:32],
+               **({} if start is None else {"wait_s": round(time.monotonic() - start)}))
 
 
 _TIP = (
@@ -1690,6 +1848,7 @@ def register(ctx) -> None:
     if _core.ERROR:  # a Hermes update removed something we use: no hooks, but `doctor` still runs; say why once
         logger.warning("calling-mom: not active, %s. Run: hermes calling-mom doctor", _core.ERROR)
         return
+    atexit.register(_flush_feedback)
     ctx.register_hook("kanban_task_claimed", on_claimed)
     ctx.register_hook("kanban_task_blocked", on_blocked)
     ctx.register_hook("kanban_task_blocked", on_question)
@@ -1705,6 +1864,8 @@ def register(ctx) -> None:
                       emoji="\U0001f9d0")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
+    ctx.register_hook("on_human_input_request", on_human_input_request)
+    ctx.register_hook("on_human_input_resolved", on_human_input_resolved)
     cfg = settings()
     logger.info(
         "calling-mom installed: block -> %s via %s; marker %s",

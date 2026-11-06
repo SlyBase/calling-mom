@@ -82,21 +82,30 @@ approval setting (Mom's HOLD stopped the retry, and the worker undid the change)
 
 ## Numbers so far
 
-From the real log of the author's own install. It covers 9 days, so the sample is small:
+From the real log and the real board of the author's own install (the board `coding`, while Calling mom 1.4 was built on
+it, 5 to 6 November 2026). The `You` block counts what reached the person, **including what other people and agents did
+on the board**, because that is attention too:
 
 ```
-Calling mom, last 90 days
-Worker  2204 tool calls in 44 runs, 29 stuck signals; 0 API calls, 0 tokens in / 0 out
-Mom     51 calls: 1 question answered, 3 pre-flight checks (0 holds), 1 verify passed / 0 failed, tips followed 27 / rejected 0
-Olymp   0 calls
-You     1 brief, 1 answer (median 1 min), 0 holds released
-Cost    Mom no price reported (111,725 in / 18,828 out tokens), Olymp 0 calls
+Calling mom, 2026-11-05T00:00Z to 2026-11-06T03:00Z, board coding
+Worker  1103 tool calls in 21 runs, 14 stuck signals; 0 API calls, 0 tokens in / 0 out
+Mom     38 calls: 0 questions answered, 0 pre-flight checks (0 holds), 0 verify passed / 0 failed
+Olymp   0 calls, 0 of 6 today
+You     0 briefs, 0 answers, 0 holds released
+        outside help  9 comments (default 7, daidalos 2) · 24 board changes (unattributed) · 1 card waiting on a person
+        chat waits    not observed (calling_mom.count.chat_waits is off)
+Advice  36 calls: 0 followed · 22 acted · 0 ignored · 14 unknown
+Cost    Mom 128,372 in / 17,655 out tokens on a subscription (no per-token price), Olymp 0 calls
 ```
 
-The worker followed 27 of Mom's tips and rejected none. Olymp was never needed. One question reached a person, and it took a
-minute to answer. The worker token numbers read 0 because the log was written by an older version. When Mom reports a
-price, the report also shows what running every call on Mom would have cost.
-Your own numbers: `hermes calling-mom report` (`--days 7`, `--board X`, `--json`).
+The worker used 1,103 tool calls and fired 14 stuck signals. Mom gave 36 pieces of advice. Version 1.4 called 22 of them
+"followed" because some action came next. Those rows carry no anchors, so no evidence can be shown for them: they read
+`acted` now, and the 14 without any verdict read `unknown`. From 1.5 on, `followed` needs a later tool call that uses a
+command, path or tool Mom named. Outside Mom's ladder, the orchestrator wrote 7 comments, linked 7 cards, unlinked 2 and
+reclaimed one running card by hand, and one card is waiting for a person in triage. A Claude subscription has no
+per-token price, so the cost line gives the tokens and says so.
+Your own numbers: `hermes calling-mom report` (`--days 7`, `--since 2026-11-05 --until 2026-11-06T03:00`, `--board X`,
+`--json`; dates are ISO and UTC).
 
 ## When is Mom called?
 
@@ -217,7 +226,7 @@ Mom or Olymp (run `setup` again for that). A route needs both a provider and a m
 | `hermes calling-mom setup` | Choose Mom and Olymp from your own providers. Safe to repeat. |
 | `hermes calling-mom status` | Who is Mom, who is Olymp, Olymp calls today, any failures. |
 | `hermes calling-mom doctor` | Checks the setup and makes a real call to each model. Run it after every Hermes update. |
-| `hermes calling-mom report` | What reached whom and what it cost: per rung, `--days 7`, `--board X`, `--json`. |
+| `hermes calling-mom report` | What reached whom and what it cost: per rung, `--days 7` or `--since DATE --until DATE`, `--board X`, `--json`. Counts outside help (comments and board changes by others) and, if you switch it on, how long you wait on prompts in chat. |
 | `hermes calling-mom precedents [forget <id> \| clear]` | The answers of yours that Mom may reuse (see [Your answers become Mom's rules](#your-answers-become-moms-rules)). |
 | `hermes calling-mom answer <task>` | Answers a card that carries Mom's `[for you]` brief or a pre-flight HOLD: `--accept`, `--text "..."` or `--allow-once` (`--board` if it is not the current board). |
 
@@ -291,6 +300,8 @@ write is your click on a button, see [SECURITY.md](SECURITY.md).
 - **What Mom sees.** For advice: the card text, the last tool steps and the signal. For a pre-flight check: the card title, the first 800 characters of its text and the one command. For a worker question (answers on): the question, the card text and the last comments. Everything is redacted first. The log keeps hashes, never the command.
 - **Answers are a separate switch** (`calling_mom.answer`, off by default). With it on, Mom answers worker questions and unblocks cards on the listed boards. Questions about secrets, money, legal matters, personal data or publishing, and critical commands never get an answer from her. A pre-flight HOLD can be released only by a person.
 - **Your answers are kept as text.** With answers on, your reply to one of Mom's briefs is stored (redacted, 500 characters each) in `logs/calling-mom-precedents.jsonl` and shown to Mom for similar questions. It is the only place the plugin keeps prose. See and delete it with `hermes calling-mom precedents`; turn it off with `answer.precedents: false`.
+- **Who else touched your board is counted, not read.** For opted-in boards the sweep reads the comments and events of your Kanban store, read only. It keeps counts and ids: the author id of a comment (a profile or surface such as `default` or `desktop`), the kind of a board event (link, reclaim, assign, ...), times. Never the comment text. The store records no actor for board events, so the report says `unattributed`; what the plugin writes itself is logged as `own_write` and not counted.
+- **Chat waits are a separate switch** (`calling_mom.count.chat_waits`, off by default, `setup` asks). With it on, the plugin observes Hermes' `on_human_input_request` and `on_human_input_resolved` in any session of this profile and keeps the kind of wait (clarify, approval, sudo, other), its seconds and its outcome. Never the prompt or your answer.
 - **The Desktop page and the report stay on your machine.** They read the plugin log and your boards through your own gateway. The only write is your click on a button.
 - **The demo is local.** It uses a scratch folder and a bare git remote inside it, never a real remote.
 - Secrets (tokens, keys, passwords, credentials in URLs) are **blanked out** before anything is sent.

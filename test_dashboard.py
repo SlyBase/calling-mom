@@ -90,8 +90,8 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
     def test_an_empty_log_counts_zero_everywhere(self):
         out = self.get("/summary")
         self.assertEqual((out["worker"]["tool_calls"], out["worker"]["signals"]), (0, 0))
-        self.assertEqual(out["mom"], {"calls": 0, "answered": 0, "checked": 0, "holds": 0, "verified": 0, "verify_failed": 0,
-                                      "tips_followed": 0, "tips_rejected": 0})
+        self.assertEqual(out["mom"], {"calls": 0, "answered": 0, "checked": 0, "holds": 0, "verified": 0, "verify_failed": 0})
+        self.assertEqual((out["advice"]["calls"], out["you"]["outside"]["comments"], out["you"]["chat_waits"]["count"]), (0, 0, 0))
         self.assertEqual(out["olymp"]["calls"], 0)
         self.assertEqual((out["you"]["briefs"], out["you"]["answered"]), (0, 0))
         self.assertEqual((out["days"], out["recent"], out["today"]), (7, [], {"mom_calls": 0}))
@@ -120,8 +120,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         out = self.get("/summary")
         self.assertEqual((out["worker"]["tool_calls"], out["worker"]["signals"]), (3, 3))
         # Mom: 3 advice (the Olymp one was asked of her first) + 2 pre-flight + 3 questions
-        self.assertEqual(out["mom"], {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "verified": 1, "verify_failed": 2,
-                                      "tips_followed": 0, "tips_rejected": 0})
+        self.assertEqual(out["mom"], {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "verified": 1, "verify_failed": 2})
         self.assertEqual(out["olymp"]["calls"], 2)
         self.assertEqual((out["you"]["briefs"], out["you"]["answered"]), (1, 2))
 
@@ -132,10 +131,24 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.put("question", task="t_a", outcome="human", by="mom", tokens_in=20, tokens_out=2, usd=0.02)
         self.put("human_answer", task="t_a", via="cli", allow_once=True, latency_s=30)
         out, cli_report = self.get("/summary"), plugin.attention_report(7)
-        for key in ("days", "board", "worker", "mom", "olymp", "cost"):
+        for key in ("days", "since", "until", "board", "worker", "mom", "olymp", "cost", "advice"):
             self.assertEqual(out[key], cli_report[key], key)
         self.assertEqual(out["you"], {**cli_report["you"], "waiting": 0})
         self.assertEqual(out["cost"]["all_on_mom_usd"], round(110 * 0.03 / 33, 6))
+
+    def test_a_window_with_since_and_until_is_the_same_window_as_the_report(self):
+        self.put("touch", ts=100, src="comment", what="comment", author="default", store_id=1, task="t_a")
+        self.put("touch", ts=200, src="comment", what="comment", author="default", store_id=2, task="t_a")
+        self.put("advisor", ts=100, task="t_a", category="error", olymp=False)
+        self.put("advisor", ts=200, task="t_a", category="error", olymp=False)
+        out = self.get("/summary", since="1970-01-01T00:01:30", until="1970-01-01T00:02:30")
+        self.assertEqual((out["you"]["outside"]["comments"], out["mom"]["calls"], out["days"]), (1, 1, None))
+        self.assertEqual([r["ts"] for r in out["recent"]], [100])
+        self.assertEqual(out["you"]["outside"], plugin.attention_report(since="1970-01-01T00:01:30", until="1970-01-01T00:02:30")["you"]["outside"])
+
+    def test_a_date_that_is_none_is_a_400(self):
+        self.assertEqual(self.client.get("/summary", params={"since": "last tuesday"}).status_code, 400)
+        self.assertEqual(self.client.get("/summary", params={"until": "2026-99-99"}).status_code, 400)
 
     def test_the_window_is_the_last_n_days(self):
         self.put("advisor", ts=time.time() - 8 * 86400, task="t_a", category="error")

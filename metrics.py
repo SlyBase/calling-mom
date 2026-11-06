@@ -12,7 +12,8 @@ import urllib.request
 from collections import Counter
 
 _CATEGORIES = ("error", "loop", "validation", "architecture", "completion")
-_VERDICTS = ("followed", "rejected")
+_RESULTS = ("followed", "acted", "ignored", "unknown")
+_OLD_VERDICT = {"followed": "acted"}  # before 1.5 "followed" meant "the worker did something next"; "rejected" gave no evidence
 _SIGNALS = ("same_error", "loop", "malformed", "steps")
 _ESCALATION_REASONS = ("crit", "blocked", "breaker")
 
@@ -23,7 +24,7 @@ _FAMILIES = {  # name -> (type, help)
     "calling_mom_olymp_calls_total": ("counter", "Questions answered by the olymp model (the expensive tier)."),
     "calling_mom_advisor_tokens_total": ("counter", "Advisor tokens by direction."),
     "calling_mom_advisor_cost_usd_total": ("counter", "Advisor cost as reported by the provider (0 if it reports none)."),
-    "calling_mom_advice_feedback_total": ("counter", "First worker reply after advice: followed or rejected (keyword heuristic)."),
+    "calling_mom_advice_feedback_total": ("counter", "Advice by what the run did with it: followed (anchor used), acted, ignored, unknown."),
     "calling_mom_stuck_signals_total": ("counter", "Stuck signals fired by worker tool results."),
     "calling_mom_verify_total": ("counter", "verify: gate runs by result."),
     "calling_mom_verify_ignored_total": ("counter", "verify: lines that were not run, by reason."),
@@ -83,11 +84,11 @@ def render(rows, spend, caps, boards, now) -> str:
         _sample("calling_mom_advisor_errors_total", kinds.get("advisor_error", 0)))
     samples["calling_mom_olymp_calls_total"].append(
         _sample("calling_mom_olymp_calls_total", sum(1 for r in advisor if r.get("olymp"))))
-    verdicts = Counter({v: 0 for v in _VERDICTS})
-    verdicts.update(r.get("verdict") or "unknown" for r in rows if r.get("kind") == "advice_feedback")
-    for verdict in sorted(verdicts):
+    results = Counter({v: 0 for v in _RESULTS})
+    results.update(r.get("result") or _OLD_VERDICT.get(r.get("verdict")) or "unknown" for r in rows if r.get("kind") == "advice_feedback")
+    for result in sorted(results):
         samples["calling_mom_advice_feedback_total"].append(
-            _sample("calling_mom_advice_feedback_total", verdicts[verdict], verdict=verdict))
+            _sample("calling_mom_advice_feedback_total", results[result], result=result))
     for sig in sorted(signals):
         samples["calling_mom_stuck_signals_total"].append(
             _sample("calling_mom_stuck_signals_total", signals[sig], signal=sig))
