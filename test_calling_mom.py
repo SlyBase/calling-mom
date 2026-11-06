@@ -685,7 +685,7 @@ class CriticalDefaultsTest(AdvisorTest):
     def test_irreversible_or_public_commands_are_reviewed(self):
         for cmd in ("gh pr merge 135 --squash", "gh release create v2.9.2", "git push origin main",
                     "git push --force origin feat/x", "git tag v1.2.0", "gh issue comment 133 --body x",
-                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- id",
+                    "gh api repos/o/r/pulls/1/merge -X PUT", "ssh root@pve1 chown hermes /x", "pct exec 101 -- systemctl restart x",
                     "kubectl -n prod delete pvc pgdata", "kubectl --context p apply -f x.yaml"):
             with self.subTest(cmd=cmd):
                 self.assertIn("[ADVISOR", self.run_cmd(cmd) or "")
@@ -1223,19 +1223,34 @@ class RiskTiersTest(AdvisorTest):
 
     def test_ssh_reads_cannot_use_up_the_budget_of_a_later_merge(self):
         for i in range(4):
-            self.run_cmd(f"ssh pi 'ls /config/{i}'")
+            self.run_cmd(f"ssh pi 'chown hermes /config/{i}'")
         self.assertIn("[ADVISOR", self.run_cmd("gh pr merge 142 --squash"))
         self.assertIn("[ADVISOR", self.run_cmd("git tag v2.9.4"))
 
+    def test_a_read_only_look_does_not_use_the_watch_budget(self):
+        """Audit t_de8aec31, run 74: the one watch review was spent on a `pgrep`, the later quit and install got none."""
+        for i in range(3):                                    # different texts: three identical calls are a loop signal
+            self.assertIsNone(self.run_cmd(f"ssh mac 'pgrep -fl \"DaVinci Resolve\" | head -{i + 1}; ls ~/Library/OFX/Plugins 2>/dev/null | head'"))
+        self.assertEqual(len(self.llm.calls), 0)
+        self.run_cmd("scp ofx.zip mac:/tmp/")                # the first write gets the one review
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_quitting_an_app_and_installing_into_library_are_critical_not_watch(self):
+        self.run_cmd("ssh mac 'chown me /tmp/a'")             # watch budget used up
+        for cmd in ("ssh mac 'osascript -e \"quit app \\\"DaVinci Resolve\\\"\"'",
+                    "ssh mac 'cp -R /tmp/b ~/Library/OFX/Plugins/b.bundle'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("[ADVISOR", self.run_cmd(cmd))
+
     def test_watch_commands_get_one_review_per_card(self):
-        self.run_cmd("ssh pi 'ls /a'")
-        self.assertIsNone(self.run_cmd("ssh pi 'ls /b'"))
+        self.run_cmd("ssh pi 'chown hermes /a'")
+        self.assertIsNone(self.run_cmd("ssh pi 'chown hermes /b'"))
         self.assertEqual(len(self.llm.calls), 1)
 
     def test_a_noop_answer_still_uses_the_watch_budget(self):
         self.llm._res.text = "NO_ACTION"
-        self.run_cmd("ssh pi 'ls /a'")
-        self.run_cmd("ssh pi 'ls /b'")
+        self.run_cmd("ssh pi 'chown hermes /a'")
+        self.run_cmd("ssh pi 'chown hermes /b'")
         self.run_cmd("scp f pi:/tmp/")
         self.assertEqual(len(self.llm.calls), 1)          # no comment was written, the counter still counts
 
@@ -1248,7 +1263,7 @@ class RiskTiersTest(AdvisorTest):
         self.assertIn("[ADVISOR", self.run_cmd(cmd))
 
     def test_a_critical_command_inside_ssh_is_critical_not_watch(self):
-        self.run_cmd("ssh pi 'ls /a'")                      # uses the watch budget
+        self.run_cmd("ssh pi 'chown hermes /a'")            # uses the watch budget
         self.assertIn("[ADVISOR", self.run_cmd("ssh pi 'kubectl -n prod delete pvc x'"))
 
     def test_commands_extra_adds_your_own_patterns(self):
@@ -1261,7 +1276,7 @@ class RiskTiersTest(AdvisorTest):
         plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
         self.llm = SeqLlm(["ESCALATE: x", "olymp must not be asked"])
         plugin._ctx.llm = self.llm
-        self.run_cmd("ssh pi 'ls /a'")
+        self.run_cmd("ssh pi 'chown hermes /a'")
         self.assertEqual([c["model"] for c in self.llm.calls], [STRONG])
 
 
@@ -1750,6 +1765,13 @@ class PromptSectionTest(unittest.TestCase):
         self.assertIn("SECOND-OPINION", text)
         self.assertIn("verify:", text)
 
+    def test_the_section_says_what_to_do_when_an_approval_is_unclear(self):
+        os.environ["HERMES_KANBAN_TASK"] = "t_x"
+        self.addCleanup(os.environ.pop, "HERMES_KANBAN_TASK", None)
+        text = self.registered()["content"]({})
+        self.assertIn("kanban_block(kind='needs_input')", text)
+        self.assertIn("quit", text)
+
 
 class AsyncVerifyTest(BudgetMixin, unittest.TestCase):
     """`verify:` runs on a background thread: kanban_complete never waits longer than the hook budget allows."""
@@ -2009,6 +2031,29 @@ class PreflightTest(AdvisorFixture, unittest.TestCase):
     def test_execute_code_is_checked_like_a_terminal(self):
         self.run_cmd(tool="execute_code")
         self.assertEqual(len(self.llm.calls), 1)
+
+    def test_a_quit_or_a_library_install_is_asked_before_it_runs_also_over_ssh(self):
+        """Audit t_de8aec31: the production Resolve was quit and a plugin installed with no question first."""
+        for cmd in ("ssh mac 'osascript -e \"quit app \\\"DaVinci Resolve\\\"\"; sleep 8'", "killall Resolve",
+                    "ssh mac 'cp -R /tmp/ndi ~/Library/OFX/Plugins/NDI.bundle && ls ~/Library/OFX/Plugins/'"):
+            with self.subTest(cmd=cmd):
+                self.llm.calls.clear()
+                self.hold_with("HOLD: the card does not say the app may be quit. Instead: ask the owner first.")
+                out = self.run_cmd(cmd)
+                self.assertEqual(out["action"], "block")
+                self.assertEqual(len(self.llm.calls), 1)
+                self.assertIn(cmd, self.llm.calls[0]["messages"][1]["content"])
+
+    def test_a_read_only_ssh_is_not_asked(self):
+        self.assertIsNone(self.run_cmd("ssh mac 'pgrep -fl Resolve; ls ~/Library/OFX/Plugins'"))
+        self.assertEqual(self.llm.calls, [])
+
+    def test_the_reviewer_is_told_that_the_task_must_name_a_quit_or_a_library_install(self):
+        self.run_cmd("killall Resolve")
+        system = self.llm.calls[0]["messages"][0]["content"]
+        self.assertIn("quit or kill", system)
+        self.assertIn("names", system)
+        self.assertIn("ask the owner", system)
 
     def test_the_prompt_is_redacted(self):
         token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"

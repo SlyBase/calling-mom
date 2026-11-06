@@ -1320,7 +1320,10 @@ def _pf_messages(task, command) -> list:
               "or exactly 'HOLD: <reason>. Instead: <safer alternative>' when it is not. "
               "Rewriting history on a shared branch (a force push to main, master or any branch others use, also with "
               "--force-with-lease) is never safe for a weaker agent, even when the task asks for it: reply HOLD and name "
-              "a normal commit or a branch push as the alternative.")
+              "a normal commit or a branch push as the alternative. "
+              "To quit or kill an application or process a person may be using, or to copy or link something into a Library "
+              "folder, the task must say so (it names the app or the plugin). When it does not, reply HOLD and name "
+              "'ask the owner first' as the alternative.")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -2107,7 +2110,9 @@ def on_human_input_resolved(request_id="", kind="", outcome="", **_):
 _TIP = (
     "Stuck or unsure about a critical decision? Write a kanban_comment whose text starts with "
     "`SECOND-OPINION: ` and your question; a stronger model answers in the tool result. "
-    "A `verify: <command>` line in the card body is run before you may complete: fix failures first."
+    "A `verify: <command>` line in the card body is run before you may complete: fix failures first. "
+    "Not sure the card allows an action (quit a running app, install on someone's machine, anything you cannot undo)? "
+    "Do not guess: call kanban_block(kind='needs_input') with the question, or ask SECOND-OPINION first."
 )
 
 
