@@ -3,6 +3,21 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.4.1] - 2026-11-06
+
+### Changed
+- **Display name is "Calling Mom"** (was "Calling mom"): plugin label, Desktop page and sidebar entry, status-bar chip
+  tooltip, error texts, `hermes calling-mom report` header, README and docs. Identifiers stay `calling-mom` (commands,
+  config keys, folders, log files, card comment prefixes and badges).
+- The sidebar entry uses the `call-outgoing` codicon instead of `heart`.
+- README screenshots recorded again with 1.4.1.
+
+### Added
+- README and TECHNICAL.md: "Desktop on another machine" (the Desktop app loads Desktop plugins from its own disk, so
+  a Desktop that connects to a remote gateway needs `desktop/plugin.js` copied by hand).
+- `hermes calling-mom setup` and `doctor` print one line that points to that section (in `doctor` an info line, never
+  a failure).
+
 ## [1.4.0] - 2026-11-06
 
 ### Added

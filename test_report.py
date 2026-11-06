@@ -93,7 +93,7 @@ EXPECTED = {
 }
 
 TEXT = """\
-Calling mom, last 7 days
+Calling Mom, last 7 days
 Worker  4 tool calls in 3 runs, 3 stuck signals; 3 API calls, 3,500 tokens in / 350 out
 Mom     8 calls: 1 question answered, 2 pre-flight checks (1 hold), 1 verify passed / 2 failed, tips followed 2 / rejected 1
 Olymp   2 calls
@@ -153,7 +153,7 @@ class RenderTest(unittest.TestCase):
     def test_a_board_and_the_daily_olymp_cap_are_named(self):
         text = report.render({"days": 30, "board": "coding", **EXPECTED, "olymp": {"calls": 2, "today": 1, "cap": 6}})
         lines = text.splitlines()
-        self.assertEqual(lines[0], "Calling mom, last 30 days, board coding")
+        self.assertEqual(lines[0], "Calling Mom, last 30 days, board coding")
         self.assertEqual(lines[3], "Olymp   2 calls, 1 of 6 today")
 
     def test_no_price_no_comparison_line_and_no_median(self):

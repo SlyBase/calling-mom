@@ -31,6 +31,8 @@ except ImportError:  # loaded by path (tests, plugin doctor): no package context
 
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
+DESKTOP_HINT = ("Desktop app on another machine than the gateway? It needs its own copy of the Desktop half: "
+                "see \"Desktop on another machine\" in the README (https://github.com/SlyBase/calling-mom#desktop-on-another-machine).")
 CRON_NAME = "calling-mom: sweep - escalate parked cards, push metrics"
 # Starting points, not promises: model ids change. `setup` lists what is really configured.
 PRESETS = {
@@ -505,6 +507,7 @@ def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cr
                 "pushes metrics). Skip it with --no-cron.")
         env.cron()
     env.say("Next: hermes calling-mom doctor   (makes one real call to each model)")
+    env.say(DESKTOP_HINT)
     return 0
 
 
@@ -556,6 +559,7 @@ def cmd_doctor(env) -> int:
     checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps())
     for name, status, detail in checks:
         env.say(f"{ {'ok': 'OK  ', 'warn': 'WARN', 'fail': 'FAIL'}[status] }  {name:<17} {detail}".rstrip())
+    env.say("INFO  " + DESKTOP_HINT)  # an info line: it never changes the exit code
     return exit_code(checks)
 
 

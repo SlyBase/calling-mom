@@ -106,7 +106,7 @@ def _n(count, word):
 def render(r) -> str:
     """The text of ``hermes calling-mom report``. ``r`` is ``build`` plus ``days`` (and ``board``, ``olymp.today/cap``)."""
     w, m, o, y, c = r["worker"], r["mom"], r["olymp"], r["you"], r["cost"]
-    head = f"Calling mom, last {_n(r['days'], 'day')}" + (f", board {r['board']}" if r.get("board") else "")
+    head = f"Calling Mom, last {_n(r['days'], 'day')}" + (f", board {r['board']}" if r.get("board") else "")
     olymp = _n(o["calls"], "call") + (f", {o['today']} of {o['cap']} today" if "cap" in o else "")
     price = f"${c['mom_usd']:.4f}" if c["mom_usd"] else "no price reported"  # a provider without a price is not free
     wait = f" (median {duration(y['median_answer_s'])})" if y["median_answer_s"] is not None else ""

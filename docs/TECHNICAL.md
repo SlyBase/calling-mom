@@ -1,4 +1,4 @@
-# Calling mom: technical reference
+# Calling Mom: technical reference
 
 The everyday guide is the [README](../README.md). This page holds the details: every config key, security model,
 metrics, how the risk list was built, what was measured, and how to develop and release.
@@ -322,6 +322,21 @@ it imports nothing from Hermes itself. Boards are read through the plugin's `_co
 | `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `verify failed`, `olymp`, `mom`, `verified`. `held` and `for you` need an opted-in board and a card that still waits; the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
 | `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. |
 | `POST /answer` | `{board, task_id, text?, accept?, allow_once?}` -> `answer_card(..., by="desktop")`. 404 for a board that does not exist or did not opt in, or no such card; 409 for a card that is not blocked or carries no brief or hold; 400 for bad arguments; 422 for a malformed body. |
+
+**Desktop on another machine.** The app loads Desktop plugins from its own disk only
+(`$HERMES_HOME/desktop-plugins/<id>/plugin.js` or `$HERMES_HOME/plugins/<id>/desktop/plugin.js` on the machine that
+runs the app; the SDK calls them app-level: one root for every profile, gateway or remote machine), and
+`hermes_cli/desktop_plugin_halves.py` does not install the half on a host that Desktop only reaches over SSH. The
+backend routes above live in the gateway and work either way. On the machine that runs the app:
+
+```bash
+mkdir -p ~/.hermes/desktop-plugins/calling-mom
+curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.4.1/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+```
+
+then **⌘K -> Reload desktop plugins**, and enable it under **Capabilities -> Plugins**. Card badges need Desktop
+0.22.6 or later. `hermes calling-mom setup` (last line) and `doctor` (an `INFO` line, never a failure) point to the
+README section "Desktop on another machine".
 
 The Desktop half polls the three GET routes every 15 s (not while the window is hidden) and keeps "Keep blocked" in
 `ctx.storage`: it hides an item on this machine only, the card stays blocked and the backend is not told.
