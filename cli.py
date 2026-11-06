@@ -268,7 +268,7 @@ def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None
     if chat_waits is not None:
         summary.append("chat    : waits counted (kind, seconds, outcome; never the text)" if chat_waits else "chat    : waits not counted")
     if fallback is not None:
-        summary.append(f"fallback : {fallback[1]} ({fallback[0]})" if fallback else "fallback : off")
+        summary.append(f"fallback: {fallback[1]} ({fallback[0]})" if fallback else "fallback: off")
     return upd, summary
 
 

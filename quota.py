@@ -115,6 +115,16 @@ def _reaches(links, start, goal) -> bool:
     return False
 
 
+def _parents_first(waiting, links) -> list:
+    """Keep the order (priority, then age), but never put a card before one that reaches it through the links: its parents come first."""
+    left, out = list(waiting), []
+    while left:
+        pick = next((t for t in left if not any(_reaches(links, u.id, t.id) for u in left if u is not t)), left[0])  # a cycle in the data: first one
+        left.remove(pick)
+        out.append(pick)
+    return out
+
+
 def plan(tasks, links, n) -> dict:
     """At most ``n`` cards ready or running: chain the ``todo``/``ready`` cards behind ``n`` heads with parent links.
 
@@ -126,7 +136,8 @@ def plan(tasks, links, n) -> dict:
         raise ValueError("max must be at least 1")
     known = set(links)
     running = sorted((t for t in tasks if t.status == "running"), key=lambda t: (t.created_at or 0, t.id))
-    waiting = sorted((t for t in tasks if t.status in ("todo", "ready")), key=lambda t: (-(t.priority or 0), t.created_at or 0, t.id))
+    waiting = _parents_first(sorted((t for t in tasks if t.status in ("todo", "ready")),
+                                    key=lambda t: (-(t.priority or 0), t.created_at or 0, t.id)), links)
     heads = running[:n]
     chains = [[t.id] for t in heads] + [[] for _ in range(n - len(heads))]
     skipped = []

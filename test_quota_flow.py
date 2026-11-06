@@ -566,15 +566,26 @@ class PaceTest(PaceFixture, unittest.TestCase):
         self.assertEqual(self.statuses().count("ready"), 0)
         self.assertEqual(self.parents(self.cards[3]), [tid])
 
-    def test_the_plan_names_cards_left_alone(self):
-        with_conn(lambda c: kb.link_tasks(c, self.cards[0], self.cards[3]))     # card 0 must stay before card 3
+    def test_running_cards_above_the_maximum_are_named(self):
         with_conn(lambda c: c.execute("UPDATE tasks SET status = 'running', current_run_id = 9 WHERE id IN (?, ?)",
                                       (self.cards[1], self.cards[2])) and c.commit())
         out = self.pace(dry_run=True)
-        text = "\n".join(out["lines"])
-        self.assertIn("1 running card(s) above the maximum are left running", text)
-        self.assertIn("a link would close a cycle", text)
+        self.assertIn("1 running card(s) above the maximum are left running", "\n".join(out["lines"]))
         self.assertEqual(out["skipped_running"], 1)
+
+    def test_a_card_that_cannot_be_placed_is_named(self):
+        real = plugin.quota.plan
+        with mock.patch.object(plugin.quota, "plan", lambda *a, **k: {**real(*a, **k), "skipped": [self.cards[0]]}):
+            text = "\n".join(self.pace(dry_run=True)["lines"])
+        self.assertIn(f"a link would close a cycle: {self.cards[0]}", text)
+
+    def test_a_link_of_the_user_keeps_its_order(self):
+        with_conn(lambda c: kb.link_tasks(c, self.cards[0], self.cards[1]))     # card 0 stays before card 1
+        out = self.pace()
+        self.assertEqual((out["ok"], out["added"]), (True, 2))
+        self.assertEqual(self.parents(self.cards[1]), [self.cards[0]])         # the user's link, no second parent
+        self.assertEqual(self.parents(self.cards[0]), [self.cards[2]])
+        self.assertEqual(self.statuses().count("ready"), 1)
 
     def test_pace_links_are_not_outside_help(self):
         self.pace()

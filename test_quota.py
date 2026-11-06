@@ -211,20 +211,22 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(plan["add"], [])
         self.assertEqual(plan["chains"], [["a", "b"]])
 
-    def test_a_link_that_would_close_a_cycle_goes_to_another_chain_or_is_skipped(self):
+    def test_a_card_never_comes_before_its_parent(self):
         tasks = [todo("a", created=1), todo("b", created=2)]
-        plan = quota.plan(tasks, {("b", "a")}, 1)           # b must stay before a: the chain a -> b would be a cycle
-        self.assertEqual(plan["add"], [])
-        self.assertEqual(plan["skipped"], ["b"])
-        self.assertEqual(plan["chains"], [["a"]])
-        plan = quota.plan(tasks, {("b", "a")}, 2)           # with two chains b heads the second one
-        self.assertEqual(plan["chains"], [["a"], ["b"]])
-        self.assertEqual(plan["skipped"], [])
+        plan = quota.plan(tasks, {("b", "a")}, 1)           # b must stay before a, although a is older
+        self.assertEqual((plan["chains"], plan["add"], plan["skipped"]), ([["b", "a"]], [], []))
+        plan = quota.plan(tasks, {("b", "a")}, 2)           # with two chains each heads one; the link keeps a waiting for b
+        self.assertEqual((plan["chains"], plan["skipped"]), ([["b"], ["a"]], []))
 
-    def test_a_longer_cycle_is_found_too(self):
+    def test_the_parent_comes_first_also_through_a_card_that_does_not_wait(self):
         tasks = [todo("a", created=1), todo("b", created=2)]
-        plan = quota.plan(tasks, {("b", "x"), ("x", "a")}, 1)
-        self.assertEqual(plan["skipped"], ["b"])
+        plan = quota.plan(tasks, {("b", "x"), ("x", "a")}, 1)   # x is blocked, b reaches a through it
+        self.assertEqual(plan["chains"], [["b", "a"]])
+
+    def test_data_with_a_cycle_leaves_the_card_that_cannot_be_placed_alone(self):
+        tasks = [todo("a", created=1), todo("b", created=2)]
+        plan = quota.plan(tasks, {("a", "x"), ("x", "b"), ("b", "a")}, 1)    # Hermes refuses such links; the plan still ends
+        self.assertEqual((plan["chains"], plan["skipped"]), ([["a"]], ["b"]))
 
     def test_max_below_one_is_refused(self):
         with self.assertRaises(ValueError):

@@ -922,9 +922,9 @@ class FallbackSetupTest(unittest.TestCase):
 
     def test_the_summary_names_it(self):
         _, summary = cli._result({}, self.MOM, None, ["coding"], fallback=self.FB)
-        self.assertIn("fallback : x/y (openrouter)", summary)
+        self.assertIn("fallback: x/y (openrouter)", summary)
         _, summary = cli._result({}, self.MOM, None, ["coding"], fallback=False)
-        self.assertIn("fallback : off", summary)
+        self.assertIn("fallback: off", summary)
         _, summary = cli._result({}, self.MOM, None, ["coding"])
         self.assertFalse([line for line in summary if line.startswith("fallback")])
 
@@ -940,7 +940,7 @@ class FallbackSetupTest(unittest.TestCase):
     def test_yes_asks_for_the_pair(self):
         (upd, summary), s = self.interactive("2", "1", "3", "1", "2", "1", "2")   # ... fallback: yes, provider 1 (openrouter), model 2
         self.assertEqual((upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"]), self.FB)
-        self.assertIn("fallback : x/y (openrouter)", summary)
+        self.assertIn("fallback: x/y (openrouter)", summary)
 
     def test_a_configured_fallback_is_kept_on_enter(self):
         cfg = {"calling_mom": {"mom_fallback": {"provider": "openrouter", "model": "x/y"}}}
