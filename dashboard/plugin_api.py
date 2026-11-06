@@ -42,10 +42,41 @@ def _rows(since=0):
 
 def _recent(rows, limit=10):
     shown = [r for r in rows if _SHOWN.get(r.get("kind"), lambda _: False)(r)]
+    titles = _titles()
     return [{"ts": r["ts"], "kind": r["kind"], "task": r.get("task"), "board": r.get("board"),
              "detail": r.get("outcome") or r.get("verdict") or r.get("state") or r.get("via") or r.get("category") or r.get("reason"),
-             "by": r.get("by") or ("olymp" if r.get("olymp") else None)}
+             "by": r.get("by") or ("olymp" if r.get("olymp") else None),
+             "title": titles.get(r.get("task"))}
             for r in reversed(shown[-limit:])]
+
+
+def _titles():
+    """Task id -> card title over the opted-in boards: a log row names only the id, so the page joins the title here."""
+    return {t.id: t.title for b in mom()._core.list_board_slugs() if mom()._opted_in(b) for t, _ in _board(b)}
+
+
+def _active():
+    """Running/ready cards on the opted-in boards, with their last comment (null for a card that has none), newest last-activity first."""
+    items = []
+    for board in mom()._core.list_board_slugs():
+        if mom()._opted_in(board):
+            items.extend(_active_tasks(board))
+    return sorted(items, key=lambda i: -i.pop("_last_activity"))
+
+
+def _active_tasks(board):
+    """The running/ready cards of one board, each with its last comment and its last-activity stamp."""
+    with mom()._connect(board) as conn:
+        out = []
+        for t in mom().kb.list_tasks(conn):
+            if t.status in ("running", "ready"):
+                comments = mom().kb.list_comments(conn, t.id)
+                last = comments[-1] if comments else None
+                out.append({
+                    "board": board, "task_id": t.id, "title": t.title, "status": t.status,
+                    "last_comment": {"author": last.author, "body": (last.body or "")[:200], "created_at": last.created_at} if last else None,
+                    "_last_activity": max([t.created_at or 0] + [c.created_at for c in comments])})
+        return out
 
 
 def _board(board):
@@ -120,6 +151,12 @@ def cards(board: str | None = None):
 @router.get("/needs-you")
 def needs_you():
     return _needs_you()
+
+
+@router.get("/active")
+def active():
+    """The cards climbing right now: running/ready on the opted-in boards, with their last comment, newest last-activity first."""
+    return _active()
 
 
 @router.get("/summary")

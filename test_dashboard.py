@@ -179,8 +179,8 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         recent = self.get("/summary", days=90)["recent"]
         self.assertEqual(len(recent), 10)
         self.assertEqual([r["task"] for r in recent][:3], ["t_q", "t_11", "t_10"])
-        self.assertEqual(recent[0], {"ts": t0 + 1002, "kind": "question", "task": "t_q", "board": "t-board", "detail": "human", "by": "mom"})
-        self.assertEqual(set(recent[1]), {"ts", "kind", "task", "board", "detail", "by"})
+        self.assertEqual(recent[0], {"ts": t0 + 1002, "kind": "question", "task": "t_q", "board": "t-board", "detail": "human", "by": "mom", "title": None})
+        self.assertEqual(set(recent[1]), {"ts", "kind", "task", "board", "detail", "by", "title"})
 
     def test_each_kind_has_a_detail_and_a_name(self):
         t0 = int(time.time()) - 5000
@@ -421,6 +421,83 @@ class AnswerRouteTest(DashboardFixture, unittest.TestCase):
         plugin.DEFAULTS["answer"].update(boards=["*"])                   # "*" opts every board in, so only the name check stops it
         res = self.post(board="../../etc", text="x")
         self.assertEqual((res.status_code, res.json()["detail"]), (404, "no board '../../etc'"))
+
+
+class ActiveTest(DashboardFixture, unittest.TestCase):
+    """GET /active: running/ready cards on opted-in boards with their last comment, newest last-activity first."""
+
+    def set_status(self, tid, status):
+        with_conn(lambda c: c.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid)).connection.commit())
+
+    def active(self, tid):
+        """The /active item for one card (the fixture's base card is also running, so filter by id)."""
+        return [i for i in self.get("/active") if i["task_id"] == tid]
+
+    def test_a_running_card_with_a_comment_shows_its_title_board_status_and_last_comment(self):
+        tid = self.card(title="ship the parser")
+        self.set_status(tid, "running")
+        with_conn(lambda c: kb.add_comment(c, tid, "worker", "Parser done, running tests."))
+        (item,) = self.active(tid)
+        self.assertEqual((item["board"], item["task_id"], item["title"], item["status"]), ("t-board", tid, "ship the parser", "running"))
+        self.assertEqual(item["last_comment"], {"author": "worker", "body": "Parser done, running tests.", "created_at": item["last_comment"]["created_at"]})
+        self.assertIsInstance(item["last_comment"]["created_at"], int)
+
+    def test_a_ready_card_with_no_comment_has_a_null_last_comment(self):
+        tid = self.card(title="fresh card")
+        self.set_status(tid, "ready")
+        (item,) = self.active(tid)
+        self.assertEqual((item["status"], item["last_comment"]), ("ready", None))
+
+    def test_only_running_and_ready_cards_are_active(self):
+        for status, active in (("running", True), ("ready", True), ("blocked", False), ("todo", False), ("done", False)):
+            tid = self.card()
+            self.set_status(tid, status)
+            self.assertEqual(bool(self.active(tid)), active, status)
+
+    def test_a_card_with_comments_shows_the_last_one_and_truncates_the_body(self):
+        tid = self.card()
+        with_conn(lambda c: kb.add_comment(c, tid, "worker", "first note"))
+        with_conn(lambda c: kb.add_comment(c, tid, "worker", "x" * 300))
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_comment"]["body"], "x" * 200)
+
+    def test_a_known_prefix_on_the_last_comment_is_kept_as_is(self):
+        tid = self.card()
+        with_conn(lambda c: kb.add_comment(c, tid, "worker", "[pre-flight] HOLD: it rewrites shared history"))
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_comment"]["body"], "[pre-flight] HOLD: it rewrites shared history")
+
+    def test_the_newest_last_activity_comes_first(self):
+        now = int(time.time())
+        old = self.card()
+        self.set_status(old, "ready")
+        young = self.card()
+        self.set_status(young, "running")
+        with_conn(lambda c: kb.add_comment(c, old, "worker", "old note"))
+        with_conn(lambda c: kb.add_comment(c, young, "worker", "young note"))
+        with_conn(lambda c: c.execute("UPDATE task_comments SET created_at = ? WHERE task_id = ?", (now - 1000, old)).connection.commit())
+        with_conn(lambda c: c.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (now - 2000, old)).connection.commit())
+        active = self.get("/active")
+        self.assertLess(active.index([i for i in active if i["task_id"] == young][0]),
+                        active.index([i for i in active if i["task_id"] == old][0]))
+
+    def test_only_boards_that_opted_in_are_read(self):
+        self.card()
+        plugin.DEFAULTS["answer"].update(boards=["somewhere-else"])
+        plugin.DEFAULTS["advisor"].update(boards=[])
+        self.assertEqual(self.get("/active"), [])
+
+
+class RecentIdentityTest(DashboardFixture, unittest.TestCase):
+    """GET /summary recent rows carry a card title, joined from the boards (null when the card is gone)."""
+
+    def test_a_recent_row_shows_the_card_title_and_falls_back_when_the_card_is_missing(self):
+        tid = self.card(title="ship the parser")
+        self.put("advisor", task=tid, category="error")
+        self.put("advisor", task="t_gone", category="error")   # a log row for a card that is no longer on the board
+        rows = {r["task"]: r["title"] for r in self.get("/summary", days=90)["recent"]}
+        self.assertEqual(rows.get(tid), "ship the parser")
+        self.assertIsNone(rows.get("t_gone"))
 
     def test_the_body_must_have_the_right_types(self):
         for body in ({"task_id": self.tid}, {"board": "t-board"}, {"board": "t-board", "task_id": self.tid, "text": 5},
