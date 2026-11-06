@@ -29,9 +29,12 @@ What really happened on those cards:
    `[advisor unavailable]` comment and nothing else.
 4. **Pacing is manual.** Running one card at a time took 9 link changes and a reclaim by hand.
 5. **Subscription cost reads "no price reported".** True, and useless.
+6. **A dead worker looks busy.** On 2026-11-06 a deploy recreated the Hermes container at 11:03 UTC. The worker of card
+   t_6159c155 died with it, but the card stayed `running` with a stale claim until the orchestrator reclaimed it at
+   13:06 UTC. Its `max_runtime` (3 h) would have released it at 13:58. Nothing on the board said so.
 
-1.5 measures first. Every outside touch and every quota stall becomes a number with a named source, and the two manual
-chores (quota recovery, pacing) become one comment and one command. Card routing (Mom picks the tier and writes the card
+1.5 measures first. Every outside touch, every quota stall and every stalled card becomes a number with a named source,
+and the manual chores (quota recovery, pacing, spotting dead workers) become a comment or one command. Card routing (Mom picks the tier and writes the card
 contract) is planned for 1.6 and needs these numbers to show that it saves attention.
 
 ## 2. Principles
@@ -57,7 +60,7 @@ SPEC-1.4 section 2 holds in full. In addition:
 | WP | What | Priority | Depends on |
 |---|---|---|---|
 | WP1 | Honest count: outside help, chat waits, evidence-based advice feedback, subscription cost line | must | none |
-| WP2 | Quota and pacing: `[quota]` comments, provider health, Mom fallback, `pace`, upstream seam drafts | must | WP1 |
+| WP2 | Quota and pacing: `[quota]` comments, provider health, Mom fallback, stalled cards, `pace`, upstream seam drafts | must | WP1 |
 | WP3 | Pre-action gaps from the owner's audit (card t_2590fcab) | should | WP2 |
 | WP4 | Release candidate 1.5.0, review by Kore; not merged into `main` before 2026-11-12 | must | WP3 |
 
@@ -71,7 +74,7 @@ and records `touch` rows:
 
 - Comments whose author is neither the card's assignee nor calling-mom. calling-mom comments are recognised by their
   prefixes (the existing `[<category>/<signal>] run N ·`, `[advisor unavailable]`, `[pre-flight] HOLD:`,
-  `[mom answered]`, `[olymp answered]`, `[for you]`, and WP2's `[quota]`) and by the plugin's own authors (`advisor`,
+  `[mom answered]`, `[olymp answered]`, `[for you]`, and WP2's `[quota]` and `[stalled]`) and by the plugin's own authors (`advisor`,
   `escalation`). Keep the author id (a profile or surface id such as `default`, `desktop`, `user`), never the text. A
   `[you via calling-mom]` comment is an answer (already counted), not outside help.
 - Structural events: `linked`, `unlinked`, `reclaimed` (only `manual: true`), `unblocked`, `edited`, `archived`,
@@ -145,14 +148,23 @@ age, keep their existing parents, and are chained with parent links (N chains, r
 `_core.py` already uses, never raw SQL. `triage` and `blocked` cards are skipped. The plan is printed first,
 `--dry-run` stops there, and `--undo` removes exactly the links `pace` added (recorded in `calling-mom-state.json`).
 
+**Stalled cards.** The sweep flags a card that is `running` without a heartbeat for `calling_mom.stall_minutes`
+(default 15, 0 = off), read through `_core.py`. One comment per run: `[stalled] no heartbeat since HH:MM UTC (run N).
+The worker is probably gone, for example after a gateway restart. If so: hermes kanban --board B reclaim <id> --reason
+stalled`, and a `stall` row. calling-mom never reclaims by itself (principle 4). The Desktop half shows a `stalled` badge
+for this prefix (the existing prefix table) and lists stalled cards in Needs you, read-only. The report counts stalled
+cards and their minutes.
+
 **Status, doctor, report.** `status` and `doctor` show provider health and the fallback. The report gains one line:
 `Quota   1 limit (claude-subscription-directsdk-experimental, 1 h 51 min) · 3 cards paused · 0 Mom calls skipped · fallback used 0×`.
 
-**Upstream seams.** Write `docs/UPSTREAM.md` with four Hermes requests, each naming the calling-mom code path that would
+**Upstream seams.** Write `docs/UPSTREAM.md` with five Hermes requests, each naming the calling-mom code path that would
 use it: (1) a dispatcher veto or a per-profile/per-provider concurrency limit (would replace `pace`), (2) a public read
 API for Kanban events and comments (would replace the private reads in `_core.py`), (3) a way for a plugin to offer an
 answer to a human-input request that the person can still override (Mom answers first in chat sessions), (4) read access
-to subscription usage windows (share of the 5-hour window instead of tokens). Timon files them.
+to subscription usage windows (share of the 5-hour window instead of tokens), (5) release a running card's claim when
+the dispatcher host that holds it is gone (a recreated gateway container left t_6159c155 `running` for two hours; would
+make the stalled-card comment rare). Timon files them.
 
 **Accept**
 
@@ -162,6 +174,10 @@ to subscription usage windows (share of the 5-hour window instead of tokens). Ti
 - Real check on a scratch board (`calling-mom-demo` or a new scratch board, never `coding`): Mom pointed at a provider
   that fails, the fallback answers and the header says so; `pace --dry-run` with 4 cards prints the plan, `pace --max 1`
   leaves exactly one card ready, `--undo` restores the original links. Evidence in the PR and the card comment.
+- Stalled cards: table tests (no heartbeat for 20 min: one `[stalled]` comment for that run; 10 min: none; a second sweep
+  in the same run: no second comment; a new run may comment again). Real check on the same scratch board with
+  `stall_minutes: 1`: suspend a running card's worker with `kill -STOP` (the PID stays alive, so the dispatcher keeps
+  the claim), wait two minutes, see one comment and the badge, then `kill -CONT`. Evidence in the PR and the card comment.
 - README, SECURITY.md and TECHNICAL.md: `pace` writes card links when a person runs it; the fallback receives the same
   redacted excerpts as Mom.
 
@@ -198,9 +214,11 @@ New record kinds in `logs/calling-mom.jsonl`. Every row has `ts`, `kind`, and `t
 | `advice_feedback` | existing; new `result` (followed, acted, ignored, unknown), `anchors` (count), `match` (hash prefix of the matched anchor, or null) |
 | `quota` | `provider`, `model`, `profile`, `state` (limited, down, recovered), `until` (ts or null), `error_class` (rate_limit, auth, key_limit, other), `src` (api_error, exit, call) |
 | `pace` | `board`, `max`, `added`, `removed`, `skipped_running` (counts) |
+| `stall` | `last_heartbeat` (ts), `minutes` |
 
-Card comment prefix: `[quota]`. State in `calling-mom-state.json` (existing file): provider health with expiry, pace
-links. Config: `calling_mom.count.chat_waits` (bool, default false), `calling_mom.mom_fallback` (optional).
+Card comment prefixes: `[quota]`, `[stalled]`. State in `calling-mom-state.json` (existing file): provider health with
+expiry, pace links, stalled runs already commented. Config: `calling_mom.count.chat_waits` (bool, default false),
+`calling_mom.mom_fallback` (optional), `calling_mom.stall_minutes` (int, default 15, 0 = off).
 
 ## 5. Not in 1.5
 
