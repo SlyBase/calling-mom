@@ -107,6 +107,10 @@ class TriageTest(unittest.TestCase):
                 self.assertEqual(touches.wait_s(NS(status="ready"), [event(kind, id=5, ts=130)], 1, 100, "triage"), 30)
         self.assertEqual(touches.wait_s(NS(status="ready"), [event("status", id=5, ts=140, status="todo")], 1, 100, "triage"), 40)
 
+    def test_the_first_leaving_event_ends_the_wait_not_a_later_one(self):
+        events = [event("promoted", id=5, ts=130), event("commented", id=6, ts=900)]
+        self.assertEqual(touches.wait_s(NS(status="ready"), events, 1, 100, "triage"), 30)
+
     def test_a_status_event_into_triage_again_does_not_leave(self):
         events = [event("status", id=5, ts=140, status="triage")]
         self.assertIsNone(touches.wait_s(NS(status="triage"), events, 1, 100, "triage"))

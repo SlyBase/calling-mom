@@ -3,6 +3,33 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [Unreleased] - 1.5.0 work
+
+### Added
+- **Honest count, WP1** (`docs/SPEC-1.5.md`). The report shows what reaches you, not only what Mom does.
+  - **Outside help.** The sweep reads the comments and events of opted-in boards (read only, through `_core.py`) and
+    logs `touch` rows: comments by anyone but the card's assignee and calling-mom (author id, never text), structural
+    board events (`link`, `unlink`, `unblock`, `edit`, `archive`, `assign`, `model`, `effort`, `changes`, a manual
+    `reclaim`; no actor is stored, so `unattributed`), every card that entered `triage`, and every `needs_input` block
+    Mom did not answer, each with the seconds until it left, or "still waiting". Writes calling-mom makes itself
+    (model pins and unblocks, also `answer_card`) are logged as `own_write` and not counted. The first sweep takes the
+    whole history; a card waiting is written again, with `wait_s`, when it leaves.
+  - **Chat waits** (`calling_mom.count.chat_waits`, off by default, `setup --chat-waits`): `on_human_input_request` and
+    `on_human_input_resolved` give the kind of wait, its seconds and its outcome. Never the prompt or the answer.
+  - **Advice feedback with evidence.** The anchors of an advice (commands, paths, tool names in backticks) are kept in
+    memory for the run; a later tool call that uses one makes the advice `followed`, any other call `acted`, a run that
+    ends first `ignored`, advice without anchors `unknown`. The old "followed" means `acted` now.
+  - **Report**: `--since` / `--until` (ISO date or date-time, UTC; also on `GET /summary`), the `You` block with
+    outside help and chat waits, an `Advice` line with the four results, and a cost line that says "on a subscription
+    (no per-token price)". What was not observed says `not observed`, never 0. The Desktop `You` rung shows the
+    outside-help counts. `doctor` has a `board read` check.
+
+### Changed
+- `report` JSON: `mom.tips_followed` / `tips_rejected` are gone; see `advice` (`followed`, `acted`, `ignored`, `unknown`).
+  `calling_mom_advice_feedback_total` has the label `result` (was `verdict`). Rows of 1.4 are read as before:
+  `followed` counts as `acted`, `rejected` as `unknown`.
+- Log rows may carry their own `ts` (the time of the event, not of the sweep).
+
 ## [1.4.0] - 2026-11-06
 
 ### Added

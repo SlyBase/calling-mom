@@ -41,7 +41,15 @@ and `task`, `board`, `run` where known). New or changed in 1.4:
 | `advice_late` | `signal`, `ms` | An advice missed the wait and reached the worker on a later tool result. |
 | `worker_usage` | `tokens_in`, `tokens_out` | One worker API request (`post_api_request`). Counts only, no text. |
 
-Unchanged kinds: tool rows (no `kind`: `tool`, `ok`, `sig`, `signals`), `advisor`, `advisor_error`, `advice_feedback`,
+Added in 1.5 (WP1), all additive:
+
+| kind | Fields | Written when |
+|---|---|---|
+| `touch` | `src` (`comment`, `event`, `chat`), `what` (`comment`, `link`, `unlink`, `reclaim`, `unblock`, `edit`, `archive`, `assign`, `model`, `effort`, `changes`, `triage`, `to_person`, `chat_wait`), `author` (comments: profile or surface id), `actor` (`other`, `unattributed`), `store_id` (dedupe key with `board` and `src`; the last row of a key wins), `wait_s` (triage, to_person, chat waits; absent while still waiting), `outcome` (chat), `wait` (chat: `clarify`, `approval`, `sudo`, `other`) | The sweep found outside help on an opted-in board (`ts` is the time of the event), or a prompt wait in chat ended. `wait` is an addition to the spec's field list: the spec asks for the kind of wait, and `kind` is taken by the row kind. |
+| `own_write` | `what` (`pin`, `unblock`), `store_id` | calling-mom wrote to a board itself; the sweep takes that event out of the outside-help count. |
+| `advice_feedback` | `result` (`followed`, `acted`, `ignored`, `unknown`), `anchors` (count), `match` (hash prefix of the matched anchor or null) | An advice was judged: at the first matching tool call, when the run ends, or at once for advice without anchors. 1.4 rows have `verdict` instead of `result`. |
+
+Unchanged kinds: tool rows (no `kind`: `tool`, `ok`, `sig`, `signals`), `advisor`, `advisor_error`,
 `escalated`, `review_redirect`, `verify_ignored`, `tick`. Precedents are a separate file (see "Precedents").
 `hermes calling-mom report` and `GET /summary` only count these rows.
 
@@ -164,7 +172,7 @@ Card text can come from mail or web content, so treat it as untrusted.
 - **Pre-flight** is active only where the advisor is (board opt-in or card marker) and never on `[local-only]` cards. The card and the command are redacted with `redact_for_egress` before the question leaves. A HOLD is a persistent block that only a human release lifts; a model never releases its own hold. The log stores only the command hash, not the command.
 - **Answers** (`answer.enabled`) are a second, separate opt-in: Mom answers a worker's question and unblocks the card. The fast path (no model call) skips `[local-only]` and `[human]` cards and sends critical, `rules.HUMAN_TOPICS` and held cards to a brief-only prompt. The question prompt is redacted with `redact_for_egress` plus the URL-credential scrub. Mom cannot release a hold.
 - **Precedents** (`answer.precedents`) are the one prose store: redacted answers to briefs in `logs/calling-mom-precedents.jsonl`, listed and deleted with `hermes calling-mom precedents`. See "Precedents".
-- **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content.
+- **Observation log** (`logs/calling-mom.jsonl`) stores hashes and counts, no content. The 1.5 `touch` rows keep author ids and event kinds, never text.
 - The plugin never edits Hermes config.
 
 
@@ -281,8 +289,8 @@ cite one as "as decided on <card id>". `hermes calling-mom precedents [list | fo
 
 ## Attention report
 
-`hermes calling-mom report [--days 7] [--board X] [--json]` and `GET /summary` call one function, `report.build(rows,
-since, board, tasks)` (via `attention_report(days, board)` in `__init__.py`). It counts rows of `logs/calling-mom.jsonl`
+`hermes calling-mom report [--days 7 | --since DATE] [--until DATE] [--board X] [--json]` and `GET /summary` call one function, `report.build(rows,
+since, board, tasks, until)` (via `attention_report(days, board, since=, until=)` in `__init__.py`). `since` and `until` are an ISO date or date-time in UTC (a date alone is 00:00); `since` is included, `until` is not; `--days` counts back from `until` or now. Touch rows carry the time of the event, so a window finds old history. It counts rows of `logs/calling-mom.jsonl`
 and nothing else, so the same log gives the same numbers. `--board` keeps the rows that name the board and the rows of
 its cards (tool and advice rows carry a task id, not a board; the cards come from a read-only list of the board).
 
@@ -296,7 +304,11 @@ JSON fields (`days` and `board` are added by `attention_report`; `olymp.today` a
 | `mom.answered` | questions with `outcome=answered`, `by=mom` |
 | `mom.checked` / `holds` | pre-flight `go` + `hold` rows / `hold` rows |
 | `mom.verified` / `verify_failed` | finished `verify` rows: `pass` / `fail` + `timeout` (`started` and `stale` are not results) |
-| `mom.tips_followed` / `tips_rejected` | `advice_feedback` rows by verdict |
+| `advice.calls` | advisor rows that were not silent (`noop`): advice that reached the worker |
+| `advice.followed` / `acted` / `ignored` | `advice_feedback` rows by `result`; a 1.4 row counts by its old `verdict` (`followed` is `acted`, `rejected` has no result) |
+| `advice.unknown` | `calls` minus the three above, never below 0: advice without anchors, without a verdict yet, or a hard-killed run |
+| `you.outside` | `comments` (+ `authors` by author id), `changes` (+ `changes_by` by kind), `actor` (always `unattributed`), `to_person` (cards that entered triage or sat on an unanswered question), `waiting` (those still in that state), `own_writes` (rows taken out of the count), `source`, `observed` (false: the sweep has not read this board, nothing is shown as 0) |
+| `you.chat_waits` | `count`, `total_s`, `longest_s`, `by_kind`, `source`, `observed` (false while `count.chat_waits` is off) |
 | `olymp.calls` | Olymp advice rows + questions with `by=olymp`; `today` and `cap` are the daily count and `olymp.max_per_day` |
 | `you.briefs` | questions with `outcome=human` |
 | `you.answered` / `holds_released` | `human_answer` rows (briefs and holds, any `via`) / those with `allow_once` |
@@ -318,7 +330,7 @@ it imports nothing from Hermes itself. Boards are read through the plugin's `_co
 
 | Route | Answer |
 |---|---|
-| `GET /summary?days=7` (1..90) | The attention report (see above: `worker`, `mom`, `olymp`, `you`, `cost`) plus `you.waiting`, `today{mom_calls}` and `recent[{ts, kind, task, board, detail, by}]`. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
+| `GET /summary?days=7` (1..90), optionally `since=` and `until=` (400 for a bad date) | The attention report (see above: `worker`, `mom`, `olymp`, `you`, `cost`) plus `you.waiting`, `today{mom_calls}` and `recent[{ts, kind, task, board, detail, by}]`. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
 | `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `verify failed`, `olymp`, `mom`, `verified`. `held` and `for you` need an opted-in board and a card that still waits; the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
 | `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. |
 | `POST /answer` | `{board, task_id, text?, accept?, allow_once?}` -> `answer_card(..., by="desktop")`. 404 for a board that does not exist or did not opt in, or no such card; 409 for a card that is not blocked or carries no brief or hold; 400 for bad arguments; 422 for a malformed body. |
