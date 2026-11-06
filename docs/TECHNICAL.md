@@ -149,6 +149,7 @@ command was allowed, as designed.
 
 | Plugin | Hermes | Notes |
 |---|---|---|
+| 1.4.x | 0.22.7 tested, `>= 0.22` required | The agent half (hooks, pre-flight, answers, CLI, report) runs on 0.22. The card badges need the Desktop app 0.22.6 or later; `desktop/plugin.js` checks for the badge slot and, on an older app, loads the page without badges. `doctor` checks the version and that the kanban internals import. |
 | 1.3.x | 0.22.5 tested, `>= 0.22` required | `doctor` checks the version and that the kanban internals import. |
 
 The plugin uses `hermes_cli.kanban_db`, `kanban_db_connect` and the private comment watermark of `tools.kanban_tools`. A Hermes update can break it; the CI runs the full suite against Hermes `main`.
