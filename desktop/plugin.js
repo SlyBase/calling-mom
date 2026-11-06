@@ -13,7 +13,8 @@ const POLL_MS = 15000
 let ctx = null
 let disposeBadges = null
 let paintedKey = ''
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, kept: [] }
+const WINDOW = [7, 14, 30, 90]  // the time windows the header selector offers (days)
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], days: 7 }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -32,13 +33,25 @@ async function refresh() {
   }
 
   try {
-    const [summary, needs, cards] = await Promise.all([ctx.rest('/summary?days=7'), ctx.rest('/needs-you'), ctx.rest('/cards')])
+    const days = state.days || 7
+    const [summary, needs, cards, active] = await Promise.all([
+      ctx.rest(`/summary?days=${days}`),
+      ctx.rest('/needs-you'),
+      ctx.rest('/cards'),
+      ctx.rest('/active')
+    ])
 
-    update({ loaded: true, error: null, summary, needs, cards })
+    update({ loaded: true, error: null, summary, needs, cards, active })
     paintBadges()
   } catch (error) {
     update({ loaded: true, error: message(error) })
   }
+}
+
+function setDays(days) {
+  ctx.storage.set('days', days)   // kept like `kept`, so the window survives reloads
+  update({ days })
+  refresh()
 }
 
 // ---- card badges (Hermes Desktop 0.22.6 and later; an older app loads the page without them) ------------------
@@ -257,12 +270,65 @@ function Item({ item }) {
   )
 }
 
-function Section({ title, count, children }) {
+function Section({ title, count, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen)   // a state per section; the header toggles it
   return h(
     'section',
     { style: { marginTop: 24, display: 'flex', flexDirection: 'column', gap: 8 } },
-    h('h2', { style: { fontSize: '0.8125rem', fontWeight: 600, margin: 0 } }, title, count ? h(Badge, { variant: 'default', style: { marginLeft: 8 } }, count) : null),
-    children
+    h(
+      'h2',
+      {
+        style: { fontSize: '0.8125rem', fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
+        onClick: () => setOpen(!open)
+      },
+      h(Codicon, { name: open ? 'chevron-down' : 'chevron-right', style: { ...muted } }),
+      title,
+      count ? h(Badge, { variant: 'default', style: { marginLeft: 8 } }, count) : null
+    ),
+    open ? children : null
+  )
+}
+
+function WindowSelector() {
+  const s = useStore()
+  const button = days => h(
+    Button,
+    {
+      key: days,
+      size: 'sm',
+      variant: days === s.days ? 'default' : 'ghost',
+      onClick: () => setDays(days)
+    },
+    `${days}d`
+  )
+  return h('div', { style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
+}
+
+function ActiveItem({ item }) {
+  const noComment = !item.last_comment
+  return h(
+    'div',
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6 } },
+    h(
+      'div',
+      { style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' } },
+      h(
+        'div',
+        { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
+        h('span', { style: { fontWeight: 600 } }, item.title),
+        h(Badge, { variant: item.status === 'running' ? 'warn' : 'default' }, item.status),
+        h('span', { style: muted }, item.board)
+      ),
+      h('div', { style: { ...muted, fontSize: '0.6875rem', fontFamily: 'var(--font-mono, monospace)' } }, item.task_id)
+    ),
+    noComment
+      ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No comment yet — the worker is on it.')
+      : h(
+          'div',
+          { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap' } },
+          h('span', { style: muted }, `${item.last_comment.author}: `),
+          item.last_comment.body
+        )
   )
 }
 
@@ -278,8 +344,13 @@ function Page() {
   return h(
     'div',
     { style: { height: '100%', overflowY: 'auto', padding: '20px 24px 32px' } },
-    h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
-    h('div', { style: { ...muted, fontSize: '0.8125rem', marginBottom: 16 } }, 'Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last 7 days.'),
+    h(
+      'div',
+      { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 } },
+      h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
+      h(WindowSelector)
+    ),
+    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${s.days} days.`),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
@@ -295,17 +366,31 @@ function Page() {
         showKept && kept.map(item => h(Item, { key: item.task_id, item }))
       ),
     s.summary &&
+      h(
+        Section,
+        { title: 'Active', count: s.active.length },
+        s.active.length === 0
+          ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running or ready card on the boards you opted in.' })
+          : s.active.map(item => h(ActiveItem, { key: item.task_id, item }))
+      ),
+    s.summary &&
       s.summary.recent.length > 0 &&
       h(
         Section,
-        { title: 'Recent activity' },
+        { title: 'Recent activity', defaultOpen: false },
         h(
           'div',
           { style: { display: 'grid', gridTemplateColumns: 'max-content 1fr max-content', gap: '4px 16px', fontSize: '0.8125rem' } },
           ...s.summary.recent.flatMap((row, i) => [
             h('div', { key: `${i}-t`, style: muted }, sdk.relativeTime ? sdk.relativeTime(row.ts * 1000) : age(Date.now() / 1000 - row.ts)),
             h('div', { key: `${i}-s` }, sentence(row)),
-            h('div', { key: `${i}-i`, style: { ...muted, fontFamily: 'var(--font-mono, monospace)' } }, row.task || '')
+            h(
+              'div',
+              { key: `${i}-i`, style: { display: 'flex', gap: 8, alignItems: 'baseline', justifyContent: 'flex-end' } },
+              h('span', row.title && row.board ? { fontWeight: 600 } : muted, row.title || row.task),
+              row.title && row.board ? h('span', { style: muted }, row.board) : null,
+              h('span', { style: { ...muted, fontSize: '0.6875rem', fontFamily: 'var(--font-mono, monospace)' } }, row.task || '')
+            )
           ])
         )
       )
@@ -343,7 +428,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []) })
+    update({ kept: ctx.storage.get('kept', []), days: ctx.storage.get('days', 7) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },

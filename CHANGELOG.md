@@ -30,6 +30,17 @@ versioning: [SemVer](https://semver.org/).
   `followed` counts as `acted`, `rejected` as `unknown`.
 - Log rows may carry their own `ts` (the time of the event, not of the sweep).
 
+## [1.4.2] - 2026-11-06
+
+### Added
+- **The page shows what is climbing right now**: a new `Active` section (between "Needs you" and "Recent activity") lists the running/ready cards of your opted-in boards with their last comment, newest last-activity first. A card with no comment shows "No comment yet". New read-only route `GET /active` (the last comment is the last signal, as-is; the body is cut to 200 chars).
+- **Card identity in the lists**: "Recent activity" (and the Active list) show the card **title + board** as the visible line; the `task_id` is now a small, muted, mono suffix. A card that is no longer on the board falls back to its `task_id`.
+- **A time-window selector** (7 / 14 / 30 / 90 days) in the page header drives the poll (`/summary?days=<n>`) and the "Last N days" subline; the choice is kept in `ctx.storage` and survives reloads.
+- **Collapsible sections**: each page section (Needs you, Active, Recent activity) toggles on header click (chevron). Defaults: Needs you open, Active open, Recent activity collapsed.
+
+### Changed
+- The `GET /summary` recent rows carry a `title` (joined from the boards), so the page can show the card name instead of its id.
+
 ## [1.4.1] - 2026-11-06
 
 ### Changed
