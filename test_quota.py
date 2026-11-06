@@ -232,12 +232,5 @@ class PlanTest(unittest.TestCase):
         self.assertEqual((plan["chains"], plan["add"], plan["skipped"]), ([[], [], []], [], []))
 
 
-class DurationTest(unittest.TestCase):
-    def test_hours_and_minutes(self):
-        for seconds, want in [(30, "30 s"), (1800, "30 min"), (6660, "1 h 51 min"), (7200, "2 h"), (59, "59 s")]:
-            with self.subTest(seconds):
-                self.assertEqual(quota.hm(seconds), want)
-
-
 if __name__ == "__main__":
     unittest.main()

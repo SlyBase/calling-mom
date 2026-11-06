@@ -210,6 +210,14 @@ class SkipTest(QuotaFixture, unittest.TestCase):
         self.assertEqual(self.rows(), [])
 
 
+class HealthLinesTest(QuotaFixture, unittest.TestCase):
+    def test_status_and_doctor_see_what_is_limited_and_for_which_profile(self):
+        self.assertEqual(plugin.provider_health_lines(), [])
+        self.limit()
+        until = self.state()["health"]["p1"][MOM]["until"]
+        self.assertEqual(plugin.provider_health_lines(), [f"{MOM} limited until {quota.clock(until)} UTC (profile p1)"])
+
+
 class FallbackTest(QuotaFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -342,7 +350,7 @@ class WorkerExitedTest(QuotaFixture, unittest.TestCase):
                                "The dispatcher retries by itself; the work in /work/space is kept.")
         (row,) = self.rows(src="exit")
         self.assertEqual((row["state"], row["task"], row["board"], row["provider"], row["error_class"]),
-                         ("limited", self.tid, BOARD, SUB, "rate_limit"))
+                         ("paused", self.tid, BOARD, SUB, "rate_limit"))
         self.assertEqual(row["until"], until)
         author = with_conn(lambda c: kb.list_comments(c, self.tid))[-1].author
         self.assertEqual(author, plugin.NOTICE_AUTHOR)
@@ -375,7 +383,7 @@ class WorkerExitedTest(QuotaFixture, unittest.TestCase):
         self.exited()
         (body,) = self.quota_comments()
         self.assertTrue(body.startswith("[quota] The provider hit its usage limit; reset time unknown."))
-        self.assertEqual(self.rows(src="exit")[0]["provider"], None)
+        self.assertEqual(self.rows(src="exit", state="paused")[0]["provider"], None)
 
     def test_an_expired_or_down_entry_is_not_this_limit(self):
         self.api_error(KEY_LIMIT, provider=SUB, status=403, reason="auth", etype="PermissionDeniedError")

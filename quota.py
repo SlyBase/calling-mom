@@ -48,15 +48,6 @@ def clock(ts) -> str:
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%H:%M")
 
 
-def hm(seconds) -> str:
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds} s"
-    if seconds < 3600:
-        return f"{seconds // 60} min"
-    return f"{seconds // 3600} h" + (f" {seconds % 3600 // 60} min" if seconds % 3600 >= 60 else "")
-
-
 # ---------------------------------------------------------------- provider health
 
 def mark(health, profile, provider, state, until, error_class, known=True) -> bool:

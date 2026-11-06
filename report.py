@@ -102,6 +102,31 @@ def _advice(rows) -> dict:
             "source": "advisor rows and advice_feedback rows"}
 
 
+def hm(seconds) -> str:
+    """``45 s``, ``30 min``, ``1 h 51 min``."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600} h" + (f" {seconds % 3600 // 60} min" if seconds % 3600 >= 60 else "")
+
+
+def _quota(rows) -> dict:
+    """Provider limits (a ``limited`` row is one limit, its seconds run to the reset time), providers down, cards that got a
+    ``[quota]`` comment (``paused``), Mom calls skipped, fallback answers, and the cards flagged ``stalled``."""
+    quota = [r for r in rows if r.get("kind") == "quota"]
+    of = lambda state: [r for r in quota if r.get("state") == state]
+    limits = [{"provider": r.get("provider"), "until": r.get("until"),
+               "seconds": max(0, int(r["until"]) - int(r["ts"])) if isinstance(r.get("until"), (int, float)) else None}
+              for r in of("limited")]
+    stalls = [r for r in rows if r.get("kind") == "stall"]
+    return {"limits": limits, "down": len(of("down")), "paused": len({r.get("task") for r in of("paused")}),
+            "skipped": sum(1 for r in of("skipped") if r.get("tier") != "olymp"), "fallback": len(of("fallback")),
+            "stalled": {"cards": len({r.get("task") for r in stalls}), "minutes": _sum(stalls, "minutes")},
+            "source": "quota and stall rows: api_request_error, on_kanban_worker_exited, Mom and Olymp calls, the sweep"}
+
+
 def build(rows, since=0, board=None, tasks=(), until=None) -> dict:
     """The numbers of one window: rows from ``since`` up to (not including) ``until`` (epoch seconds), optionally of one board.
 
@@ -139,6 +164,7 @@ def build(rows, since=0, board=None, tasks=(), until=None) -> dict:
                 "median_answer_s": int(statistics.median(waits)) if waits else None,
                 "outside": _outside(rows, of("own_write")), "chat_waits": _chat_waits(rows)},
         "advice": _advice(rows),
+        "quota": _quota(rows),
         "cost": {"mom_usd": round(mom_usd, 6), "mom_tokens_in": mom_in, "mom_tokens_out": mom_out,
                  "olymp_calls": olymp_calls,
                  "worker_tokens": worker_tokens,
@@ -179,9 +205,16 @@ def _chat_line(cw) -> str:
             if cw["count"] else "0 waits")
 
 
+def _quota_line(q) -> str:
+    each = lambda x: f"{x['provider'] or 'a provider'}, {hm(x['seconds']) if x['seconds'] is not None else 'reset unknown'}"
+    limits = _n(len(q["limits"]), "limit") + (f" ({'; '.join(map(each, q['limits']))})" if q["limits"] else "")
+    down = f" · {q['down']} provider{'' if q['down'] == 1 else 's'} down" if q["down"] else ""
+    return f"{limits}{down} · {_n(q['paused'], 'card')} paused · {_n(q['skipped'], 'Mom call')} skipped · fallback used {q['fallback']}×"
+
+
 def render(r) -> str:
     """The text of ``hermes calling-mom report``. ``r`` is ``build`` plus ``days`` (and ``board``, ``olymp.today/cap``)."""
-    w, m, o, y, c, a = r["worker"], r["mom"], r["olymp"], r["you"], r["cost"], r["advice"]
+    w, m, o, y, c, a, q = r["worker"], r["mom"], r["olymp"], r["you"], r["cost"], r["advice"], r["quota"]
     head = f"Calling Mom, {_window(r)}" + (f", board {r['board']}" if r.get("board") else "")
     olymp = _n(o["calls"], "call") + (f", {o['today']} of {o['cap']} today" if "cap" in o else "")
     tokens = f"{c['mom_tokens_in']:,} in / {c['mom_tokens_out']:,} out tokens"
@@ -198,6 +231,8 @@ def render(r) -> str:
         f"        outside help  {_outside_line(y['outside'])}",
         f"        chat waits    {_chat_line(y['chat_waits'])}",
         f"Advice  {_n(a['calls'], 'call')}: {a['followed']} followed · {a['acted']} acted · {a['ignored']} ignored · {a['unknown']} unknown",
+        f"Quota   {_quota_line(q)}",
+        f"Stalled {_n(q['stalled']['cards'], 'card')}" + (f", {hm(q['stalled']['minutes'] * 60)} without a heartbeat when flagged" if q["stalled"]["cards"] else ""),
         f"Cost    Mom {price}, Olymp {_n(c['olymp_calls'], 'call')}",
     ]
     if c["all_on_mom_usd"] is not None:

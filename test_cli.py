@@ -902,5 +902,195 @@ class AnswerCommandTest(unittest.TestCase):
         self.assertIsNone(parser.parse_args(["setup"]).answer)
 
 
+class FallbackSetupTest(unittest.TestCase):
+    """WP2: `calling_mom.mom_fallback` answers when Mom's provider is limited or down. Offered by setup, granted like Mom."""
+    FB = ("openrouter", "x/y")
+    MOM = (SUB, "claude-sonnet-5-5")
+
+    def test_no_choice_leaves_the_block_alone(self):
+        self.assertFalse([k for k in cli.updates(self.MOM, None, ["coding"], {}) if "fallback" in k])
+
+    def test_a_pair_is_written_and_granted_like_mom(self):
+        upd = cli.updates(self.MOM, None, ["coding"], {}, fallback=self.FB)
+        self.assertEqual((upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"]), self.FB)
+        self.assertIn("x/y", upd[cli.LLM_KEY + "allowed_models"])
+        self.assertIn("openrouter", upd[cli.LLM_KEY + "allowed_providers"])
+
+    def test_false_clears_it(self):
+        upd = cli.updates(self.MOM, None, ["coding"], {}, fallback=False)
+        self.assertEqual((upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"]), ("", ""))
+
+    def test_the_summary_names_it(self):
+        _, summary = cli._result({}, self.MOM, None, ["coding"], fallback=self.FB)
+        self.assertIn("fallback : x/y (openrouter)", summary)
+        _, summary = cli._result({}, self.MOM, None, ["coding"], fallback=False)
+        self.assertIn("fallback : off", summary)
+        _, summary = cli._result({}, self.MOM, None, ["coding"])
+        self.assertFalse([line for line in summary if line.startswith("fallback")])
+
+    def interactive(self, *answers, cfg=None):
+        s = Script(*answers)
+        return cli.setup(cfg or {}, LISTING, ["default"], s.ask, s.say, answer=False, chat_waits=False), s
+
+    def test_the_question_comes_last_and_enter_means_no(self):
+        (upd, summary), s = self.interactive("2", "1", "3", "1", "")      # mom, olymp none, board; then enter on the fallback question
+        self.assertIn("Set a fallback for Mom", s.text)
+        self.assertEqual(upd["calling_mom.mom_fallback.provider"], "")
+
+    def test_yes_asks_for_the_pair(self):
+        (upd, summary), s = self.interactive("2", "1", "3", "1", "2", "1", "2")   # ... fallback: yes, provider 1 (openrouter), model 2
+        self.assertEqual((upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"]), self.FB)
+        self.assertIn("fallback : x/y (openrouter)", summary)
+
+    def test_a_configured_fallback_is_kept_on_enter(self):
+        cfg = {"calling_mom": {"mom_fallback": {"provider": "openrouter", "model": "x/y"}}}
+        (upd, _), s = self.interactive("2", "1", "3", "1", "", "", "", cfg=cfg)
+        self.assertEqual((upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"]), self.FB)
+
+    def env(self, cfg=None):
+        saved, s = {}, Script()
+        e = cli.Env(load=lambda: cfg or {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                    cron=lambda: None, sweeps=lambda: [], interactive=False,
+                    routes=lambda: [{"name": "cheap", "provider": "openrouter", "model": "x/y", "description": ""}])
+        return e, saved, s
+
+    def test_the_flag_takes_a_pair_a_route_or_none(self):
+        for value, want in [("openrouter/x/y", ("openrouter", "x/y")), ("route:cheap", ("openrouter", "x/y")), ("none", ("", ""))]:
+            with self.subTest(value):
+                e, saved, _ = self.env()
+                self.assertEqual(cli.cmd_setup(e, mom=f"{SUB}/claude-sonnet-5-5", boards="default", fallback=value, cron=False), 0)
+                self.assertEqual((saved["calling_mom"]["mom_fallback"]["provider"], saved["calling_mom"]["mom_fallback"]["model"]), want)
+
+    def test_the_flag_alone_keeps_the_mom_that_is_configured(self):
+        cfg = {"calling_mom": {"mom": {"provider": SUB, "model": "claude-sonnet-5-5"}}}
+        e, saved, _ = self.env(cfg)
+        self.assertEqual(cli.cmd_setup(e, fallback="openrouter/x/y", cron=False), 0)
+        self.assertEqual(saved["calling_mom"]["mom"], {"provider": SUB, "model": "claude-sonnet-5-5"})
+        self.assertEqual(saved["calling_mom"]["mom_fallback"]["model"], "x/y")
+
+    def test_the_flag_alone_without_a_mom_is_refused(self):
+        e, saved, s = self.env()
+        self.assertEqual(cli.cmd_setup(e, fallback="openrouter/x/y", cron=False), 2)
+        self.assertEqual(saved, {})
+        self.assertIn("--mom", s.text)
+
+    def test_a_bad_flag_is_refused(self):
+        e, saved, s = self.env()
+        self.assertEqual(cli.cmd_setup(e, mom=f"{SUB}/claude-sonnet-5-5", fallback="nonsense", cron=False), 2)
+        self.assertEqual(saved, {})
+
+    def test_the_parser_knows_the_flag(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        cli.setup_parser(parser)
+        self.assertEqual(parser.parse_args(["setup", "--fallback", "none"]).fallback, "none")
+        self.assertIsNone(parser.parse_args(["setup"]).fallback)
+
+
+class HealthShownTest(unittest.TestCase):
+    def test_status_names_the_fallback_and_the_health(self):
+        cm = {**StatusTest.CFG, "mom_fallback": {"provider": "openrouter", "model": "x/y"}}
+        text = "\n".join(cli.status_lines(cm, {}, None, ["claude limited until 13:50 UTC (profile default)"]))
+        self.assertIn("fallback: x/y (openrouter)", text)
+        self.assertIn("health  : claude limited until 13:50 UTC (profile default)", text)
+
+    def test_status_without_fallback_or_health_says_so(self):
+        text = "\n".join(cli.status_lines(StatusTest.CFG, {}, None, []))
+        self.assertIn("fallback: off", text)
+        self.assertIn("health  : all providers ok", text)
+
+    def test_status_without_health_data_has_no_health_line(self):
+        self.assertNotIn("health", "\n".join(cli.status_lines(StatusTest.CFG, {})))
+
+
+class FallbackDoctorTest(unittest.TestCase):
+    cfg, ONE, run_doctor, by_name = DoctorTest.cfg, DoctorTest.ONE, DoctorTest.run_doctor, DoctorTest.by_name
+    FB = {"provider": "openrouter", "model": "x/y"}
+    LLM = {**DoctorTest.LLM, "allowed_models": ["claude-sonnet-5-5", "claude-opus-5-5", "x/y"],
+           "allowed_providers": [SUB, "openrouter"]}
+
+    def test_everything_fine_with_a_fallback_configured(self):
+        checks = self.run_doctor(cfg=self.cfg(mom_fallback=self.FB), llm=self.LLM)
+        self.assertEqual(self.by_name(checks)["fallback pair"], ("ok", "x/y (openrouter)"))
+        self.assertTrue(all(s == "ok" for _, s, _ in checks), checks)
+
+    def test_no_fallback_adds_no_check(self):
+        self.assertNotIn("fallback pair", self.by_name(self.run_doctor()))
+
+    def test_the_fallback_gets_one_real_call(self):
+        calls = []
+        self.run_doctor(cfg=self.cfg(mom_fallback=self.FB), llm=self.LLM, probe=lambda p, m: calls.append((p, m)))
+        self.assertEqual(calls, [(SUB, "claude-sonnet-5-5"), (SUB, "claude-opus-5-5"), ("openrouter", "x/y")])
+
+    def test_a_dead_fallback_fails_by_name(self):
+        def probe(provider, model):
+            if provider == "openrouter":
+                raise RuntimeError("403 Key limit exceeded")
+        checks = self.by_name(self.run_doctor(cfg=self.cfg(mom_fallback=self.FB), llm=self.LLM, probe=probe))
+        self.assertEqual(checks["fallback call"][0], "fail")
+        self.assertIn("Key limit exceeded", checks["fallback call"][1])
+
+    def test_half_a_pair_fails(self):
+        checks = self.by_name(self.run_doctor(cfg=self.cfg(mom_fallback={"provider": "openrouter", "model": ""}), llm=self.LLM))
+        self.assertEqual(checks["fallback pair"][0], "fail")
+        self.assertNotIn("fallback call", checks)
+
+    def test_the_fallback_must_be_granted_like_mom(self):
+        checks = self.by_name(self.run_doctor(cfg=self.cfg(mom_fallback=self.FB), llm=DoctorTest.LLM))   # that allowlist lacks x/y
+        self.assertEqual(checks["allowlist"][0], "fail")
+        self.assertIn("x/y", checks["allowlist"][1])
+
+    def test_provider_health_is_a_warning_with_the_lines(self):
+        checks = cli.run_checks(self.cfg(), self.LLM, lambda p, m: None, "0.22.5", True, self.ONE, False,
+                                ["claude limited until 13:50 UTC (profile default)"])
+        self.assertEqual(self.by_name(checks)["provider health"], ("warn", "claude limited until 13:50 UTC (profile default)"))
+        self.assertEqual(cli.exit_code(checks), 0)      # a limit that ends by itself is not a broken setup
+
+
+class PaceCommandTest(unittest.TestCase):
+    def env(self, result):
+        s, calls = Script(), []
+
+        def pace(board, n, **kw):
+            calls.append((board, n, kw))
+            return result
+        e = cli.Env(load=lambda: {}, save=lambda c: None, providers=lambda: [], boards=lambda: [], spent=lambda: {},
+                    probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say, cron=lambda: None,
+                    sweeps=lambda: [], pace=pace)
+        return e, s, calls
+
+    def test_the_arguments_reach_pace_and_the_plan_is_printed(self):
+        e, s, calls = self.env({"ok": True, "lines": ["pace on board coding", "chain 1: a -> b"]})
+        self.assertEqual(cli.cmd_pace(e, "coding", 2, dry_run=True), 0)
+        self.assertEqual(calls, [("coding", 2, {"dry_run": True, "undo": False})])
+        self.assertIn("chain 1: a -> b", s.text)
+
+    def test_a_real_run_says_how_to_take_it_back(self):
+        e, s, _ = self.env({"ok": True, "lines": ["pace on board coding"], "added": 3})
+        self.assertEqual(cli.cmd_pace(e, "coding", 1), 0)
+        self.assertIn("Added 3 link(s). Take them away again with: hermes calling-mom pace --board coding --undo", s.text)
+        self.assertNotIn("Dry run", s.text)
+
+    def test_undo(self):
+        e, s, calls = self.env({"ok": True, "lines": ["undo: 3 link(s)"]})
+        self.assertEqual(cli.cmd_pace(e, "coding", None, undo=True), 0)
+        self.assertEqual(calls[0][2]["undo"], True)
+
+    def test_an_error_prints_the_reason_and_exits_with_1(self):
+        e, s, _ = self.env({"ok": False, "lines": [], "error": "--max must be at least 1"})
+        self.assertEqual(cli.cmd_pace(e, "coding", None), 1)
+        self.assertIn("Not paced: --max must be at least 1", s.text)
+
+    def test_the_parser_knows_the_command(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        cli.setup_parser(parser)
+        args = parser.parse_args(["pace", "--board", "coding", "--max", "2", "--dry-run"])
+        self.assertEqual((args.cm_cmd, args.board, args.max, args.dry_run, args.undo), ("pace", "coding", 2, True, False))
+        args = parser.parse_args(["pace", "--board", "coding", "--undo"])
+        self.assertEqual((args.max, args.undo), (None, True))
+
+
 if __name__ == "__main__":
     unittest.main()

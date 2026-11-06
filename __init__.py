@@ -489,7 +489,8 @@ def _quota_notice(task_id, board, profile) -> None:
         now = time.time()
         found = next(((prov, e) for prov, e in quota.entries(_health(), profile, now) if e["state"] == "limited"), None)
         if found is None and task.provider_override:
-            _set_health(task.provider_override, task.model_override, "rate_limit", None, "exit", profile=profile)
+            _set_health(task.provider_override, task.model_override, "rate_limit", None, "exit", profile=profile,
+                        task=task_id, board=board)
             found = (task.provider_override, quota.entries(_health(), profile, now)[0][1])
         provider, entry = found or (None, None)
         window = str(entry["until"]) if entry else f"?{int(now // quota.LIMIT_UNKNOWN_S)}"
@@ -502,7 +503,7 @@ def _quota_notice(task_id, board, profile) -> None:
                       + f". The dispatcher retries by itself; the work in {task.workspace_path or 'its workspace'} is kept.")
         data.setdefault("quota_cards", {})[task_id] = window
         _write_state(data)
-        _trace_row("quota", task=task_id, board=board, profile=profile, provider=provider, state="limited",
+        _trace_row("quota", task=task_id, board=board, profile=profile, provider=provider, state="paused",
                    until=int(entry["until"]) if known else None, error_class="rate_limit", src="exit")
     except Exception as exc:  # pragma: no cover - a notice must never break the dispatcher
         logger.warning("calling-mom: quota notice failed for %s: %s", task_id, exc)
@@ -532,6 +533,12 @@ def _record_stalls(board) -> None:
     if seen != (data.get("stalled") or {}):
         data["stalled"] = seen
         _write_state(data)
+
+
+def provider_health_lines() -> list:
+    """The providers that are limited or down now, one line each (``status`` and ``doctor`` show them)."""
+    return [f"{prov} {e['state']} until {quota.clock(e['until'])} UTC (profile {e['profile']})"
+            for prov, e in quota.entries(_health(), None, time.time())]
 
 
 def _pace_lines(board, n, plan, titles) -> list:
@@ -2116,11 +2123,12 @@ def register(ctx) -> None:
     if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
         register_cli(name="calling-mom", help="set up, inspect and test the Calling Mom plugin",
                      setup_fn=cli.setup_parser,
-                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card, attention_report),
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card, attention_report, pace_board, provider_health_lines),
                      description="setup: choose mom/olymp from your providers. status: show setup and usage. "
                                  "doctor: check the setup with one real call per model. "
                                  "answer: answer a card that carries Mom's brief or a pre-flight HOLD. "
-                                 "report: what reached you, what did not, what it cost.")
+                                 "report: what reached you, what did not, what it cost. "
+                                 "pace: keep at most N cards of a board ready or running.")
     if _core.ERROR:  # a Hermes update removed something we use: no hooks, but `doctor` still runs; say why once
         logger.warning("calling-mom: not active, %s. Run: hermes calling-mom doctor", _core.ERROR)
         return

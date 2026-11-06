@@ -100,6 +100,25 @@ ROWS = [
     row("human_answer", task="a", via="desktop", accepted=True, allow_once=False, latency_s=60),
     row("human_answer", task="a", via="cli", accepted=False, allow_once=True, latency_s=120),
     row("human_answer", task="b", via="card", accepted=False, allow_once=False, latency_s=300),
+    # Quota: limit 1 ends 6660 s (1 h 51 min) after its row, limit 2 has no known reset; 1 provider down; 1 recovered and 1 old limit
+    # are no new limit. Cards paused: a (twice, two windows) and b = 2. Mom calls skipped 2 (the Olymp skip is not one), fallback 2
+    row("quota", provider="claude", state="limited", until=T + 6660, error_class="rate_limit", src="api_error", task="a", board="x"),
+    row("quota", provider="openrouter", state="limited", until=None, error_class="rate_limit", src="call"),
+    row("quota", ts=OLD, provider="claude", state="limited", until=OLD + 60, error_class="rate_limit", src="call"),
+    row("quota", provider="openrouter", state="down", until=T + 1800, error_class="key_limit", src="call"),
+    row("quota", provider="claude", state="recovered"),
+    row("quota", task="a", board="x", provider="claude", state="paused", src="exit"),
+    row("quota", task="a", board="x", provider="claude", state="paused", src="exit"),
+    row("quota", task="b", board="x", provider="claude", state="paused", src="exit"),
+    row("quota", state="skipped", tier="mom", src="call"),
+    row("quota", state="skipped", tier="mom", src="call"),
+    row("quota", state="skipped", tier="olymp", src="call"),
+    row("quota", state="fallback", tier="mom", src="call"),
+    row("quota", state="fallback", tier="mom", src="call"),
+    # Stalled: a flagged in two runs (20 and 30 min), b once (25 min) = 2 cards, 75 min
+    row("stall", task="a", run=1, last_heartbeat=T - 1200, minutes=20, board="x"),
+    row("stall", task="a", run=2, last_heartbeat=T - 1800, minutes=30, board="x"),
+    row("stall", task="b", run=1, last_heartbeat=T - 1500, minutes=25, board="x"),
 ]
 
 EXPECTED = {
@@ -117,6 +136,9 @@ EXPECTED = {
     # advice: 2 delivered (the silent one is no advice); 1 followed, 1 acted, 0 ignored, the rest unknown
     "advice": {"calls": 2, "followed": 1, "acted": 1, "ignored": 0, "unknown": 0,
                "source": "advisor rows and advice_feedback rows"},
+    "quota": {"limits": [{"provider": "claude", "until": T + 6660, "seconds": 6660}, {"provider": "openrouter", "until": None, "seconds": None}],
+              "down": 1, "paused": 2, "skipped": 2, "fallback": 2, "stalled": {"cards": 2, "minutes": 75},
+              "source": "quota and stall rows: api_request_error, on_kanban_worker_exited, Mom and Olymp calls, the sweep"},
     # Mom's own rows: advisor 100+50 / 20+5 / 0.015, pre-flight 70 / 7 / 0.007, questions she alone answered 130 / 13 / 0.013
     # price per token = 0.035 / 395; every worker token (3850) at that price = 0.341139
     "cost": {"mom_usd": 0.035, "mom_tokens_in": 350, "mom_tokens_out": 45, "olymp_calls": 2,
@@ -132,6 +154,8 @@ You     1 brief, 3 answers (median 2 min), 1 hold released
         outside help  3 comments (default 2, desktop 1) · 4 board changes (unattributed) · 2 cards waiting on a person
         chat waits    2 waits, 2 min in total, longest 1 min (approval 1, clarify 1)
 Advice  2 calls: 1 followed · 1 acted · 0 ignored · 0 unknown
+Quota   2 limits (claude, 1 h 51 min; openrouter, reset unknown) · 1 provider down · 2 cards paused · 2 Mom calls skipped · fallback used 2×
+Stalled 2 cards, 1 h 15 min without a heartbeat when flagged
 Cost    Mom $0.0350 (350 in / 45 out tokens), Olymp 2 calls
         Every call on Mom would have cost $0.3411 (3,850 worker tokens)"""
 
@@ -247,6 +271,40 @@ class OutsideTest(unittest.TestCase):
         you = self.build(row("touch", src="chat", what="chat_wait", wait="sudo", wait_s=1),
                          row("touch", src="chat", what="chat_wait", wait="sudo", wait_s=2))
         self.assertEqual(you["chat_waits"]["count"], 2)
+
+
+class QuotaTest(unittest.TestCase):
+    def test_an_empty_log_has_no_limit_and_no_stall(self):
+        q = report.build([], since=0)["quota"]
+        self.assertEqual((q["limits"], q["down"], q["paused"], q["skipped"], q["fallback"], q["stalled"]),
+                         ([], 0, 0, 0, 0, {"cards": 0, "minutes": 0}))
+
+    def test_the_line_for_nothing_and_for_one_limit(self):
+        zero = report.build([], since=0)["quota"]
+        self.assertEqual(report._quota_line(zero), "0 limits · 0 cards paused · 0 Mom calls skipped · fallback used 0×")
+        one = {**zero, "limits": [{"provider": "claude-subscription-directsdk-experimental", "until": 1, "seconds": 6660}],
+               "paused": 3, "skipped": 1}
+        self.assertEqual(report._quota_line(one), "1 limit (claude-subscription-directsdk-experimental, 1 h 51 min) · "
+                                                  "3 cards paused · 1 Mom call skipped · fallback used 0×")
+
+    def test_a_limit_without_a_provider_or_a_reset_is_still_a_limit(self):
+        q = {**report.build([], since=0)["quota"], "limits": [{"provider": None, "until": None, "seconds": None}]}
+        self.assertIn("1 limit (a provider, reset unknown)", report._quota_line(q))
+
+    def test_a_reset_before_the_row_is_zero_seconds_not_negative(self):
+        rows = [row("quota", state="limited", provider="p", until=T - 5)]
+        self.assertEqual(report.build(rows, since=0)["quota"]["limits"][0]["seconds"], 0)
+
+    def test_one_stalled_card_reads_singular_and_nothing_stalled_has_no_minutes(self):
+        one = report.render({"days": 7, **report.build([row("stall", task="a", run=1, minutes=45)], since=0)})
+        self.assertIn("Stalled 1 card, 45 min without a heartbeat when flagged", one)
+        none = report.render({"days": 7, **report.build([], since=0)})
+        self.assertIn("\nStalled 0 cards\n", none)
+
+    def test_durations_in_hours_and_minutes(self):
+        for seconds, want in [(30, "30 s"), (1800, "30 min"), (6660, "1 h 51 min"), (7200, "2 h"), (59, "59 s")]:
+            with self.subTest(seconds):
+                self.assertEqual(report.hm(seconds), want)
 
 
 class RenderTest(unittest.TestCase):
