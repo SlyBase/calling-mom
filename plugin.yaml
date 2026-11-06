@@ -1,5 +1,5 @@
 name: calling-mom
-label: Calling mom
+label: Calling Mom
 kind: standalone
 version: 1.4.0
 requires_hermes: ">=0.22"

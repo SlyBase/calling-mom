@@ -1,4 +1,4 @@
-"""Product icon for "calling mom" (1024x1024, rounded tile, RGBA).
+"""Product icon for "Calling Mom" (1024x1024, rounded tile, RGBA).
 
 Same language as banner v6: distressed black paper, ivory engraving of
 Thetis reaching out, red disc behind her head, SlyBase-orange HUD lines and

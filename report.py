@@ -182,7 +182,7 @@ def _chat_line(cw) -> str:
 def render(r) -> str:
     """The text of ``hermes calling-mom report``. ``r`` is ``build`` plus ``days`` (and ``board``, ``olymp.today/cap``)."""
     w, m, o, y, c, a = r["worker"], r["mom"], r["olymp"], r["you"], r["cost"], r["advice"]
-    head = f"Calling mom, {_window(r)}" + (f", board {r['board']}" if r.get("board") else "")
+    head = f"Calling Mom, {_window(r)}" + (f", board {r['board']}" if r.get("board") else "")
     olymp = _n(o["calls"], "call") + (f", {o['today']} of {o['cap']} today" if "cap" in o else "")
     tokens = f"{c['mom_tokens_in']:,} in / {c['mom_tokens_out']:,} out tokens"
     price = f"${c['mom_usd']:.4f} ({tokens})" if c["mom_usd"] else f"{tokens} on a subscription (no per-token price)"  # no price is not free

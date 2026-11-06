@@ -1,4 +1,4 @@
-# Calling mom 1.5: count what reaches you, keep the board moving
+# Calling Mom 1.5: count what reaches you, keep the board moving
 
 Status: direction approved by Timon on 2026-11-06. This spec is the source of truth for the 1.5 work packages; a card's
 text never overrides it. If the spec is wrong, the worker comments on the card and blocks with kind `needs_input`
