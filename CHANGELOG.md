@@ -3,11 +3,6 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-- **Guarded cards** (`__init__.py`, `_core.py`). A `ready` card that the dispatcher's respawn guard holds back for `calling_mom.guard_minutes` (default 30, 0 = off) gets one `[guarded]` comment per streak, with the reason (`active_pr`: a PR URL in a comment of the last 24 hours, even after the PR was merged) and, for `active_pr`, the workaround (`PR #N` instead of the URL, or hand the card to another profile). The guard fires no block hook and no crash, so such a card looked fine for hours. The sweep reads the `respawn_guarded` events through `_core.guarded_cards`; a `guard` row keeps the reason and the minutes. The plugin never bypasses the guard.
-
 ## [1.6.0] - 2026-11-07
 
 ### Added
@@ -19,6 +14,7 @@ versioning: [SemVer](https://semver.org/).
 
 ### Removed
 - **`hermes calling-mom desktop-sync`** (added in 1.5.5). A command that downloads and replaces the plugin's own Desktop file is a self-updater, which the Hermes plugin catalog forbids (admission rule 3), and it exists only where the plugin is installed, which a Mac without a gateway does not have. Install the Desktop half through **Capabilities -> Plugins -> Install** and update it with the plugin's Update button. `setup` and `doctor` name this path; README and TECHNICAL.md describe it.
+- **Guarded cards** (`__init__.py`, `_core.py`). A `ready` card that the dispatcher's respawn guard holds back for `calling_mom.guard_minutes` (default 30, 0 = off) gets one `[guarded]` comment per streak, with the reason (`active_pr`: a PR URL in a comment of the last 24 hours, even after the PR was merged) and, for `active_pr`, the workaround (`PR #N` instead of the URL, or hand the card to another profile). The guard fires no block hook and no crash, so such a card looked fine for hours. The sweep reads the `respawn_guarded` events through `_core.guarded_cards`; a `guard` row keeps the reason and the minutes. The plugin never bypasses the guard.
 
 ### Security
 - **Disclosure of the session read** (`SECURITY.md`, `README.md`): the Active cards read the worker's last message from the profile's session store (Hermes' `SessionDB`); catalog rule 13 asks to list reads outside the plugin's own data.
