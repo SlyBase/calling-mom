@@ -13,8 +13,11 @@ const POLL_MS = 15000
 let ctx = null
 let disposeBadges = null
 let paintedKey = ''
-const WINDOW = [7, 14, 30, 90]  // the time windows the header selector offers (days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], days: 7 }
+const WINDOW = [
+  { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
+  { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
+]  // the time windows the header selector offers (hours; the last four were days)
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24 }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -33,9 +36,9 @@ async function refresh() {
   }
 
   try {
-    const days = state.days || 7
+    const hours = state.hours || 24
     const [summary, needs, cards, active] = await Promise.all([
-      ctx.rest(`/summary?days=${days}`),
+      ctx.rest(`/summary?hours=${hours}`),
       ctx.rest('/needs-you'),
       ctx.rest('/cards'),
       ctx.rest('/active')
@@ -48,9 +51,9 @@ async function refresh() {
   }
 }
 
-function setDays(days) {
-  ctx.storage.set('days', days)   // kept like `kept`, so the window survives reloads
-  update({ days })
+function setHours(hours) {
+  ctx.storage.set('hours', hours)   // kept like `kept`, so the window survives reloads
+  update({ hours })
   refresh()
 }
 
@@ -356,17 +359,22 @@ function Section({ title, count, children, defaultOpen = true }) {
   )
 }
 
+function windowLabel(hours) {
+  const w = WINDOW.find(w => w.hours === hours)
+  return w ? w.label : `${hours} h`
+}
+
 function WindowSelector() {
   const s = useStore()
-  const button = days => h(
+  const button = w => h(
     Button,
     {
-      key: days,
+      key: w.hours,
       size: 'sm',
-      variant: days === s.days ? 'default' : 'ghost',
-      onClick: () => setDays(days)
+      variant: w.hours === s.hours ? 'default' : 'ghost',
+      onClick: () => setHours(w.hours)
     },
-    `${days}d`
+    w.label
   )
   return h('div', { style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
 }
@@ -433,7 +441,7 @@ function Page() {
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
       h(WindowSelector)
     ),
-    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${s.days} days.`),
+    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${windowLabel(s.hours)}.`),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
@@ -521,7 +529,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []), days: ctx.storage.get('days', 7) })
+    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },

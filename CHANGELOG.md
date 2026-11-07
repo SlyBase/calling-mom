@@ -3,6 +3,11 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.5.3] - 2026-11-07
+
+### Added
+- **Desktop: sub-day time windows** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The header selector now offers `1 h`, `4 h`, `1 d`, `7 d`, `14 d`, `30 d`, `90 d` (was `7d`/`14d`/`30d`/`90d` only). The new `GET /summary?hours=` param (1..2160) takes priority over `days`; the header line shows the selected window (`Last 1 h.`).
+
 ## [1.5.2] - 2026-11-07
 
 ### Fixed

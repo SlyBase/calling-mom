@@ -176,17 +176,22 @@ def active():
 
 
 @router.get("/summary")
-def summary(days: int = Query(7, ge=1, le=90), since: str | None = None, until: str | None = None):
+def summary(days: int = Query(7, ge=1, le=90), hours: int | None = Query(None, ge=1, le=2160), since: str | None = None, until: str | None = None):
     """The attention report (``hermes calling-mom report``) plus what only the Desktop shows: today, waiting, recent.
-    ``since`` and ``until`` (ISO date or date-time, UTC) replace the window of ``days``."""
+    ``hours`` takes priority over ``days`` (sub-day windows, 1..2160); ``since``/``until`` (ISO date or date-time, UTC) replace both."""
     now = time.time()
     try:
         end = mom().report.parse_when(until) if until else None
-        start = mom().report.parse_when(since) if since else (end or now) - days * DAY
+        if since is not None:
+            start = mom().report.parse_when(since)
+            days_arg = days  # explicit since wins; days only feeds the label
+        else:
+            start = (end or now) - (hours * 3600 if hours is not None else days * DAY)
+            days_arg = hours / 24 if hours is not None else days
     except ValueError:
         raise HTTPException(400, "since and until must be an ISO date or date-time in UTC, for example 2026-11-05 or 2026-11-06T03:00")
     rows = _rows()
-    out = mom().attention_report(days, rows=rows, now=now, since=since, until=until)
+    out = mom().attention_report(days_arg, rows=rows, now=now, since=since, until=until)
     rows = [r for r in rows if r.get("ts", 0) >= start and (end is None or r.get("ts", 0) < end)]
     out["today"] = {"mom_calls": mom().report.build(rows, since=now - now % DAY)["mom"]["calls"]}
     out["you"]["waiting"] = len(_needs_you())
