@@ -9,7 +9,6 @@ import importlib.util
 import json
 import os
 import re
-import sqlite3
 import tempfile
 import time
 import unittest
@@ -576,17 +575,18 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         path.write_text(text)
 
     def session(self, tid, rows, sid="local-abc", profile="worker-p"):
-        """A running card whose worker session (log header + the profile's state.db) holds ``rows`` = [(role, content)]."""
+        """A running card whose worker session (log header + the profile's state.db, written by Hermes' own SessionDB) holds ``rows`` = [(role, content)]."""
+        from hermes_state import SessionDB
         self.set_status(tid, "running")
         with_conn(lambda c: c.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, tid)).connection.commit())
         self.write_log(tid, f"Session: {sid}\n")
-        home = Path(tempfile.mkdtemp(prefix="calling-mom-profile-"))
-        db = sqlite3.connect(home / "state.db")
-        db.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, active INTEGER DEFAULT 1)")
-        db.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", [(sid, r, c) for r, c in rows])
-        db.commit()
-        db.close()
-        real, plugin._core.profile_home = plugin._core.profile_home, lambda name: home if name == profile else Path("/nonexistent")
+        self.home = Path(tempfile.mkdtemp(prefix="calling-mom-profile-"))
+        self.store = SessionDB(self.home / "state.db")
+        self.addCleanup(self.store.close)
+        self.store.create_session(sid, "cli")
+        for role, content in rows:
+            self.store.append_message(sid, role, content)
+        real, plugin._core.profile_home = plugin._core.profile_home, lambda name: self.home if name == profile else Path("/nonexistent")
         self.addCleanup(setattr, plugin._core, "profile_home", real)
 
     def test_last_chat_is_the_last_assistant_message_of_the_worker_session(self):
@@ -610,10 +610,8 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
     def test_last_chat_ignores_other_sessions(self):
         tid = self.card()
         self.session(tid, [("assistant", "mine")])
-        db = sqlite3.connect(plugin._core.profile_home("worker-p") / "state.db")
-        db.execute("INSERT INTO messages (session_id, role, content) VALUES ('local-other', 'assistant', 'not mine')")
-        db.commit()
-        db.close()
+        self.store.create_session("local-other", "cli")
+        self.store.append_message("local-other", "assistant", "not mine")
         (item,) = self.active(tid)
         self.assertEqual(item["last_chat"], "mine")
 
