@@ -7,7 +7,7 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-_spec = importlib.util.spec_from_file_location("calling_mom_feedback_under_test", Path(__file__).resolve().parent / "feedback.py")
+_spec = importlib.util.spec_from_file_location("calling_mom_feedback_under_test", Path(__file__).resolve().parent.parent / "feedback.py")
 feedback = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(feedback)
 

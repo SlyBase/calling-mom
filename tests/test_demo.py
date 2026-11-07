@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-_spec = importlib.util.spec_from_file_location("demo", Path(__file__).with_name("scripts") / "demo.py")
+_spec = importlib.util.spec_from_file_location("demo", Path(__file__).resolve().parent.parent / "scripts" / "demo.py")
 demo = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(demo)
 

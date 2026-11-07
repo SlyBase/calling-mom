@@ -11,7 +11,7 @@ import threading
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load():

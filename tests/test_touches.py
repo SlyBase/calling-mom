@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-_spec = importlib.util.spec_from_file_location("calling_mom_touches_under_test", Path(__file__).resolve().parent / "touches.py")
+_spec = importlib.util.spec_from_file_location("calling_mom_touches_under_test", Path(__file__).resolve().parent.parent / "touches.py")
 touches = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(touches)
 

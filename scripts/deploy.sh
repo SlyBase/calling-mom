@@ -16,12 +16,12 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$SRC/scripts/.deploy.env" ]; then set -a; . "$SRC/scripts/.deploy.env"; set +a; fi
 : "${CALLING_MOM_TARGETS:?set CALLING_MOM_TARGETS (see the header of this script)}"
 PY="${CALLING_MOM_PYTHON:-python3}"
-FILES="__init__.py _core.py test_core.py cli.py rules.py test_rules.py metrics.py signals.py plugin.yaml README.md CHANGELOG.md LICENSE test_signals.py test_calling_mom.py test_metrics.py test_matrix.py test_cli.py linecov.py check.py"
+FILES="__init__.py _core.py tests/test_core.py cli.py rules.py tests/test_rules.py metrics.py signals.py plugin.yaml README.md CHANGELOG.md LICENSE tests/test_signals.py tests/test_calling_mom.py tests/test_metrics.py tests/test_matrix.py tests/test_cli.py linecov.py check.py"
 
 first=""
 for dst in $CALLING_MOM_TARGETS; do
     [ -d "$dst" ] || { echo "skip (absent): $dst"; continue; }
-    for f in $FILES; do cp "$SRC/$f" "$dst/$f"; done
+    for f in $FILES; do mkdir -p "$dst/$(dirname "$f")"; cp "$SRC/$f" "$dst/$f"; done
     mkdir -p "$dst/scripts"
     cp "$SRC"/scripts/*.py "$dst/scripts/"
     echo "synced: $dst"

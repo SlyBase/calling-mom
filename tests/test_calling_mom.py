@@ -15,7 +15,7 @@ import types
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 _DB = Path(tempfile.mkdtemp(prefix="calling-mom-test-")) / "kanban.db"
 os.environ["HERMES_KANBAN_DB"] = str(_DB)
 # Never let a test touch the live observation log, spend ledger or sweep watermark.

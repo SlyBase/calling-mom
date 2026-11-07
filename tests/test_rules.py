@@ -11,7 +11,7 @@ import unittest
 RM = "r" + "m"  # spelled apart: the install scanner flags a literal recursive root delete (destructive_root_rm) and holds auto-updates for review
 from pathlib import Path
 
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("calling_mom_rules_under_test", PLUGIN_DIR / "rules.py")
 rules = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rules)
