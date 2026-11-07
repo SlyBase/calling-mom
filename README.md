@@ -159,7 +159,9 @@ turn it off with `calling_mom.answer.precedents: false`.
 **Almost never.** Only when all three are true:
 
 1. The case is a risky change, a `SECOND-OPINION` or a worker question. Stuck errors, loops and "done" checks never go to Olymp.
-2. Mom wrote `ESCALATE: <reason>`: a high-stakes case she cannot judge as safe, with no way back.
+2. Mom wrote `ESCALATE: <reason>` (a high-stakes case she cannot judge as safe, with no way back), or she rated her own answer
+   below 4 of 10. She ends a reply with `CONFIDENCE: <1-10> | <reason>`; a missing or garbled line changes nothing. The
+   threshold is `calling_mom.mom.escalate_below`.
 3. The limits hold: **1 Olymp question per card and 6 per day**.
 
 If Olymp is down or the limit is reached, the card carries on without him. Advice arrives right after the command ran:

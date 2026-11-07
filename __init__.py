@@ -118,6 +118,9 @@ DEFAULTS = {
     "review": {"marker": "[review]", "reviewer": "reviewer"},  # [review] cards finish via the reviewer profile ("" = off)
     "metrics": {"pushgateways": [], "instance": "hermes"},  # Pushgateway base URLs, tried in order ([] = off)
     "count": {"chat_waits": False},  # time you wait on a prompt in chat (kind, seconds, outcome; never the text). Off until setup asks.
+    # Mom's self-rated confidence (1-10, the last line of her reply, SMART "Curate/Infer"): below `escalate_below` olymp is
+    # asked (inside his limits), from `brief_short_from` a brief for the human is kept short. Next to provider/model.
+    "mom": {"escalate_below": 4, "brief_short_from": 7},
     "mom_fallback": {"provider": "", "model": ""},  # answers when Mom's provider is limited or down (never replaces Olymp)
     "stall_minutes": 15,  # a running card without a heartbeat this long gets a [stalled] comment (0 = off)
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
@@ -906,11 +909,24 @@ _PROMPTS = {
 }
 
 
+_CONFIDENCE_ASK = ("\nEnd your reply with one last line: 'CONFIDENCE: <1-10> | <one-line reason>' (10 = certain the answer is "
+                   "right and safe, 1 = a guess). Rate honestly.")
+_CONFIDENCE_LINE = re.compile(r"(?im)^[ \t]*CONFIDENCE[ \t]*:[ \t]*(\d{1,3})?.*(?:\n|$)")
+
+
+def _confidence(text) -> "tuple[str, int | None]":
+    """``(text without its CONFIDENCE line, 1-10 or None)``. Fail-open: a missing, garbled or out-of-range value is None."""
+    text = text or ""
+    hits = list(_CONFIDENCE_LINE.finditer(text))
+    value = int(hits[-1].group(1)) if hits and hits[-1].group(1) else 0
+    return _CONFIDENCE_LINE.sub("", text).strip(), value if 1 <= value <= 10 else None
+
+
 _URL_CREDS = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", re.I)
 _GATE = ("\n\nYou are the FIRST reviewer; a far more expensive reviewer exists. Give your normal answer. "
          "Only for a rare high-stakes case that you cannot judge as safe from this context (irreversible "
          "production or public action without a fallback) answer exactly 'ESCALATE: ' plus a one-line reason. "
-         "Routine or reversible changes: never escalate.")
+         "Routine or reversible changes: never escalate." + _CONFIDENCE_ASK)
 
 
 def _build_messages(task, signal, steps, note, limit, latest_comment=None, prev_runs=None) -> list:
@@ -1015,10 +1031,11 @@ def _advise(key, category, signal, note="") -> "str | None":
             return _guarded(r, call, mom=mom, task=task.id)
 
         msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
-        is_olymp = False
+        is_olymp, confidence = False, None
         if gate:  # mom first, with the escalation instruction
             first, route = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
-            if (first.text or "").strip().upper().startswith("ESCALATE"):
+            mom_text, confidence = _confidence(first.text)
+            if mom_text.upper().startswith("ESCALATE") or (confidence is not None and confidence < cfg["mom"]["escalate_below"]):
                 _add_spend(first.usage.cost_usd or 0.0, (first.usage.input_tokens or 0) + (first.usage.output_tokens or 0))
                 route, is_olymp = {"model": olymp["model"], "provider": olymp["provider"]}, True
                 res, route = ask(route, msgs, mom=False)
@@ -1026,7 +1043,7 @@ def _advise(key, category, signal, note="") -> "str | None":
                 res = first
         else:
             res, route = ask(route, msgs)
-        text = (res.text or "").strip()
+        text, _ = _confidence(res.text)
         if not text:
             return None
         cost = res.usage.cost_usd or 0.0
@@ -1036,7 +1053,7 @@ def _advise(key, category, signal, note="") -> "str | None":
             _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
         if text.upper().startswith("NO_ACTION"):  # nothing to say: no comment, no interruption
             _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
-                       provider=route["provider"], olymp=is_olymp,
+                       provider=route["provider"], olymp=is_olymp, confidence=confidence,
                        tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
@@ -1044,7 +1061,7 @@ def _advise(key, category, signal, note="") -> "str | None":
                       f"({route['provider']}{', olymp' if is_olymp else ''}{', fallback' if route.get('fallback') else ''}): "
                       f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}")
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
-                   provider=route["provider"], olymp=is_olymp,
+                   provider=route["provider"], olymp=is_olymp, confidence=confidence,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
         return f"[ADVISOR {res.model}] {text}"
     except _CoolingDown:
@@ -1425,14 +1442,17 @@ _Q_BRIEF_ONLY = ("\n\nThis question touches something only the owner decides (cr
                  "publishing, a held or critical command). Do NOT answer. Reply with ASK_HUMAN and the four-line brief only.")
 
 
-def _brief(question, options, recommendation, otherwise) -> str:
+_BRIEF_SHORT = 160  # characters per line of a brief from a confident Mom (400 otherwise)
+
+
+def _brief(question, options, recommendation, otherwise, width=400) -> str:
     """The four-line brief, one line each, whatever the model's line breaks were."""
-    one = lambda text: " ".join(str(text).split())[:400]
+    one = lambda text: " ".join(str(text).split())[:width]
     return (f"Question: {one(question)}\nOptions: {one(options)}\nRecommendation: {one(recommendation)}\n"
             f"If nobody answers: {one(otherwise)}")
 
 
-def _q_parse(text):
+def _q_parse(text, width=400):
     """``("answer", text)``, ``("human", brief)``, ``("escalate", reason)`` or None (anything else)."""
     head, _, rest = (text or "").strip().partition(":")
     kind, rest = head.strip().upper(), rest.strip()
@@ -1441,7 +1461,7 @@ def _q_parse(text):
     if kind == "ESCALATE":
         return ("escalate", rest[:200])
     match = _BRIEF.search(rest) if kind == "ASK_HUMAN" else None
-    return ("human", _brief(*match.groups())) if match else None
+    return ("human", _brief(*match.groups(), width)) if match else None
 
 
 def _q_messages(task, reason, comments, held, escalate, brief_only, limit, earlier=()) -> list:
@@ -1459,7 +1479,7 @@ def _q_messages(task, reason, comments, held, escalate, brief_only, limit, earli
         head = limit // 3
         user = user[:head] + "\n...\n" + user[-(limit - head - 5):]
     system = (_Q_SYSTEM + (_Q_ESCALATE if escalate and not brief_only else "") + (_Q_BRIEF_ONLY if brief_only else "")
-              + (_Q_PRECEDENT if earlier else ""))
+              + (_Q_PRECEDENT if earlier else "") + _CONFIDENCE_ASK)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -1506,10 +1526,11 @@ def on_question(task_id=None, board=None, reason=None, run_id=None, **_):
 def _answer_question(cfg, task_id, board, reason, run_id) -> None:
     started = time.monotonic()
     usage = {"calls": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0}
+    seen = {}  # Mom's own confidence, for the log row
 
     def log(outcome, why=None, by=None):
         fields = {"task": task_id, "board": board, "run": run_id, "outcome": outcome, "reason": why, "by": by,
-                  "ms": int((time.monotonic() - started) * 1000)}
+                  "confidence": seen.get("confidence"), "ms": int((time.monotonic() - started) * 1000)}
         if usage["calls"]:
             fields |= {k: usage[k] for k in ("tokens_in", "tokens_out", "usd")}
         _trace_row("question", **{k: v for k, v in fields.items() if v is not None})
@@ -1552,7 +1573,15 @@ def _answer_question(cfg, task_id, board, reason, run_id) -> None:
             _add_spend(cost, (res.usage.input_tokens or 0) + (res.usage.output_tokens or 0))
         else:  # olymp: a subscription, counted in calls
             _add_spend(0.0, 0, olymp=1)
-        return _q_parse(res.text)
+        text, confidence = _confidence(res.text)
+        if not is_olymp:
+            seen["confidence"] = confidence
+        short = confidence is not None and confidence >= cfg["mom"]["brief_short_from"]
+        verdict = _q_parse(text, _BRIEF_SHORT if short else 400)
+        if (verdict and not is_olymp and olymp_room and not brief_only and confidence is not None
+                and confidence < cfg["mom"]["escalate_below"]):  # unsure: olymp decides, inside his limits
+            return ("escalate", f"confidence {confidence}/10")
+        return verdict
 
     why = risk
     try:

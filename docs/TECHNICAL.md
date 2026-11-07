@@ -110,6 +110,7 @@ plugins:
 | Key | Default | Meaning |
 |---|---|---|
 | `mom.model`, `mom.provider` | DeepSeek Flash / openrouter | The cheap tier. The older top-level `model`/`provider` pair still works; `mom` wins. |
+| `mom.escalate_below`, `mom.brief_short_from` | `4` / `7` | Mom's confidence (1-10, see "Mom answers first"): below the first, olymp is asked (inside his limits); from the second, a brief for the human is kept short (160 characters a line, not 400). |
 | `olymp.model`, `olymp.provider`, `olymp.categories` | off / `[architecture]` | The expensive tier. A half pair turns olymp off; a half pair in `categories.<name>` is ignored. |
 | `olymp.max_per_card`, `olymp.max_per_day` | `1` / `6` | Hard call limits for olymp. |
 | `categories.architecture.max`, `.commands_extra`, `categories.watch.max` | `4`, `[]`, `1` | Critical reviews per card; your own risky-command regexes (added to the defaults, nothing to replace); watch reviews per card. |
@@ -267,6 +268,21 @@ error), or `ESCALATE: <reason>`. `ESCALATE` is offered only when Olymp is config
 day; his comments `[olymp answered]` and the advisor's `, olymp)` comments count). Olymp answers `ANSWER` or
 `ASK_HUMAN`. When Mom escalates and Olymp has no room, the card gets a brief written from the question
 (`reason=olymp_cap` or `no_olymp`).
+
+**Confidence.** Every Mom prompt of this flow, and the Mom-first prompt of the advisor gate (a category in
+`olymp.categories` with Olymp configured), ends with a request for one last line, `CONFIDENCE: <1-10> | <one-line reason>`
+(label plus confidence, after the "Curate/Infer" stages of SMART, see References). `_confidence` takes the last such line
+off the text, so it is never posted to the card. It is fail-open: no line, no digits or a value outside 1..10 is
+`None`, and the reply is handled as before. The rules:
+
+- below `mom.escalate_below` (default 4) Olymp is asked as if Mom had written `ESCALATE`. Only where Olymp is asked at all:
+  configured, `max_per_card` and `max_per_day` left, no brief-only question. A low confidence never opens a way past
+  these limits; where Olymp has no room the reply stands as before.
+- from `mom.brief_short_from` (default 7) an `ASK_HUMAN` brief is cut to 160 characters per line (400 otherwise).
+- the log row of the advisor and of the question carries `confidence` (Mom's own, also when Olymp then answered);
+  the rationale stays out of the log, as every other model text. `status` shows no advisor rows, so it shows no confidence.
+
+`ESCALATE:` still works: a model that has no confidence line, or a reply that carries both, escalates as before.
 
 Effects: `[mom answered] <text>` (or `[olymp answered]`) is posted through the public `kanban_comment` tool, then the
 card is unblocked with `kb.unblock_task` (the path of the capability escalation); if the comment fails the card is not
@@ -525,3 +541,9 @@ Tests write to a sandbox, never to your real log. Test-first: a new branch needs
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
+## References
+
+- Vallurupalli, Ferraro (UMBC): *SMART: State-based Multi Agent Reasoning Traces for Verification-oriented Problem-Solving*,
+  arXiv:2611.08196v1, <https://arxiv.org/abs/2611.08196v1>. We take the pattern, not the benchmark. Used for: every verdict of
+  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"). Nothing in it makes a card
+  text leave the machine: the local model stays the default, the redaction (`redact_for_egress`) and `[local-only]` are unchanged.

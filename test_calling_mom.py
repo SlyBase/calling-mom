@@ -1008,6 +1008,63 @@ class TwoTierTest(AdvisorTest):
         self.critical()
         self.assertIn("m/olymp (p/olymp, olymp)", self.comments()[0])
 
+    # --- confidence 1-10: a low one asks olymp, a missing or garbled one changes nothing -----------------
+
+    def test_the_mom_is_asked_for_a_confidence_line_and_olymp_is_not(self):
+        self.seq("ESCALATE: x", "ok")
+        self.critical()
+        self.assertIn("CONFIDENCE: <1-10>", self.llm.calls[0]["messages"][0]["content"])
+        self.assertNotIn("CONFIDENCE", self.llm.calls[1]["messages"][0]["content"])
+
+    def test_a_low_confidence_asks_olymp_without_the_escalate_prefix(self):
+        self.seq("Unsure about the rollback.\nCONFIDENCE: 3 | cannot see a fallback", "Olymp says: keep the cron.")
+        out = self.critical()
+        self.assertEqual(self.models(), [STRONG, "m/olymp"])
+        self.assertIn("Olymp says", out)
+        self.assertNotIn("CONFIDENCE", out)
+
+    def test_a_confident_mom_answers_alone_and_the_confidence_line_is_not_posted(self):
+        self.seq("Fine, nothing irreversible.\nCONFIDENCE: 8 | routine change")
+        out = self.critical()
+        self.assertEqual(self.models(), [STRONG])
+        self.assertIn("Fine", out)
+        self.assertNotIn("CONFIDENCE", out)
+        self.assertNotIn("CONFIDENCE", self.comments()[0])
+
+    def test_a_middling_confidence_does_not_escalate(self):
+        self.seq("Probably fine.\nCONFIDENCE: 4 | one open point")
+        self.critical()
+        self.assertEqual(self.models(), [STRONG])
+
+    def test_a_missing_or_garbled_confidence_keeps_the_old_behaviour(self):
+        plugin.DEFAULTS["categories"]["architecture"]["max"] = 9
+        for tail in ("", "\nCONFIDENCE: high", "\nCONFIDENCE: 0", "\nCONFIDENCE: 11", "\nCONFIDENCE:"):
+            plugin._arch_seen.clear()
+            with self.subTest(tail=tail):
+                self.llm = SeqLlm(["Fine." + tail])
+                plugin._ctx.llm = self.llm
+                self.assertIn("Fine", self.critical("terraform apply -" + str(len(tail))))
+                self.assertEqual(len(self.llm.calls), 1)
+
+    def test_the_escalation_threshold_comes_from_the_config(self):
+        plugin.DEFAULTS["mom"]["escalate_below"] = 6
+        self.seq("Hmm.\nCONFIDENCE: 5 | a bit unsure", "olymp a")
+        self.critical()
+        self.assertEqual(self.models(), [STRONG, "m/olymp"])
+
+    def test_a_low_confidence_does_not_pass_the_olymp_limits(self):
+        plugin.DEFAULTS["olymp"].update(max_per_card=9, max_per_day=1)
+        self.seq("a\nCONFIDENCE: 1 | x", "olymp a", "b\nCONFIDENCE: 1 | x")
+        self.critical("terraform apply -a")
+        out = self.critical("terraform apply -b")
+        self.assertEqual(self.models(), [STRONG, "m/olymp", STRONG])
+        self.assertIn("b", out)
+
+    def test_the_advisor_row_logs_the_confidence(self):
+        self.seq("Fine.\nCONFIDENCE: 9 | clear")
+        self.critical()
+        self.assertEqual([r["confidence"] for r in log_rows("advisor")], [9])
+
     def test_mom_comment_names_the_provider_without_olymp_tag(self):
         self.seq("fine")
         self.critical()
@@ -2591,6 +2648,63 @@ class QuestionTest(QuestionFixture, unittest.TestCase):
         (row,) = self.rows()
         self.assertEqual((row["outcome"], row["by"]), ("answered", "olymp"))
         self.assertEqual(plugin._spent_today()["olymp"], 1)
+
+    # --- confidence 1-10 ---------------------------------------------------------------------------------
+
+    def test_mom_is_asked_for_a_confidence_line(self):
+        self.ask()
+        self.assertIn("CONFIDENCE: <1-10>", self.llm.calls[0]["messages"][0]["content"])
+
+    def test_a_low_confidence_answer_goes_to_olymp_who_answers(self):
+        self.with_olymp("ANSWER: B.\nCONFIDENCE: 2 | a guess", "ANSWER: Use B.")
+        self.ask()
+        self.assertEqual([c["model"] for c in self.llm.calls], [STRONG, "m/olymp"])
+        self.assertEqual(self.comments()[-1], "[olymp answered] Use B.")
+        (row,) = self.rows()
+        self.assertEqual((row["by"], row["confidence"]), ("olymp", 2))
+
+    def test_a_confident_answer_stays_with_mom_and_the_line_is_not_posted(self):
+        self.with_olymp("ANSWER: B.\nCONFIDENCE: 9 | the card says so")
+        self.ask()
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual(self.comments()[-1], "[mom answered] B.")
+        self.assertEqual(self.rows()[0]["confidence"], 9)
+
+    def test_a_low_confidence_without_olymp_is_logged_and_changes_nothing(self):
+        self.seq("ANSWER: B.\nCONFIDENCE: 2 | a guess")
+        self.ask()
+        self.assertEqual(self.comments()[-1], "[mom answered] B.")
+        self.assertEqual(self.rows()[0]["confidence"], 2)
+
+    def test_a_low_confidence_does_not_pass_the_olymp_card_limit(self):
+        self.with_olymp("ANSWER: B.\nCONFIDENCE: 2 | a guess")
+        with_conn(lambda c: kb.add_comment(c, self.tid, "worker", "[architecture/critical_change] run 1 · m (p, olymp): 1 in / 1 out\nx"))
+        self.ask()
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual(self.comments()[-1], "[mom answered] B.")
+
+    def test_a_low_confidence_on_a_risky_question_is_still_only_a_brief(self):
+        self.with_olymp(BRIEF + "\nCONFIDENCE: 2 | a guess")
+        self.ask(reason="What is the password of the staging database?")
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual(self.comments()[-1], BRIEF_COMMENT)
+
+    def test_a_confident_brief_is_shorter_than_an_unsure_one(self):
+        long = "x" * 300
+        brief = f"ASK_HUMAN:\nQuestion: Q?\nOptions: {long}\nRecommendation: B\nIf nobody answers: wait.\n"
+        self.seq(brief + "CONFIDENCE: 9 | clear")
+        self.ask()
+        self.assertEqual(self.comments()[-1], f"[for you] Question: Q?\nOptions: {'x' * 160}\nRecommendation: B\nIf nobody answers: wait.")
+        self.seq(brief + "CONFIDENCE: 5 | unsure")
+        tid = self.ask(tid=self.card())
+        self.assertIn("x" * 300, self.comments(tid)[-1])
+
+    def test_a_garbled_confidence_keeps_the_old_behaviour(self):
+        self.with_olymp("ANSWER: B.\nCONFIDENCE: high")
+        self.ask()
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertEqual(self.comments()[-1], "[mom answered] B.")
+        self.assertNotIn("confidence", self.rows()[0])
 
     def test_olymp_may_hand_it_to_the_human(self):
         self.with_olymp("ESCALATE: x", BRIEF)
