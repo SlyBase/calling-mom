@@ -15,7 +15,7 @@ from pathlib import Path
 import test_calling_mom as base
 import test_cli
 
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("calling_mom_report_under_test", PLUGIN_DIR / "report.py")
 report = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(report)

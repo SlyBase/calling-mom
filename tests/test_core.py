@@ -11,7 +11,7 @@ from unittest import mock
 
 import test_calling_mom  # sets up the Hermes test home and loads the plugin the way the other suites do
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 GONE = {"hermes_cli.kanban_db_boards", "hermes_cli.config", "hermes_cli.profiles",
         "hermes_cli.model_switch_providers", "agent.plugin_llm", "hermes_cli.__version__",
         "hermes_cli.curses_ui"}

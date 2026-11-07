@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("calling_mom_cli_under_test", PLUGIN_DIR / "cli.py")
 cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cli)

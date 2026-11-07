@@ -17,7 +17,7 @@ import test_calling_mom as base
 import test_cli
 from test_calling_mom import BRIEF, kb, plugin, with_conn
 
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("calling_mom_precedents_under_test", PLUGIN_DIR / "precedents.py")
 precedents = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(precedents)

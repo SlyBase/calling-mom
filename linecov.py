@@ -64,6 +64,7 @@ def tracer(frame, event, arg):
 def measure(mods):
     """Run the suite under the tracer; return (covered, total, missing) line counts."""
     sys.path.insert(0, str(PLUGIN))
+    sys.path.insert(0, str(PLUGIN / "tests"))
     os.chdir(PLUGIN)
     sys.settrace(tracer)
     threading.settrace(tracer)  # the advice and verify threads run plugin code too
