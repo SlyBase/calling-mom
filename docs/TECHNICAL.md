@@ -398,7 +398,7 @@ backend routes above live in the gateway and work either way. On the machine tha
 
 ```bash
 mkdir -p ~/.hermes/desktop-plugins/calling-mom
-curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.5.1/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.5.2/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
 ```
 
 then **⌘K -> Reload desktop plugins**, and enable it under **Capabilities -> Plugins**. Card badges need Desktop

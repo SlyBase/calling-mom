@@ -472,7 +472,7 @@ function Page() {
                 'div',
                 { style: { display: 'flex', gap: 8, alignItems: 'center', minWidth: '6rem' } },
                 h('span', { style: { width: 8, height: 8, borderRadius: '50%', backgroundColor: actionDot(row), flex: 'none' } }),
-                h('span', { style: { ...muted, fontSize: '0.6875rem' } }, sdk.relativeTime ? sdk.relativeTime(row.ts * 1000) : age(Date.now() / 1000 - row.ts))
+                h('span', { style: { ...muted, fontSize: '0.6875rem' } }, age(Date.now() / 1000 - row.ts))
               ),
               h(
                 'div',

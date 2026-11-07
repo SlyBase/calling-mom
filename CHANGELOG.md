@@ -3,6 +3,11 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.5.2] - 2026-11-07
+
+### Fixed
+- **Desktop: recent activity now shows the dynamic time readout** (`desktop/plugin.js`). The Recent-activity cell fell back to `sdk.relativeTime` (always present in the desktop SDK) and so never rendered the new `age()` format (`15 min` / `1 h` / `1 d`). It now uses `age()` directly, matching the Active section.
+
 ## [1.5.1] - 2026-11-07
 
 ### Added
