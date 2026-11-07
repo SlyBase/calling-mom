@@ -6,8 +6,11 @@ versioning: [SemVer](https://semver.org/).
 ## [1.5.6] - 2026-11-07
 
 ### Added
-- **Desktop: the page shows the version under the title** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The tagline is gone; the line reads `v1.5.6`, or `Desktop v… · Backend v…` when the app's copy and the gateway differ, so a stale Desktop half is visible at once. `GET /summary` gains `version` (from `plugin.yaml`); a test keeps `plugin.js` and `plugin.yaml` equal.
+- **Desktop: the page shows the version under the title** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The tagline is gone; the line reads `v1.5.6`, or `Desktop v… · Backend v…` when the app's copy and the gateway differ, so a stale Desktop half is visible at once, with a note next to the version. `GET /summary` gains `version` (from `plugin.yaml`); a test keeps `plugin.js` and `plugin.yaml` equal.
 - **Desktop: right-click menu of an Active card has "Copy task id"** (`desktop/plugin.js`).
+
+### Removed
+- **`hermes calling-mom desktop-sync`** (added in 1.5.5). A command that downloads and replaces the plugin's own Desktop file is a self-updater, which the Hermes plugin catalog forbids (admission rule 3), and it exists only where the plugin is installed, which a Mac without a gateway does not have. Install the Desktop half through **Capabilities -> Plugins -> Install** and update it with the plugin's Update button. `setup` and `doctor` name this path; README and TECHNICAL.md describe it.
 
 ### Changed
 - **Desktop: the status-bar chip no longer shows the Mom call count** (`desktop/plugin.js`). It appears only for `N for you` (items waiting) or `mom offline`. `today.mom_calls` stays in `GET /summary` for older Desktop copies.

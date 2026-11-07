@@ -456,7 +456,7 @@ function Page() {
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
       h(WindowSelector, { value: s.hours, onPick: setHours })
     ),
-    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, versionLine(s.summary && s.summary.version)),
+    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, h(VersionLine, { backend: s.summary && s.summary.version })),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
@@ -517,8 +517,28 @@ function Page() {
 
 // ---- the status-bar chip ---------------------------------------------------------------------------------------
 
-function versionLine(backend) {
-  return !backend || backend === VERSION ? `v${VERSION}` : `Desktop v${VERSION} · Backend v${backend}`
+function newer(a, b) {
+  const [x, y] = [a, b].map(v => v.split('.').map(Number))
+  const i = x.findIndex((n, k) => n !== (y[k] || 0))
+
+  return i >= 0 && x[i] > (y[i] || 0)
+}
+
+function VersionLine({ backend }) {
+  if (!backend || backend === VERSION) {
+    return h('span', null, `v${VERSION}`)
+  }
+
+  const behind = newer(backend, VERSION)
+
+  return h(
+    'span',
+    null,
+    `Desktop v${VERSION} · Backend v${backend} `,
+    h('span', { style: { color: 'var(--ui-accent)' } }, behind
+      ? '— this app has an older Calling Mom: Capabilities → Plugins → Update.'
+      : '— the gateway has an older Calling Mom: run "hermes plugins update calling-mom" there.')
+  )
 }
 
 function Chip() {

@@ -394,18 +394,16 @@ it imports nothing from Hermes itself. Boards are read through the plugin's `_co
 (`$HERMES_HOME/desktop-plugins/<id>/plugin.js` or `$HERMES_HOME/plugins/<id>/desktop/plugin.js` on the machine that
 runs the app; the SDK calls them app-level: one root for every profile, gateway or remote machine), and
 `hermes_cli/desktop_plugin_halves.py` does not install the half on a host that Desktop only reaches over SSH. The
-backend routes above live in the gateway and work either way. On the machine that runs the app:
+backend routes above live in the gateway and work either way. On the machine that runs the app, install the half with
+Hermes' own door: **Capabilities -> Plugins -> Install** (it clones the Desktop half into `desktop-plugins/`), then
+enable it. Card badges need Desktop 0.22.6 or later. `hermes calling-mom setup` (last line) and `doctor` (an `INFO` line,
+never a failure) name this path.
 
-```bash
-hermes calling-mom desktop-sync        # the latest release
-hermes calling-mom desktop-sync v1.5.6 # a pinned tag
-```
-
-This pulls `desktop/plugin.js` from the repository and writes it to `~/.hermes/desktop-plugins/calling-mom/plugin.js`
-(atomic: a failed download leaves the old file in place). Then **⌘K -> Reload desktop plugins**, and enable it under
-**Capabilities -> Plugins**. Card badges need Desktop 0.22.6 or later. `hermes calling-mom setup` (last line) and
-`doctor` (an `INFO` line, never a failure) point to the README section "Desktop on another machine". Run
-`desktop-sync` again after each plugin update.
+The plugin does **not** download or replace its own files (catalog admission rule 3, "no self-updating code"); there is
+no `desktop-sync` command since 1.5.6. Updates reach the app through Hermes: `plugins.auto_apply` and `hermes plugins
+update` for the gateway's copy, the Update button for the app's copy. The page shows `Desktop vX · Backend vY` when the
+two differ (`GET /summary` carries `version`, read from `plugin.yaml`; `plugin.js` carries the same number in `VERSION`,
+and a test keeps them equal), so a stale Desktop copy is visible at once.
 
 The Desktop half polls the three GET routes every 15 s (not while the window is hidden) and keeps "Keep blocked" in
 `ctx.storage`: it hides an item on this machine only, the card stays blocked and the backend is not told.

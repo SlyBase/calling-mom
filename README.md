@@ -218,18 +218,13 @@ is enabled, then run `hermes gateway restart` once.
 
 Does the app run on a different machine than the gateway (a Mac connected to a server, say)? Then it shows no page, no
 badges and no chip, although the plugin works on the server. The app loads Desktop plugins from **its own disk** only,
-and an install or update of the plugin does not reach that disk — the gateway's copy stays on the server. On the machine
-that runs the app:
+so the Desktop half must be installed on that machine. Use Hermes' own way:
 
-```bash
-hermes calling-mom desktop-sync
-```
+1. In the app, open **Capabilities -> Plugins -> Install** and add Calling Mom (the catalog entry, or `SlyBase/calling-mom`).
+2. Switch Calling Mom on under **Capabilities -> Plugins**. It ships off until you say so.
 
-This pulls the latest `desktop/plugin.js` from the repository and writes it to `~/.hermes/desktop-plugins/calling-mom/`.
-Pass a tag to pin a version: `hermes calling-mom desktop-sync v1.5.6`.
-
-Press **⌘K**, choose **Reload desktop plugins**, and switch Calling Mom on under **Capabilities -> Plugins**.
-Run `hermes calling-mom desktop-sync` again after each plugin update.
+Later, the **Update** button of the plugin moves the Desktop half to the new version. The page shows the version under
+its title; when the app's copy and the gateway differ, a note next to it says so.
 
 ## Your money and your data
 
