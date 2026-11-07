@@ -5,6 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
+const VERSION = '1.5.6' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
@@ -17,7 +18,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recentHours: 24, recent: [] }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [] }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -37,17 +38,14 @@ async function refresh() {
 
   try {
     const hours = state.hours || 24
-    const recentHours = state.recentHours || 24
-    // Recent activity has its own window: ask again only when it differs from the header's.
-    const [summary, needs, cards, active, other] = await Promise.all([
+    const [summary, needs, cards, active] = await Promise.all([
       ctx.rest(`/summary?hours=${hours}`),
       ctx.rest('/needs-you'),
       ctx.rest('/cards'),
-      ctx.rest('/active'),
-      recentHours === hours ? null : ctx.rest(`/summary?hours=${recentHours}`)
+      ctx.rest('/active')
     ])
 
-    update({ loaded: true, error: null, summary, needs, cards, active, recent: (other || summary).recent })
+    update({ loaded: true, error: null, summary, needs, cards, active, recent: summary.recent })
     paintBadges()
   } catch (error) {
     update({ loaded: true, error: message(error) })
@@ -57,12 +55,6 @@ async function refresh() {
 function setHours(hours) {
   ctx.storage.set('hours', hours)   // kept like `kept`, so the window survives reloads
   update({ hours })
-  refresh()
-}
-
-function setRecentHours(recentHours) {
-  ctx.storage.set('recentHours', recentHours)
-  update({ recentHours })
   refresh()
 }
 
@@ -387,11 +379,15 @@ function WindowSelector({ value, onPick, ...props }) {
   return h('div', { ...props, style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
 }
 
+function copyTaskId(item) {
+  navigator.clipboard
+    .writeText(item.task_id)
+    .then(() => host.notify({ kind: 'success', message: `Copied ${item.task_id}` }))
+    .catch(error => host.notify({ kind: 'error', message: message(error) }))
+}
+
 function ActiveItem({ item }) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const chat = item.last_chat || null
-  const comment = item.last_comment
-  const noActivity = !chat && !comment
   const moves = MOVES[item.status] || []
   const card = h(
     'div',
@@ -408,20 +404,13 @@ function ActiveItem({ item }) {
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
-    noActivity
-      ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No activity yet — the worker is on it.')
-      : h(
+    item.last_chat
+      ? h(
           'div',
           { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          chat
-            ? chat
-            : h(
-                'span',
-                null,
-                h('span', { style: muted }, `${comment.author}: `),
-                comment.body
-              )
+          item.last_chat
         )
+      : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )
   return ContextMenu
     ? h(
@@ -432,6 +421,7 @@ function ActiveItem({ item }) {
           ContextMenuContent,
           null,
           h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
+          h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
           moves.length > 0 && h(ContextMenuSeparator),
           moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
         )
@@ -457,7 +447,7 @@ function Page() {
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
       h(WindowSelector, { value: s.hours, onPick: setHours })
     ),
-    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${windowLabel(s.hours)}.`),
+    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, h(VersionLine, { backend: s.summary && s.summary.version })),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
@@ -483,31 +473,28 @@ function Page() {
     s.summary &&
       h(
         Section,
-        { title: 'Recent activity', defaultOpen: false },
-        h(WindowSelector, { value: s.recentHours, onPick: setRecentHours, 'data-recent-window': '' }),
+        { title: 'Recent activity', count: s.recent.length, defaultOpen: false },
         s.recent.length === 0
-          ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, `No activity in the last ${windowLabel(s.recentHours)}.`)
+          ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, `No activity in the last ${windowLabel(s.hours)}.`)
           : h(
               'div',
-              { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
               ...s.recent.map((row, i) =>
                 h(
                   'div',
-                  { key: i, style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0 10px', fontSize: '0.8125rem', alignItems: 'baseline' } },
+                  { key: i, style: { display: 'flex', flexDirection: 'column', gap: 4 } },
                   h(
                     'div',
-                    { style: { display: 'flex', gap: 8, alignItems: 'center', minWidth: '6rem' } },
+                    { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8125rem' } },
                     h('span', { style: { width: 8, height: 8, borderRadius: '50%', backgroundColor: actionDot(row), flex: 'none' } }),
-                    h('span', { style: { ...muted, fontSize: '0.6875rem' } }, age(Date.now() / 1000 - row.ts))
+                    h('span', { style: muted }, age(Date.now() / 1000 - row.ts)),
+                    h('span', null, sentence(row))
                   ),
                   h(
                     'div',
-                    { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
-                    h('div', { style: { whiteSpace: 'pre-wrap' } }, sentence(row)),
-                    h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline' } },
-                      h('span', { style: { fontSize: '0.75rem' } }, row.title || row.task),
-                      h('span', { style: { ...muted, fontSize: '0.6875rem' } }, row.board || '')
-                    )
+                    { style: { display: 'flex', gap: 8, alignItems: 'baseline', fontSize: '0.8125rem', marginLeft: 16 } },
+                    h('span', { style: muted }, row.title || row.task),
+                    h('span', { style: muted }, row.board || '')
                   )
                 )
               )
@@ -518,6 +505,30 @@ function Page() {
 
 // ---- the status-bar chip ---------------------------------------------------------------------------------------
 
+function newer(a, b) {
+  const [x, y] = [a, b].map(v => v.split('.').map(Number))
+  const i = x.findIndex((n, k) => n !== (y[k] || 0))
+
+  return i >= 0 && x[i] > (y[i] || 0)
+}
+
+function VersionLine({ backend }) {
+  if (!backend || backend === VERSION) {
+    return h('span', null, `v${VERSION}`)
+  }
+
+  const behind = newer(backend, VERSION)
+
+  return h(
+    'span',
+    null,
+    `Desktop v${VERSION} · Backend v${backend} `,
+    h('span', { style: { color: 'var(--ui-accent)' } }, behind
+      ? '— this app has an older Calling Mom: Capabilities → Plugins → Update.'
+      : '— the gateway has an older Calling Mom: run "hermes plugins update calling-mom" there.')
+  )
+}
+
 function Chip() {
   const s = useStore()
 
@@ -526,13 +537,17 @@ function Chip() {
   }
 
   const count = waiting(s).length
-  const text = s.error ? 'mom offline' : `mom ${s.summary.today.mom_calls}${count ? ` · ${count} for you` : ''}`
+  const text = s.error ? 'mom offline' : `${count} for you`
+
+  if (!s.error && !count) {
+    return null
+  }
 
   return h(
     'button',
     {
       type: 'button',
-      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: calls today and items waiting for you',
+      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: items waiting for you',
       onClick: () => host.navigate(PATH),
       style: { padding: '0 6px', fontSize: '0.6875rem', color: count ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)' }
     },
@@ -547,7 +562,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24), recentHours: ctx.storage.get('recentHours', 24) })
+    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },

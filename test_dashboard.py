@@ -8,6 +8,8 @@ a fake Mom. The route module is pointed at the same plugin instance, so a test s
 import importlib.util
 import json
 import os
+import re
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -178,6 +180,14 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         for hours in (0, 2161, "x"):
             with self.subTest(hours=hours):
                 self.assertEqual(self.client.get("/summary", params={"hours": hours}).status_code, 422)
+
+    def test_summary_carries_the_plugin_version(self):
+        self.assertEqual(self.get("/summary")["version"], re.search(r"^version:\s*(\S+)", (PLUGIN_DIR / "plugin.yaml").read_text(), re.M).group(1))
+
+    def test_the_desktop_half_carries_the_same_version_as_the_plugin(self):
+        """The page shows the version of plugin.js; a drift from plugin.yaml would hide which copy runs."""
+        js = (PLUGIN_DIR / "desktop" / "plugin.js").read_text()
+        self.assertEqual(re.search(r"^const VERSION = '([^']+)'", js, re.M).group(1), self.get("/summary")["version"])
 
     def test_today_starts_at_utc_midnight(self):
         midnight = int(time.time()) // 86400 * 86400
@@ -525,39 +535,19 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         """The /active item for one card (the fixture's base card is also running, so filter by id)."""
         return [i for i in self.get("/active") if i["task_id"] == tid]
 
-    def test_a_running_card_with_a_comment_shows_its_title_board_status_and_last_comment(self):
+    def test_a_running_card_shows_its_title_board_and_status_and_no_comment(self):
         tid = self.card(title="ship the parser")
         self.set_status(tid, "running")
         with_conn(lambda c: kb.add_comment(c, tid, "worker", "Parser done, running tests."))
         (item,) = self.active(tid)
         self.assertEqual((item["board"], item["task_id"], item["title"], item["status"]), ("t-board", tid, "ship the parser", "running"))
-        self.assertEqual(item["last_comment"], {"author": "worker", "body": "Parser done, running tests.", "created_at": item["last_comment"]["created_at"]})
-        self.assertIsInstance(item["last_comment"]["created_at"], int)
-
-    def test_a_ready_card_with_no_comment_has_a_null_last_comment(self):
-        tid = self.card(title="fresh card")
-        self.set_status(tid, "ready")
-        (item,) = self.active(tid)
-        self.assertEqual((item["status"], item["last_comment"]), ("ready", None))
+        self.assertNotIn("last_comment", item)
 
     def test_only_running_and_ready_cards_are_active(self):
         for status, active in (("running", True), ("ready", True), ("blocked", False), ("todo", False), ("done", False)):
             tid = self.card()
             self.set_status(tid, status)
             self.assertEqual(bool(self.active(tid)), active, status)
-
-    def test_a_card_with_comments_shows_the_last_one_and_truncates_the_body(self):
-        tid = self.card()
-        with_conn(lambda c: kb.add_comment(c, tid, "worker", "first note"))
-        with_conn(lambda c: kb.add_comment(c, tid, "worker", "x" * 300))
-        (item,) = self.active(tid)
-        self.assertEqual(item["last_comment"]["body"], "x" * 200)
-
-    def test_a_known_prefix_on_the_last_comment_is_kept_as_is(self):
-        tid = self.card()
-        with_conn(lambda c: kb.add_comment(c, tid, "worker", "[pre-flight] HOLD: it rewrites shared history"))
-        (item,) = self.active(tid)
-        self.assertEqual(item["last_comment"]["body"], "[pre-flight] HOLD: it rewrites shared history")
 
     def test_the_newest_last_activity_comes_first(self):
         now = int(time.time())
@@ -585,27 +575,64 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
-    def test_last_chat_is_the_last_worker_line_before_the_exit_marker(self):
+    def session(self, tid, rows, sid="local-abc", profile="worker-p"):
+        """A running card whose worker session (log header + the profile's state.db) holds ``rows`` = [(role, content)]."""
+        self.set_status(tid, "running")
+        with_conn(lambda c: c.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, tid)).connection.commit())
+        self.write_log(tid, f"Session: {sid}\n")
+        home = Path(tempfile.mkdtemp(prefix="calling-mom-profile-"))
+        db = sqlite3.connect(home / "state.db")
+        db.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, active INTEGER DEFAULT 1)")
+        db.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", [(sid, r, c) for r, c in rows])
+        db.commit()
+        db.close()
+        real, plugin._core.profile_home = plugin._core.profile_home, lambda name: home if name == profile else Path("/nonexistent")
+        self.addCleanup(setattr, plugin._core, "profile_home", real)
+
+    def test_last_chat_is_the_last_assistant_message_of_the_worker_session(self):
+        tid = self.card()
+        self.session(tid, [("user", "task"), ("assistant", "first"), ("tool", "{}"), ("assistant", "Parser done,\nrunning tests.")])
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_chat"], "Parser done,\nrunning tests.")
+
+    def test_last_chat_skips_assistant_messages_without_text(self):
+        tid = self.card()
+        self.session(tid, [("assistant", "reading the card"), ("assistant", ""), ("assistant", "  ")])
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_chat"], "reading the card")
+
+    def test_last_chat_truncates_to_three_hundred_chars(self):
+        tid = self.card()
+        self.session(tid, [("assistant", "y" * 400)])
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_chat"], "y" * 300)
+
+    def test_last_chat_ignores_other_sessions(self):
+        tid = self.card()
+        self.session(tid, [("assistant", "mine")])
+        db = sqlite3.connect(plugin._core.profile_home("worker-p") / "state.db")
+        db.execute("INSERT INTO messages (session_id, role, content) VALUES ('local-other', 'assistant', 'not mine')")
+        db.commit()
+        db.close()
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_chat"], "mine")
+
+    def test_a_card_without_a_session_header_gives_a_null_last_chat(self):
         tid = self.card()
         self.set_status(tid, "running")
-        self.write_log(tid, "Session: local-abc\nfirst line\n\nlast line\n\n[kanban-worker-exit] rc=0\n")
-        (item,) = self.active(tid)
-        self.assertEqual(item["last_chat"], "last line")
-
-    def test_last_chat_truncates_to_two_hundred_chars(self):
-        tid = self.card()
-        self.write_log(tid, "y" * 300 + "\n[kanban-worker-exit] rc=0\n")
-        (item,) = self.active(tid)
-        self.assertEqual(item["last_chat"], "y" * 200)
-
-    def test_a_log_of_session_headers_only_gives_a_null_last_chat(self):
-        tid = self.card()
-        self.write_log(tid, "Session: local-abc\n")
+        self.write_log(tid, "no header here\n")
         (item,) = self.active(tid)
         self.assertIsNone(item["last_chat"])
 
     def test_a_card_without_a_log_gives_a_null_last_chat(self):
         tid = self.card()
+        (item,) = self.active(tid)
+        self.assertIsNone(item["last_chat"])
+
+    def test_a_missing_state_db_gives_a_null_last_chat(self):
+        tid = self.card()
+        self.session(tid, [("assistant", "x")], profile="worker-p")
+        with_conn(lambda c: c.execute("UPDATE tasks SET assignee = 'ghost' WHERE id = ?", (tid,)).connection.commit())
         (item,) = self.active(tid)
         self.assertIsNone(item["last_chat"])
 
