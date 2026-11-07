@@ -3,6 +3,17 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.5.1] - 2026-11-07
+
+### Added
+- **Desktop: active cards and recent activity, improved** (`desktop/plugin.js`). The `Active` section shows two lines of the last
+  comment (clamped) instead of one; a card click opens the card in the Kanban page (its drawer has no URL door a plugin can park on),
+  and a right-click menu moves the card to another bucket — the same verbs as the board, through a real `kanban_db` transition
+  (`POST /move`, `block_task`/`complete_task`/`request_review`/`unblock_task`/`archive_task`/`promote_task`, so the dependency and
+  live-claim gates are never bypassed). `Recent activity` now shows what each action did with a colored dot (verify pass/fail,
+  pre-flight go/hold, a question, an advice) instead of plain text; the card title is left-aligned and its id is demoted. The
+  time readout is dynamic (`15 min`, `1 h`, `4 h`, `1 d`, `3 d`) instead of fixed min/h/d.
+
 ## [1.5.0] - 2026-11-06
 
 ### Added
@@ -58,14 +69,6 @@ versioning: [SemVer](https://semver.org/).
   - **The words for an unclear approval.** The worker tip says: not sure the card allows it? `kanban_block(kind='needs_input')` or
     `SECOND-OPINION:`, do not guess. The pre-flight reviewer holds a quit or a Library install that the task does not name and
     names "ask the owner first" as the alternative.
-
-- **Desktop: active cards and recent activity, improved** (`desktop/plugin.js`). The `Active` section shows two lines of the last
-  comment (clamped) instead of one; a card click opens the card in the Kanban page (its drawer has no URL door a plugin can park on),
-  and a right-click menu moves the card to another bucket — the same verbs as the board, through a real `kanban_db` transition
-  (`POST /move`, `block_task`/`complete_task`/`request_review`/`unblock_task`/`archive_task`/`promote_task`, so the dependency and
-  live-claim gates are never bypassed). `Recent activity` now shows what each action did with a colored dot (verify pass/fail,
-  pre-flight go/hold, a question, an advice) instead of plain text; the card title is left-aligned and its id is demoted. The
-  time readout is dynamic (`15 min`, `1 h`, `4 h`, `1 d`, `3 d`) instead of fixed min/h/d.
 
 ### Changed
 - `watch` no longer fires for read-only `ssh`/`pct`/`qm` commands (see above). Add your own with `categories.watch` patterns as before.
