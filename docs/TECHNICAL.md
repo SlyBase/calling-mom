@@ -29,6 +29,7 @@ Options added in 1.5:
 | `count.chat_waits` | `false` | Count the time you wait on a prompt in chat (kind, seconds, outcome; never the text). `setup --chat-waits`. | Attention report |
 | `mom_fallback` | `{provider: "", model: ""}` | Answers when Mom's provider is limited or down. `setup --fallback PROVIDER/MODEL\|route:NAME\|none`. Olymp has none. | Quota, fallback, stalled cards, pace |
 | `stall_minutes` | `15` | A running card without a heartbeat this long gets one `[stalled]` comment per run (`0` = off). Nothing is reclaimed. | Quota, fallback, stalled cards, pace |
+| `guard_minutes` | `30` | A `ready` card the dispatcher's respawn guard holds back this long gets one `[guarded]` comment per streak (`0` = off). The guard is never bypassed. | Guarded cards |
 
 Settings read from Hermes, not from this plugin: `plugins.hook_callback_timeout` (default 30 s) is the hook budget.
 
@@ -480,6 +481,10 @@ sweep, with the touch scan, at most every 30 s per board) and `pace_board`.
 - **Stalled.** `running` and `now - (last_heartbeat_at or started_at) >= stall_minutes`. The sweep reads it through `_core.running_cards`
   (covered by `doctor`'s `board read`). Hermes' own wedged-worker reclaim only runs after an hour of silence and for a live PID;
   this flag is for the case before that and for a dead host.
+- **Guarded.** `ready` and the newest events of the card are `respawn_guarded` (Hermes writes one per dispatcher tick, with the reason, for
+  example `active_pr`, `recent_success`). The streak starts at the first of them; any other event ends it, except `commented` (our own
+  notice). The sweep reads it through `_core.guarded_cards`. One comment and one `guard` row per streak once `now - since >= guard_minutes`;
+  the card leaving `ready` clears the memo. Report only: the guard protects against a duplicate PR, so a person decides.
 - **Pace.** `quota.plan` orders the `todo` and `ready` cards by priority, then age; running cards head the first chains; waiting cards fill
   the empty chains first and then go round-robin; a link that would close a cycle goes to another chain or the card is left alone. Links
   go through `kanban_db.link_tasks` (via `_core.link`). A second `pace` on a board refuses until `--undo` ran.

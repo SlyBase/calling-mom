@@ -123,6 +123,7 @@ DEFAULTS = {
     "mom": {"escalate_below": 4, "brief_short_from": 7},
     "mom_fallback": {"provider": "", "model": ""},  # answers when Mom's provider is limited or down (never replaces Olymp)
     "stall_minutes": 15,  # a running card without a heartbeat this long gets a [stalled] comment (0 = off)
+    "guard_minutes": 30,  # a ready card the dispatcher's respawn guard holds back this long gets a [guarded] comment (0 = off)
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
     "human_marker": "[human]",  # such cards are for a person: Mom never answers their questions
     "advisor": {  # one short question to the strong model at the point where the worker is stuck
@@ -545,6 +546,34 @@ def _record_stalls(board) -> None:
         _write_state(data)
 
 
+GUARD_HINTS = {"active_pr": " A PR URL in a comment of the last 24 hours holds the card back, even after the PR was merged. "
+                            "Write `PR #N` instead of the URL, or hand the card to another profile."}
+
+
+def _record_guards(board) -> None:
+    """Flag the ready cards the dispatcher's respawn guard holds back for ``guard_minutes``: one ``[guarded]`` comment and one
+    ``guard`` row per streak. The guard fires no block hook and no crash, so the card looks fine. Never bypasses the guard
+    (it protects against a second PR; a person decides)."""
+    minutes = settings()["guard_minutes"]
+    if minutes <= 0:
+        return
+    with _connect(board) as conn:
+        held = _core.guarded_cards(conn)
+    now, data = time.time(), _load_holds()
+    seen = dict(data.get("guarded") or {})
+    for task, since, reason in held:
+        if now - since < minutes * 60 or seen.get(task.id) == since:
+            continue
+        _card_comment(board, task.id, f"[guarded] the dispatcher has held this card back since {quota.clock(since)} UTC, "
+                      f"no worker starts (reason: {reason}).{GUARD_HINTS.get(reason, '')}")
+        _trace_row("guard", task=task.id, board=board, reason=reason, since=since, minutes=int((now - since) / 60))
+        seen[task.id] = since
+    seen = {k: v for k, v in seen.items() if k in {t.id for t, _, _ in held}}
+    if seen != (data.get("guarded") or {}):
+        data["guarded"] = seen
+        _write_state(data)
+
+
 def provider_health_lines() -> list:
     """The providers that are limited or down now, one line each (``status`` and ``doctor`` show them)."""
     return [f"{prov} {e['state']} until {quota.clock(e['until'])} UTC (profile {e['profile']})"
@@ -672,7 +701,7 @@ def sweep(board=None) -> list:
         logger.warning("calling-mom: sweep failed on board %s: %s", board, exc)
     if board and _opted_in(board) and time.time() - _last_scan.get(board, 0) >= TOUCH_EVERY_S:
         _last_scan[board] = time.time()
-        for scan in (_record_touches, _record_stalls):
+        for scan in (_record_touches, _record_stalls, _record_guards):
             try:
                 scan(board)
             except Exception as exc:  # counting must never break the sweep

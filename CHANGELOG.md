@@ -3,6 +3,11 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Guarded cards** (`__init__.py`, `_core.py`). A `ready` card that the dispatcher's respawn guard holds back for `calling_mom.guard_minutes` (default 30, 0 = off) gets one `[guarded]` comment per streak, with the reason (`active_pr`: a PR URL in a comment of the last 24 hours, even after the PR was merged) and, for `active_pr`, the workaround (`PR #N` instead of the URL, or hand the card to another profile). The guard fires no block hook and no crash, so such a card looked fine for hours. The sweep reads the `respawn_guarded` events through `_core.guarded_cards`; a `guard` row keeps the reason and the minutes. The plugin never bypasses the guard.
+
 ## [1.6.0] - 2026-11-07
 
 ### Added
