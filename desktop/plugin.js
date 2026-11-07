@@ -5,6 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
+const VERSION = '1.5.6' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
@@ -387,11 +388,15 @@ function WindowSelector({ value, onPick, ...props }) {
   return h('div', { ...props, style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
 }
 
+function copyTaskId(item) {
+  navigator.clipboard
+    .writeText(item.task_id)
+    .then(() => host.notify({ kind: 'success', message: `Copied ${item.task_id}` }))
+    .catch(error => host.notify({ kind: 'error', message: message(error) }))
+}
+
 function ActiveItem({ item }) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const chat = item.last_chat || null
-  const comment = item.last_comment
-  const noActivity = !chat && !comment
   const moves = MOVES[item.status] || []
   const card = h(
     'div',
@@ -408,20 +413,13 @@ function ActiveItem({ item }) {
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
-    noActivity
-      ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No activity yet — the worker is on it.')
-      : h(
+    item.last_chat
+      ? h(
           'div',
           { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          chat
-            ? chat
-            : h(
-                'span',
-                null,
-                h('span', { style: muted }, `${comment.author}: `),
-                comment.body
-              )
+          item.last_chat
         )
+      : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )
   return ContextMenu
     ? h(
@@ -432,6 +430,7 @@ function ActiveItem({ item }) {
           ContextMenuContent,
           null,
           h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
+          h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
           moves.length > 0 && h(ContextMenuSeparator),
           moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
         )
@@ -457,7 +456,7 @@ function Page() {
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
       h(WindowSelector, { value: s.hours, onPick: setHours })
     ),
-    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${windowLabel(s.hours)}.`),
+    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, h(VersionLine, { backend: s.summary && s.summary.version })),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
@@ -518,6 +517,30 @@ function Page() {
 
 // ---- the status-bar chip ---------------------------------------------------------------------------------------
 
+function newer(a, b) {
+  const [x, y] = [a, b].map(v => v.split('.').map(Number))
+  const i = x.findIndex((n, k) => n !== (y[k] || 0))
+
+  return i >= 0 && x[i] > (y[i] || 0)
+}
+
+function VersionLine({ backend }) {
+  if (!backend || backend === VERSION) {
+    return h('span', null, `v${VERSION}`)
+  }
+
+  const behind = newer(backend, VERSION)
+
+  return h(
+    'span',
+    null,
+    `Desktop v${VERSION} · Backend v${backend} `,
+    h('span', { style: { color: 'var(--ui-accent)' } }, behind
+      ? '— this app has an older Calling Mom: Capabilities → Plugins → Update.'
+      : '— the gateway has an older Calling Mom: run "hermes plugins update calling-mom" there.')
+  )
+}
+
 function Chip() {
   const s = useStore()
 
@@ -526,13 +549,17 @@ function Chip() {
   }
 
   const count = waiting(s).length
-  const text = s.error ? 'mom offline' : `mom ${s.summary.today.mom_calls}${count ? ` · ${count} for you` : ''}`
+  const text = s.error ? 'mom offline' : `${count} for you`
+
+  if (!s.error && !count) {
+    return null
+  }
 
   return h(
     'button',
     {
       type: 'button',
-      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: calls today and items waiting for you',
+      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: items waiting for you',
       onClick: () => host.navigate(PATH),
       style: { padding: '0 6px', fontSize: '0.6875rem', color: count ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)' }
     },

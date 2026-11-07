@@ -720,62 +720,15 @@ class CommandWiringTest(unittest.TestCase):
         self.assertIn("FAIL", s.text)
 
 
-class DesktopSyncTest(unittest.TestCase):
-    """desktop-sync: the Mac has no agent half, so reconcile has nothing to copy from —
-    `desktop_sync` pulls the desktop/plugin.js from the repo and writes it locally."""
+class DesktopHintTest(unittest.TestCase):
+    """Catalog rule 3 (no self-updating code): the plugin does not download its own Desktop half; the hint names Hermes' install path."""
 
-    def _run(self, tmp, fetch, tag=None):
-        dest = Path(tmp) / "desktop-plugins" / "calling-mom" / "plugin.js"
-        return cli.desktop_sync(dest, fetch, tag)
+    def test_the_hint_names_the_in_app_install_and_no_plugin_command(self):
+        self.assertIn("Capabilities", cli.DESKTOP_HINT)
+        self.assertNotIn("desktop-sync", cli.DESKTOP_HINT)
 
-    def test_latest_fetches_the_tag_then_the_source_and_writes_it(self):
-        calls = []
-        def fetch(tag):
-            calls.append(tag)
-            return "v1.5.4" if tag is None else "const plugin = '1.5.4'"
-        with tempfile.TemporaryDirectory() as tmp:
-            rc = self._run(tmp, fetch)
-            self.assertEqual(rc, 0)
-            self.assertEqual(calls, [None, "v1.5.4"])
-            dest = Path(tmp) / "desktop-plugins" / "calling-mom" / "plugin.js"
-            self.assertEqual(dest.read_text(), "const plugin = '1.5.4'")
-
-    def test_an_explicit_tag_is_used_without_a_latest_lookup(self):
-        calls = []
-        def fetch(tag):
-            calls.append(tag)
-            return "pinned"
-        with tempfile.TemporaryDirectory() as tmp:
-            rc = self._run(tmp, fetch, tag="v1.5.3")
-        self.assertEqual(rc, 0)
-        self.assertEqual(calls, ["v1.5.3"])
-
-    def test_a_fetch_failure_leaves_the_previous_file_intact(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "desktop-plugins" / "calling-mom" / "plugin.js"
-            dest.parent.mkdir(parents=True)
-            dest.write_text("old")
-            def broken(tag):
-                raise OSError("no network")
-            self.assertEqual(cli.desktop_sync(dest, broken), 1)
-            self.assertEqual(dest.read_text(), "old")
-            self.assertFalse(dest.with_suffix(".js.tmp").exists())
-
-    def test_the_write_is_atomic_no_tmp_remains_after_a_success(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            rc = self._run(tmp, lambda tag: "v1" if tag is None else "new")
-            self.assertEqual(rc, 0)
-            self.assertFalse((Path(tmp) / "desktop-plugins" / "calling-mom" / "plugin.js.tmp").exists())
-
-    def test_a_write_failure_returns_one(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            blocker = Path(tmp) / "blocker"
-            blocker.write_text("a file where a directory is needed")
-            # dest's parent is blocked by a file: mkdir fails with an OSError
-            self.assertEqual(cli.desktop_sync(Path(tmp) / "blocker" / "calling-mom" / "plugin.js", lambda tag: "v1"), 1)
-
-    def test_desktop_hint_points_at_desktop_sync(self):
-        self.assertIn("desktop-sync", cli.DESKTOP_HINT)
+    def test_there_is_no_desktop_sync_command(self):
+        self.assertFalse(hasattr(cli, "desktop_sync"))
 
 
 class AnswerSetupTest(unittest.TestCase):

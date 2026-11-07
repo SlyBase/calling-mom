@@ -4,7 +4,10 @@ Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanb
 POST /answer, which goes through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``).
 """
 import importlib.util
+import re
+import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -35,6 +38,11 @@ def mom():
     return _plugin
 
 
+def _version():
+    """The plugin version from plugin.yaml (no YAML parser in the gateway needed for one line)."""
+    return re.search(r"^version:\s*(\S+)", (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(), re.M).group(1)
+
+
 def _rows(since=0):
     """Log rows from ``since`` (epoch seconds) on; a broken line or a missing file is skipped."""
     return [r for r in mom().report.read(mom()._log_path()) if r.get("ts", 0) >= since]
@@ -56,7 +64,7 @@ def _titles():
 
 
 def _active():
-    """Running/ready cards on the opted-in boards, with their last comment (null for a card that has none), newest last-activity first."""
+    """Running/ready cards on the opted-in boards, with the worker's last chat message (null when there is none), newest last-activity first."""
     items = []
     for board in mom()._core.list_board_slugs():
         if mom()._opted_in(board):
@@ -64,31 +72,31 @@ def _active():
     return sorted(items, key=lambda i: -i.pop("_last_activity"))
 
 
-def _last_chat(board, task_id):
-    """The last worker line of the card's log (what the LLM last communicated), null when there is none.
-    ``Session:`` headers and the ``[kanban-worker-exit]`` trailer are not chat."""
+def _last_chat(board, task):
+    """The last assistant message of the card's worker session (what the LLM last said), null when there is none.
+    The session id is the ``Session:`` header of the card's worker log; the messages live in the worker profile's ``state.db``."""
     try:
-        text = (mom()._core.kb.worker_logs_dir(board) / f"{task_id}.log").read_text(encoding="utf-8")
-    except OSError:
+        header = (mom()._core.kb.worker_logs_dir(board) / f"{task.id}.log").read_text(encoding="utf-8").splitlines()[0]
+        if not header.startswith("Session:"):
+            return None
+        with closing(sqlite3.connect(f"file:{mom()._core.profile_home(task.assignee or 'default') / 'state.db'}?mode=ro", uri=True)) as db:
+            row = db.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 AND trim(content) != '' "
+                             "ORDER BY id DESC LIMIT 1", (header.removeprefix("Session:").strip(),)).fetchone()
+    except (OSError, IndexError, ValueError, sqlite3.Error):
         return None
-    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("Session:")]
-    if lines and lines[-1].startswith("[kanban-worker-exit]"):
-        lines.pop()
-    return lines[-1][:200] if lines else None
+    return row[0].strip()[:300] if row else None
 
 
 def _active_tasks(board):
-    """The running/ready cards of one board, each with its last comment and its last-activity stamp."""
+    """The running/ready cards of one board, each with the worker's last chat message; the last-activity stamp comes from the card and its comments."""
     with mom()._connect(board) as conn:
         out = []
         for t in mom().kb.list_tasks(conn):
             if t.status in ("running", "ready"):
                 comments = mom().kb.list_comments(conn, t.id)
-                last = comments[-1] if comments else None
                 out.append({
                     "board": board, "task_id": t.id, "title": t.title, "status": t.status,
-                    "last_comment": {"author": last.author, "body": (last.body or "")[:200], "created_at": last.created_at} if last else None,
-                    "last_chat": _last_chat(board, t.id),
+                    "last_chat": _last_chat(board, t),
                     "_last_activity": max([t.created_at or 0] + [c.created_at for c in comments])})
         return out
 
@@ -185,7 +193,7 @@ def needs_you():
 
 @router.get("/active")
 def active():
-    """The cards climbing right now: running/ready on the opted-in boards, with their last comment, newest last-activity first."""
+    """The cards climbing right now: running/ready on the opted-in boards, with the worker's last chat message, newest last-activity first."""
     return _active()
 
 
@@ -209,7 +217,7 @@ def summary(days: int = Query(7, ge=1, le=90), hours: int | None = Query(None, g
     rows = [r for r in rows if r.get("ts", 0) >= start and (end is None or r.get("ts", 0) < end)]
     out["today"] = {"mom_calls": mom().report.build(rows, since=now - now % DAY)["mom"]["calls"]}
     out["you"]["waiting"] = len(_needs_you())
-    return {**out, "recent": _recent(rows)}
+    return {**out, "recent": _recent(rows), "version": _version()}
 
 
 class Answer(BaseModel):
