@@ -35,8 +35,10 @@ class DashboardFixture(base.QuestionFixture):
         os.environ["HERMES_KANBAN_DB"] = str(Path(tempfile.mkdtemp()) / "kanban.db")
         base.kbc.init_db(Path(os.environ["HERMES_KANBAN_DB"]))
         super().setUp()
+        self.logdir = Path(tempfile.mkdtemp(prefix="calling-mom-logs-"))
         self._plugin, api._plugin = api._plugin, plugin
         self._slugs, plugin._core.list_board_slugs = plugin._core.list_board_slugs, lambda: ["t-board"]
+        self._logdir, plugin._core.kb.worker_logs_dir = plugin._core.kb.worker_logs_dir, lambda board=None: self.logdir
         app = FastAPI()
         app.include_router(api.router)
         self.client = TestClient(app)
@@ -44,6 +46,7 @@ class DashboardFixture(base.QuestionFixture):
     def tearDown(self):
         api._plugin = self._plugin
         plugin._core.list_board_slugs = self._slugs
+        plugin._core.kb.worker_logs_dir = self._logdir
         super().tearDown()
         os.environ["HERMES_KANBAN_DB"] = self._db
 
@@ -156,6 +159,25 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.assertEqual(self.get("/summary")["mom"]["calls"], 1)
         self.assertEqual(self.get("/summary", days=30)["mom"]["calls"], 2)
         self.assertEqual(self.get("/summary", days=30)["days"], 30)
+
+    def test_hours_takes_priority_over_days(self):
+        """Sub-day windows: hours=1..2160, the last n hours, passed as days = hours/24 to the report."""
+        self.put("advisor", ts=time.time() - 2 * 3600, task="t_a", category="error")   # 2 h old
+        self.put("advisor", ts=time.time() - 2 * 86400, task="t_a", category="error")  # 2 d old
+        # hours=4: the 2 h-old row is in, the 2 d-old one is out
+        out = self.get("/summary", hours=4)
+        self.assertEqual(out["mom"]["calls"], 1)
+        self.assertEqual(out["days"], 4 / 24)
+        # hours beats days: hours=1 leaves the 2 h-old row out even though days=30 would include it
+        self.assertEqual(self.get("/summary", hours=1, days=30)["mom"]["calls"], 0)
+        # a whole-day window: hours=24 is the 1 d bucket
+        self.assertEqual(self.get("/summary", hours=24)["mom"]["calls"], 1)
+        self.assertEqual(self.get("/summary", hours=24)["days"], 1.0)
+
+    def test_hours_must_be_between_1_and_2160(self):
+        for hours in (0, 2161, "x"):
+            with self.subTest(hours=hours):
+                self.assertEqual(self.client.get("/summary", params={"hours": hours}).status_code, 422)
 
     def test_today_starts_at_utc_midnight(self):
         midnight = int(time.time()) // 86400 * 86400
@@ -556,6 +578,36 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         plugin.DEFAULTS["answer"].update(boards=["somewhere-else"])
         plugin.DEFAULTS["advisor"].update(boards=[])
         self.assertEqual(self.get("/active"), [])
+
+    def write_log(self, task_id, text):
+        """The card's worker log, where the dispatcher writes the streamed output."""
+        path = self.logdir / f"{task_id}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def test_last_chat_is_the_last_worker_line_before_the_exit_marker(self):
+        tid = self.card()
+        self.set_status(tid, "running")
+        self.write_log(tid, "Session: local-abc\nfirst line\n\nlast line\n\n[kanban-worker-exit] rc=0\n")
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_chat"], "last line")
+
+    def test_last_chat_truncates_to_two_hundred_chars(self):
+        tid = self.card()
+        self.write_log(tid, "y" * 300 + "\n[kanban-worker-exit] rc=0\n")
+        (item,) = self.active(tid)
+        self.assertEqual(item["last_chat"], "y" * 200)
+
+    def test_a_log_of_session_headers_only_gives_a_null_last_chat(self):
+        tid = self.card()
+        self.write_log(tid, "Session: local-abc\n")
+        (item,) = self.active(tid)
+        self.assertIsNone(item["last_chat"])
+
+    def test_a_card_without_a_log_gives_a_null_last_chat(self):
+        tid = self.card()
+        (item,) = self.active(tid)
+        self.assertIsNone(item["last_chat"])
 
 
 class RecentIdentityTest(DashboardFixture, unittest.TestCase):

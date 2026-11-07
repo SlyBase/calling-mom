@@ -3,6 +3,15 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.5.5] - 2026-11-07
+
+### Added
+- **`hermes calling-mom desktop-sync`** (`cli.py`). The Desktop half of a machine that runs the app but not the gateway (the Mac) never reached it by a plugin install or update — the gateway's copy stays on the server and the app reads only its own disk, so the old manual `curl` stayed stale. `desktop-sync` pulls `desktop/plugin.js` from the repository (the latest release, or a pinned tag) and writes it atomically to `~/.hermes/desktop-plugins/calling-mom/plugin.js`; a failed download leaves the old file in place. No manual `curl` anymore. README and TECHNICAL.md point to the command instead of the curl.
+- **Test for the `hours` param of `GET /summary`** (`test_dashboard.py`): the sub-day branch (1..2160, priority over `days`, `days = hours / 24`) was exercised only by line coverage before; the branch is now covered by behaviour.
+
+### Changed
+- **Desktop: the Active cards show the worker's last chat line** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The second line now shows what the worker last said in its log (the last worker line, not `Session:` headers and not the `[kanban-worker-exit]` trailer) instead of its last comment; a card with neither shows "No activity yet — the worker is on it.". `GET /active` gains `last_chat` per card.
+
 ## [1.5.4] - 2026-11-07
 
 ### Added

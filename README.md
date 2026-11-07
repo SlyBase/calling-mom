@@ -217,16 +217,19 @@ is enabled, then run `hermes gateway restart` once.
 ### Desktop on another machine
 
 Does the app run on a different machine than the gateway (a Mac connected to a server, say)? Then it shows no page, no
-badges and no chip, although the plugin works on the server. The app loads Desktop plugins from **its own disk** only.
-On the machine that runs the app:
+badges and no chip, although the plugin works on the server. The app loads Desktop plugins from **its own disk** only,
+and an install or update of the plugin does not reach that disk — the gateway's copy stays on the server. On the machine
+that runs the app:
 
 ```bash
-mkdir -p ~/.hermes/desktop-plugins/calling-mom
-curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.5.4/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+hermes calling-mom desktop-sync
 ```
 
-Press **⌘K**, choose **Reload desktop plugins**, and switch Calling Mom on under **Capabilities -> Plugins**. Repeat the
-`curl` after a plugin update.
+This pulls the latest `desktop/plugin.js` from the repository and writes it to `~/.hermes/desktop-plugins/calling-mom/`.
+Pass a tag to pin a version: `hermes calling-mom desktop-sync v1.5.5`.
+
+Press **⌘K**, choose **Reload desktop plugins**, and switch Calling Mom on under **Capabilities -> Plugins**.
+Run `hermes calling-mom desktop-sync` again after each plugin update.
 
 ## Your money and your data
 

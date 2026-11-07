@@ -397,13 +397,15 @@ runs the app; the SDK calls them app-level: one root for every profile, gateway 
 backend routes above live in the gateway and work either way. On the machine that runs the app:
 
 ```bash
-mkdir -p ~/.hermes/desktop-plugins/calling-mom
-curl -fsSL https://raw.githubusercontent.com/SlyBase/calling-mom/v1.5.4/desktop/plugin.js -o ~/.hermes/desktop-plugins/calling-mom/plugin.js
+hermes calling-mom desktop-sync        # the latest release
+hermes calling-mom desktop-sync v1.5.5 # a pinned tag
 ```
 
-then **⌘K -> Reload desktop plugins**, and enable it under **Capabilities -> Plugins**. Card badges need Desktop
-0.22.6 or later. `hermes calling-mom setup` (last line) and `doctor` (an `INFO` line, never a failure) point to the
-README section "Desktop on another machine".
+This pulls `desktop/plugin.js` from the repository and writes it to `~/.hermes/desktop-plugins/calling-mom/plugin.js`
+(atomic: a failed download leaves the old file in place). Then **⌘K -> Reload desktop plugins**, and enable it under
+**Capabilities -> Plugins**. Card badges need Desktop 0.22.6 or later. `hermes calling-mom setup` (last line) and
+`doctor` (an `INFO` line, never a failure) point to the README section "Desktop on another machine". Run
+`desktop-sync` again after each plugin update.
 
 The Desktop half polls the three GET routes every 15 s (not while the window is hidden) and keeps "Keep blocked" in
 `ctx.storage`: it hides an item on this machine only, the card stays blocked and the backend is not told.

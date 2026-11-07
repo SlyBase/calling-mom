@@ -31,8 +31,10 @@ except ImportError:  # loaded by path (tests, plugin doctor): no package context
 
 MIN_HERMES = (0, 22, 0)
 LLM_KEY = "plugins.entries.calling-mom.llm."
-DESKTOP_HINT = ("Desktop app on another machine than the gateway? It needs its own copy of the Desktop half: "
-                "see \"Desktop on another machine\" in the README (https://github.com/SlyBase/calling-mom#desktop-on-another-machine).")
+DESKTOP_HINT = ("Desktop app on another machine than the gateway? Run `hermes calling-mom desktop-sync` on the "
+                "Mac to refresh its Desktop half (no manual curl needed). "
+                "See \"Desktop on another machine\" in the README (https://github.com/SlyBase/calling-mom#desktop-on-another-machine).")
+DESKTOP_REPO = "SlyBase/calling-mom"
 CRON_NAME = "calling-mom: sweep - escalate parked cards, push metrics"
 # Starting points, not promises: model ids change. `setup` lists what is really configured.
 PRESETS = {
@@ -634,6 +636,55 @@ def cmd_doctor(env) -> int:
     return exit_code(checks)
 
 
+def desktop_sync(dest, fetch, tag=None) -> int:
+    """Write the desktop half from the repo into ``dest`` (the local desktop-plugins folder).
+
+    ``fetch(tag) -> str`` returns the plugin.js source (the network seam, tested with a fake). ``tag``
+    is the release to read; ``None`` means the latest. The write is atomic: a failed fetch never
+    leaves a half-written plugin.js. Returns 0 on success, 1 on a fetch/write failure."""
+    try:
+        tag = tag or fetch(None)
+        source = fetch(tag)
+    except Exception as exc:  # the network seam raises; say what happened and leave the old file
+        print(f"desktop-sync failed: {str(exc)[:200]}")
+        return 1
+    dest = Path(dest)
+    tmp = dest.with_suffix(".js.tmp")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(source, encoding="utf-8")
+        tmp.replace(dest)
+    except OSError as exc:
+        print(f"desktop-sync failed: {exc}")
+        return 1
+    return 0
+
+
+def cmd_desktop_sync(env, tag=None) -> int:  # pragma: no cover - needs a live network + Hermes home
+    """Refresh the desktop half on this machine (the Mac): the gateway runs elsewhere, so the
+    reconcile has no agent half here to copy from. Pulls the plugin.js from the repo at the latest
+    release (or a named tag) and writes it to the local desktop-plugins folder."""
+    from hermes_constants import get_default_hermes_root
+    root = Path(get_default_hermes_root())
+    dest = root / "desktop-plugins" / "calling-mom" / "plugin.js"
+    import urllib.request
+    base = f"https://raw.githubusercontent.com/{DESKTOP_REPO}/{{tag}}/desktop/plugin.js"
+    latest = "https://api.github.com/repos/" + DESKTOP_REPO + "/releases/latest"
+
+    def fetch(tag=None):
+        if tag is None:
+            with urllib.request.urlopen(latest, timeout=20) as r:
+                import json as _json
+                return _json.loads(r.read())["tag_name"]
+        with urllib.request.urlopen(base.format(tag=tag), timeout=20) as r:
+            return r.read().decode("utf-8")
+    env.say(f"Refreshing {dest} (tag: {tag or 'latest'})")
+    rc = desktop_sync(dest, fetch, tag)
+    if rc == 0:
+        env.say("Done. Now press ⌘K → Reload desktop plugins in the Desktop app.")
+    return rc
+
+
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
 def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None, pace=None, health=None):  # pragma: no cover - needs a live Hermes
@@ -713,6 +764,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     p.add_argument("id", nargs="?", help="the precedent id (for forget)")
     sub.add_parser("status", help="show the effective setup and today's usage")
     sub.add_parser("doctor", help="check the setup and make one real call to each model")
+    ds = sub.add_parser("desktop-sync", help="refresh the desktop half on this machine (the Mac, no gateway here)")
+    ds.add_argument("tag", nargs="?", help="the release tag to pull (default: the latest release)")
     parser.set_defaults(cm_cmd=None)
 
 
@@ -731,4 +784,6 @@ def dispatch(args, spent, effective, log_path, core, answer=None, build_report=N
         return cmd_report(env, days=args.days, board=args.board, as_json=args.json, since=args.since, until=args.until)
     if cmd == "precedents":
         return cmd_precedents(env, args.action, args.id)
+    if cmd == "desktop-sync":
+        return cmd_desktop_sync(env, tag=getattr(args, "tag", None))
     return {"status": cmd_status, "doctor": cmd_doctor}[cmd](env)
