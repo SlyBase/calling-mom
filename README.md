@@ -76,6 +76,13 @@ hermes calling-mom setup     # pick Mom and Olymp from the providers you already
 hermes calling-mom doctor    # one real test call to each, tells you what is missing
 ```
 
+Calling Mom also ships a **desktop half**. The app loads desktop plugins from its own disk only, so if the desktop
+runs on a machine other than the gateway, install the plugin there too:
+
+```bash
+hermes plugins install SlyBase/calling-mom
+```
+
 Then watch every rung fire. The demo has a board of its own and a scratch folder with a **local** bare git remote. It never
 touches a real remote. At the `setup` prompt name the board `calling-mom-demo` and say yes to answers
 (or pass `--boards calling-mom-demo --answer`). Use a worker profile you can throw away.
