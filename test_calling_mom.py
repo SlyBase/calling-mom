@@ -739,6 +739,80 @@ class CompletionCheckTest(AdvisorTest):
         self.assertEqual(len(self.llm.calls), 4)
 
 
+class ContraArgumentTest(AdvisorFixture, unittest.TestCase):
+    """SMART 'Explore': a completion check and a review of a critical change first name the most plausible way the
+    claim is wrong. The line is working notes: it never reaches the card or the worker, the log keeps it."""
+
+    def setUp(self):
+        super().setUp()
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
+        plugin.DEFAULTS["categories"] = {"architecture": {"max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+        plugin._arch_seen.clear()
+
+    def seq(self, *texts):
+        self.llm = SeqLlm(texts)
+        plugin._ctx.llm = self.llm
+
+    def complete(self, summary="Fixed the parser, PR #1 merged."):
+        return plugin.on_pre_tool(tool_name="kanban_complete", args={"summary": summary})
+
+    def critical(self):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": "terraform apply"}, result="r", status="ok")
+
+    def system(self, signal):
+        import types
+        return plugin._build_messages(types.SimpleNamespace(title="t", body="b"), signal, [], "", 6000)[0]["content"]
+
+    def test_completion_and_critical_change_prompts_ask_for_the_counter_claim(self):
+        for signal in ("completion", "critical_change"):
+            with self.subTest(signal=signal):
+                self.assertIn("COUNTER: <", self.system(signal))
+
+    def test_the_other_prompts_stay_unchanged(self):
+        for signal in ("stuck", "watch_change", "second_opinion"):
+            with self.subTest(signal=signal):
+                self.assertNotIn("COUNTER", self.system(signal))
+
+    def test_the_completion_contract_stays_done_or_gap(self):
+        self.assertIn("exactly DONE, or 'GAP: '", self.system("completion"))
+
+    def test_a_gap_behind_the_counter_line_still_blocks_and_hides_the_counter(self):
+        self.seq("COUNTER: the PR may never have been opened\nGAP: no PR was opened.")
+        out = self.complete()
+        self.assertEqual(out["action"], "block")
+        self.assertIn("no PR was opened", out["message"])
+        self.assertNotIn("COUNTER", out["message"])
+
+    def test_done_behind_the_counter_line_lets_the_completion_through(self):
+        self.seq("COUNTER: tests may never have run\nDONE")
+        self.assertIsNone(self.complete())
+
+    def test_the_counter_line_is_not_posted_to_the_card_but_logged_redacted(self):
+        self.seq("COUNTER: the key ghp_" + "a" * 36 + " may have leaked\nNothing irreversible.")
+        out = self.critical()
+        self.assertIn("Nothing irreversible", out)
+        self.assertNotIn("COUNTER", out)
+        self.assertNotIn("COUNTER", advice_comments(self.tid)[0].body)
+        contra = log_rows("advisor")[0]["contra"]
+        self.assertIn("may have leaked", contra)
+        self.assertNotIn("a" * 36, contra)
+
+    def test_the_logged_counter_is_cut_to_160_characters(self):
+        self.seq("COUNTER: " + "x " * 200 + "\nFine.")
+        self.critical()
+        self.assertEqual(len(log_rows("advisor")[0]["contra"]), 160)
+
+    def test_a_missing_counter_changes_nothing(self):
+        self.seq("Fine.")
+        self.assertIn("Fine", self.critical())
+        self.assertNotIn("contra", log_rows("advisor")[0])
+
+    def test_the_mom_escalates_behind_the_counter_line(self):
+        self.seq("COUNTER: no rollback\nESCALATE: prod deploy without a fallback", "Olymp: keep the cron.")
+        self.assertIn("Olymp", self.critical())
+        self.assertEqual(len(self.llm.calls), 2)
+
+
 class NoActionTest(AdvisorTest):
     """Audit: the advisor invented a problem the worker had already solved, and echoed the card's guess."""
 

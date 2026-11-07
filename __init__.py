@@ -888,6 +888,12 @@ def _remember(key, tool, args, ok, text) -> None:
     )
 
 
+# Contrastive premise (SMART "Explore", arXiv:2611.08196v1): look for the way the claim is wrong BEFORE accepting it.
+# The line is working notes, taken off the reply like CONFIDENCE: the card and the worker see only the answer.
+_CONTRA = (" Start with one line 'COUNTER: <the most plausible way the claim is wrong, one sentence>' (a check that never "
+           "ran, a fix that is not in the delivered change, a summary that differs from what was done), test it against "
+           "the card and the steps, then give your answer on the lines after it.")
+
 _PROMPTS = {
     "stuck": "You advise a weaker coding agent that may be stuck. The card text can hold the author's guess "
              "about the cause: trust the last steps over that guess and never repeat a hypothesis the steps "
@@ -896,11 +902,11 @@ _PROMPTS = {
              "steps. Do not restate the task.",
     "critical_change": "You review a critical change made by a weaker coding agent. Answer in at most 100 words: "
                        "the biggest risk or irreversible aspect and what to double-check before going on. "
-                       "If it is fine, say so in one line. Do not restate the task.",
+                       "If it is fine, say so in one line. Do not restate the task." + _CONTRA,
     "completion": "You check whether a weaker coding agent delivered what its card asks. Compare the card "
                   "with the agent's completion summary. A requested deliverable (PR, merge, release, fix, report) "
                   "that is missing is a gap unless the summary proves it is not needed; a claim like 'not our bug' "
-                  "needs evidence. Answer exactly DONE, or 'GAP: ' plus what is missing in at most 60 words.",
+                  "needs evidence. Answer exactly DONE, or 'GAP: ' plus what is missing in at most 60 words." + _CONTRA,
     "watch_change": "You review a command a weaker coding agent ran on another machine (ssh, pct, qm, scp). "
                     "Answer in at most 80 words: only if it changes state or exposes data, name the risk and what to "
                     "double-check. A plain read-only command: answer exactly NO_ACTION. Do not restate the task.",
@@ -920,6 +926,16 @@ def _confidence(text) -> "tuple[str, int | None]":
     hits = list(_CONFIDENCE_LINE.finditer(text))
     value = int(hits[-1].group(1)) if hits and hits[-1].group(1) else 0
     return _CONFIDENCE_LINE.sub("", text).strip(), value if 1 <= value <= 10 else None
+
+
+_COUNTER_LINE = re.compile(r"(?im)^[ \t]*COUNTER[ \t]*:[ \t]*(.*)(?:\n|$)")
+
+
+def _counter(text) -> "tuple[str, str | None]":
+    """``(text without its COUNTER line, the counter-claim or None)``. Fail-open: no line, nothing changes."""
+    text = text or ""
+    hit = _COUNTER_LINE.search(text)
+    return _COUNTER_LINE.sub("", text).strip(), hit.group(1).strip() or None if hit else None
 
 
 _URL_CREDS = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", re.I)
@@ -1034,7 +1050,7 @@ def _advise(key, category, signal, note="") -> "str | None":
         is_olymp, confidence = False, None
         if gate:  # mom first, with the escalation instruction
             first, route = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
-            mom_text, confidence = _confidence(first.text)
+            mom_text, confidence = _confidence(_counter(first.text)[0])
             if mom_text.upper().startswith("ESCALATE") or (confidence is not None and confidence < cfg["mom"]["escalate_below"]):
                 _add_spend(first.usage.cost_usd or 0.0, (first.usage.input_tokens or 0) + (first.usage.output_tokens or 0))
                 route, is_olymp = {"model": olymp["model"], "provider": olymp["provider"]}, True
@@ -1043,7 +1059,8 @@ def _advise(key, category, signal, note="") -> "str | None":
                 res = first
         else:
             res, route = ask(route, msgs)
-        text, _ = _confidence(res.text)
+        text, contra = _counter(res.text)
+        text, _ = _confidence(text)
         if not text:
             return None
         cost = res.usage.cost_usd or 0.0
@@ -1062,7 +1079,8 @@ def _advise(key, category, signal, note="") -> "str | None":
                       f"{res.usage.input_tokens} in / {res.usage.output_tokens} out{price}\n{text}")
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                    provider=route["provider"], olymp=is_olymp, confidence=confidence,
-                   tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost)
+                   tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost,
+                   **({"contra": _core.redact_for_egress(contra)[:160]} if contra else {}))
         return f"[ADVISOR {res.model}] {text}"
     except _CoolingDown:
         return None

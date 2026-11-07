@@ -10,6 +10,7 @@ versioning: [SemVer](https://semver.org/).
 
 ### Changed
 - **A pre-flight HOLD must say what is not verified** (`__init__.py`). The prompt asks for one concrete sentence; a reason of fewer than 4 words ("too risky") is downgraded like an unparseable answer: the command runs, no hold is recorded (`allowed` / `no_rationale`), so fail-open and "a model never releases its own hold" stay as they are. The `hold` log row carries `rationale` (redacted, 160 characters, never the command); the card comment already shows it. After the refute filter of SMART (arXiv:2611.08196v1).
+- **Completion and critical-change reviews name a counter-claim first** (`__init__.py`). The `completion` and `critical_change` prompts ask for one first line, `COUNTER: <the most plausible way the claim is wrong>`, before the answer. The line is taken off the reply like `CONFIDENCE`: the `DONE` / `GAP:` / `ESCALATE:` contract, the card comment and the worker never see it; the `advisor` log row carries `contra` (redacted, 160 characters). No extra model call; a reply without the line changes nothing. On 5 recorded completion checks the verdict did not change (no measurable gain, see TECHNICAL.md). After the "Explore" stage of SMART (arXiv:2611.08196v1).
 
 ## [1.5.5] - 2026-11-07
 

@@ -245,6 +245,22 @@ New log rows: `verify` has `state` (`started`, `pass`, `fail`, `timeout`, `stale
 `advice_late` has `signal` and `ms`; `preflight` has `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`),
 `reason` (`timeout`, `down`, `parse`, `no_rationale`, `cap`, `allowance`, `local_only`) and `cmd_hash`. Metrics count only finished verify rows.
 
+## Counter-claim first
+
+The prompts of the completion check (`completion`) and of the review of a critical change (`critical_change`) ask for one
+first line, `COUNTER: <the most plausible way the claim is wrong>` (a check that never ran, a fix that is not in the
+delivered change, a summary that differs from what was done), then the normal answer after it ("Explore" stage of SMART,
+see References). No extra model call. `_counter` takes the line off the reply, like `_confidence`, so the output contract
+is unchanged: the card comment, the `GAP:` block message and the `ESCALATE:` check see only the answer. Fail-open: a reply
+without the line is handled as before. The `advisor` row carries `contra` (the counter-claim, redacted, 160 characters)
+when the model wrote one. The other prompts (`stuck`, `watch_change`, `second_opinion`) are unchanged.
+
+Measured on 5 recorded completion checks (3 `GAP`, 2 `DONE`), same model as recorded, one sample per arm, without the
+tool history of the run: the verdict was identical with and without the line in 5 of 5 (and equal to the recorded
+verdict); all 5 replies parsed. The line appeared in 5 of 5 replies with the new prompt. No false `GAP` on the two `DONE`
+cards, and no extra catch either: this set shows **no gain in verdicts**, only a logged reason and sharper `GAP` text on
+one card. Build a set with known wrong summaries before claiming more.
+
 ## Mom answers first
 
 `on_question` listens to `kanban_task_blocked` (not bounded by Hermes). It acts only when the worker itself blocked its
@@ -550,5 +566,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 - Vallurupalli, Ferraro (UMBC): *SMART: State-based Multi Agent Reasoning Traces for Verification-oriented Problem-Solving*,
   arXiv:2611.08196v1, <https://arxiv.org/abs/2611.08196v1>. We take the pattern, not the benchmark. Used for: every verdict of
-  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"). Nothing in it makes a card
+  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"); the completion check and the review of a critical change name the most plausible way the claim is wrong first (contrastive premise, see "Counter-claim first"). Nothing in it makes a card
   text leave the machine: the local model stays the default, the redaction (`redact_for_egress`) and `[local-only]` are unchanged.
