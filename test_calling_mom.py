@@ -2177,6 +2177,33 @@ class PreflightTest(AdvisorFixture, unittest.TestCase):
         self.assertIn("this deletes the remote branch", out["message"])
         self.assertIn("Instead:", out["message"])
 
+    def test_the_question_asks_for_the_assumption_that_is_not_verified(self):
+        self.run_cmd()
+        system = self.llm.calls[0]["messages"][0]["content"]
+        self.assertIn("what is not verified", system)
+        self.assertIn("too risky", system)  # named as the answer that is not enough
+
+    def test_the_hold_row_and_the_card_comment_carry_the_rationale(self):
+        self.hold_with()
+        self.run_cmd()
+        self.assertEqual(self.rows()[0]["rationale"], "it rewrites shared history")
+        self.assertIn("it rewrites shared history", " ".join(self.comments()))
+
+    def test_the_rationale_in_the_log_is_capped(self):
+        self.hold_with("HOLD: " + "the remote branch is unverified " * 20 + ". Instead: push a branch.")
+        self.run_cmd()
+        self.assertEqual(len(self.rows()[0]["rationale"]), 160)
+
+    def test_a_hold_without_a_concrete_rationale_is_downgraded_to_allowed(self):
+        for vague in ("HOLD: too risky. Instead: ask the owner first.", "HOLD: unsafe", "HOLD: . Instead: a branch"):
+            with self.subTest(vague=vague):
+                self.hold_with(vague)
+                self.assertIsNone(self.run_cmd())
+                self.assertEqual((self.rows()[-1]["verdict"], self.rows()[-1]["reason"]), ("allowed", "no_rationale"))
+                self.assertNotIn("rationale", self.rows()[-1])
+                self.assertIsNone(plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD)))
+        self.assertFalse(any(c.startswith("[pre-flight]") for c in self.comments()))
+
     # --- release ----------------------------------------------------------------------------------------
 
     def test_an_allowance_lets_the_held_command_run_once(self):

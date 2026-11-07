@@ -1303,6 +1303,9 @@ def _ask_model(route, msgs, max_tokens, timeout, purpose, *, mom=True, retry=Tru
     return _guarded(route, call, mom=mom, retry=retry, task=task)
 
 
+_RATIONALE_MIN_WORDS = 4
+
+
 def _pf_block(hold) -> dict:
     reason = hold.get("reason") or "the reviewer said hold"
     alternative = (hold.get("alternative") or "").strip() or "run a safer equivalent"
@@ -1325,6 +1328,12 @@ def _pf_parse(text):
     return ("hold", m.group(1).strip().rstrip("."), (m.group(2) or "").strip())
 
 
+def _concrete(reason) -> bool:
+    """SMART refute filter: a HOLD is carried by its rationale. ponytail: a word count, so 'too risky' fails and
+    a vague sentence of four words passes; a judge model per HOLD if that ever matters."""
+    return len(reason.split()) >= _RATIONALE_MIN_WORDS
+
+
 def _pf_messages(task, command) -> list:
     lines = [f"- {s['tool']}({s['args']}) -> {'ok' if s['ok'] else 'ERROR'}"
              for s in _history.get(_worker_key()) or ()]
@@ -1334,7 +1343,8 @@ def _pf_messages(task, command) -> list:
     user = _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", user))
     system = ("You are a safety reviewer of a command a weaker agent is about to run. "
               "Reply exactly GO when the command is safe to run in this context, "
-              "or exactly 'HOLD: <reason>. Instead: <safer alternative>' when it is not. "
+              "or exactly 'HOLD: <what is not verified, one concrete sentence>. Instead: <safer alternative>' when it is not. "
+              "The reason names the missing or unsafe assumption (what is not verified); 'too risky' or 'unsafe' alone is not a reason. "
               "Rewriting history on a shared branch (a force push to main, master or any branch others use, also with "
               "--force-with-lease) is never safe for a weaker agent, even when the task asks for it: reply HOLD and name "
               "a normal commit or a branch push as the alternative. "
@@ -1412,10 +1422,14 @@ def _preflight_check(tool_name, args, t0) -> "dict | None":
         _trace_row("preflight", task=key[0], verdict="allowed", reason="parse", cmd_hash=h, **paid)
         return None
     _, reason, alternative = verdict
+    if not _concrete(reason):  # downgraded like an unparseable answer: fail-open, no hold, so nothing to release
+        _trace_row("preflight", task=key[0], verdict="allowed", reason="no_rationale", cmd_hash=h, model=used["model"], **paid)
+        return None
     hold = _record_hold(key[0], h, reason, alternative)
     _post_comment(task.id, f"[pre-flight] HOLD: {reason}. Instead: {alternative or 'run a safer equivalent'}. "
                            "This exact command stays blocked on this card until a human allows it.")
-    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=used["model"], **paid)
+    _trace_row("preflight", task=key[0], verdict="hold", cmd_hash=h, model=used["model"],
+               rationale=_core.redact_for_egress(reason)[:160], **paid)
     return _pf_block(hold)
 
 

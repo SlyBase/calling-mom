@@ -44,7 +44,7 @@ and `task`, `board`, `run` where known). New or changed in 1.4:
 
 | kind | Fields | Written when |
 |---|---|---|
-| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `allowance`, `local_only`), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
+| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `no_rationale`, `allowance`, `local_only`), `rationale` (on `hold`: redacted, 160 characters), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
 | `question` | `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`, `ms`, `tokens_in`, `tokens_out`, `usd` | A worker's `needs_input` question was handled. |
 | `human_answer` | `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
 | `verify` | `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ok`, `fails`, `exit`, `ms` | The background `verify:` command changed state. |
@@ -235,10 +235,15 @@ value through `_core.hook_budget()` (1..600 s) and keeps every synchronous wait 
   answer or the per-card cap (`preflight.max_per_card`) lets the command run and the post-hoc review happens as before.
   A HOLD persists in the plugin state (task, normalized command hash) and blocks later runs of the card without a
   model call; only a human release removes it (WP3/WP4).
+- **A HOLD carries its rationale (refute filter).** The pre-flight prompt asks for `HOLD: <what is not verified, one concrete
+  sentence>. Instead: ...`. A reason shorter than 4 words ("too risky") is downgraded: the command runs, nothing is
+  recorded as a hold, the row says `allowed` / `no_rationale`. That is the fail-open path of an unparseable answer, so no
+  hold exists that a model could release (re-asking was dropped: one more call per vague answer, same result). The reason
+  shows in the card comment and, redacted and cut to 160 characters, as `rationale` in the `hold` row.
 
 New log rows: `verify` has `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ms` and `exit`;
 `advice_late` has `signal` and `ms`; `preflight` has `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`),
-`reason` (`timeout`, `down`, `parse`, `cap`, `allowance`, `local_only`) and `cmd_hash`. Metrics count only finished verify rows.
+`reason` (`timeout`, `down`, `parse`, `no_rationale`, `cap`, `allowance`, `local_only`) and `cmd_hash`. Metrics count only finished verify rows.
 
 ## Mom answers first
 
@@ -545,5 +550,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 - Vallurupalli, Ferraro (UMBC): *SMART: State-based Multi Agent Reasoning Traces for Verification-oriented Problem-Solving*,
   arXiv:2611.08196v1, <https://arxiv.org/abs/2611.08196v1>. We take the pattern, not the benchmark. Used for: every verdict of
-  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"). Nothing in it makes a card
+  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"). Nothing in it makes a card
   text leave the machine: the local model stays the default, the redaction (`redact_for_egress`) and `[local-only]` are unchanged.
