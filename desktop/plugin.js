@@ -388,6 +388,13 @@ function WindowSelector({ value, onPick, ...props }) {
   return h('div', { ...props, style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
 }
 
+function copyTaskId(item) {
+  navigator.clipboard
+    .writeText(item.task_id)
+    .then(() => host.notify({ kind: 'success', message: `Copied ${item.task_id}` }))
+    .catch(error => host.notify({ kind: 'error', message: message(error) }))
+}
+
 function ActiveItem({ item }) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
   const moves = MOVES[item.status] || []
@@ -423,6 +430,7 @@ function ActiveItem({ item }) {
           ContextMenuContent,
           null,
           h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
+          h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
           moves.length > 0 && h(ContextMenuSeparator),
           moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
         )
