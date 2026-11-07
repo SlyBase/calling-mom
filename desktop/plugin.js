@@ -389,9 +389,6 @@ function WindowSelector({ value, onPick, ...props }) {
 
 function ActiveItem({ item }) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const chat = item.last_chat || null
-  const comment = item.last_comment
-  const noActivity = !chat && !comment
   const moves = MOVES[item.status] || []
   const card = h(
     'div',
@@ -408,20 +405,13 @@ function ActiveItem({ item }) {
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
-    noActivity
-      ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No activity yet — the worker is on it.')
-      : h(
+    item.last_chat
+      ? h(
           'div',
           { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          chat
-            ? chat
-            : h(
-                'span',
-                null,
-                h('span', { style: muted }, `${comment.author}: `),
-                comment.body
-              )
+          item.last_chat
         )
+      : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )
   return ContextMenu
     ? h(

@@ -196,6 +196,7 @@ class HelpersTest(unittest.TestCase):
         core = load()
         self.assertIsInstance(core.load_config(), dict)
         self.assertIsInstance(core.profile_exists("no-such-profile-xyz"), bool)
+        self.assertEqual(core.profile_home("some-profile").name, "some-profile")
         self.assertIsInstance(core.list_providers({}), list)
         self.assertIsInstance(core.list_board_slugs(), list)
         self.assertTrue(core.hermes_version())

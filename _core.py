@@ -106,6 +106,12 @@ def profile_exists(name) -> bool:
         return False  # unknown profile: the caller skips the step that needs it
 
 
+def profile_home(name):
+    """The home directory of a Hermes profile: its ``state.db`` holds the sessions."""
+    from hermes_cli.profiles import get_profile_dir
+    return get_profile_dir(name)
+
+
 def list_providers(cfg) -> list:
     """Authenticated providers with their models, for the setup list. Empty: setup asks you to type the pair."""
     try:
