@@ -3,6 +3,14 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.5.4] - 2026-11-07
+
+### Added
+- **Desktop: Recent activity has its own time filter** (`desktop/plugin.js`). The section carries a selector with the same buckets as the header (`1 h`, `4 h`, `1 d`, `7 d`, `14 d`, `30 d`, `90 d`; default `1 d`, stored across reloads). It is independent of the header window: when the two differ, the page asks `GET /summary?hours=` a second time for the recent rows only. An empty window shows a hint and keeps the selector. No backend change.
+
+### Changed
+- **Desktop: the card name in Recent activity is left-aligned.** The title sits on its own line under the sentence with the board beside it, instead of being pushed to the right edge.
+
 ## [1.5.3] - 2026-11-07
 
 ### Added

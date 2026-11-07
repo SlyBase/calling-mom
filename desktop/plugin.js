@@ -17,7 +17,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24 }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recentHours: 24, recent: [] }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -37,14 +37,17 @@ async function refresh() {
 
   try {
     const hours = state.hours || 24
-    const [summary, needs, cards, active] = await Promise.all([
+    const recentHours = state.recentHours || 24
+    // Recent activity has its own window: ask again only when it differs from the header's.
+    const [summary, needs, cards, active, other] = await Promise.all([
       ctx.rest(`/summary?hours=${hours}`),
       ctx.rest('/needs-you'),
       ctx.rest('/cards'),
-      ctx.rest('/active')
+      ctx.rest('/active'),
+      recentHours === hours ? null : ctx.rest(`/summary?hours=${recentHours}`)
     ])
 
-    update({ loaded: true, error: null, summary, needs, cards, active })
+    update({ loaded: true, error: null, summary, needs, cards, active, recent: (other || summary).recent })
     paintBadges()
   } catch (error) {
     update({ loaded: true, error: message(error) })
@@ -54,6 +57,12 @@ async function refresh() {
 function setHours(hours) {
   ctx.storage.set('hours', hours)   // kept like `kept`, so the window survives reloads
   update({ hours })
+  refresh()
+}
+
+function setRecentHours(recentHours) {
+  ctx.storage.set('recentHours', recentHours)
+  update({ recentHours })
   refresh()
 }
 
@@ -364,19 +373,18 @@ function windowLabel(hours) {
   return w ? w.label : `${hours} h`
 }
 
-function WindowSelector() {
-  const s = useStore()
+function WindowSelector({ value, onPick, ...props }) {
   const button = w => h(
     Button,
     {
       key: w.hours,
       size: 'sm',
-      variant: w.hours === s.hours ? 'default' : 'ghost',
-      onClick: () => setHours(w.hours)
+      variant: w.hours === value ? 'default' : 'ghost',
+      onClick: () => onPick(w.hours)
     },
     w.label
   )
-  return h('div', { style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
+  return h('div', { ...props, style: { display: 'flex', gap: 4 } }, WINDOW.map(button))
 }
 
 function ActiveItem({ item }) {
@@ -439,7 +447,7 @@ function Page() {
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 } },
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
-      h(WindowSelector)
+      h(WindowSelector, { value: s.hours, onPick: setHours })
     ),
     h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${windowLabel(s.hours)}.`),
     s.error &&
@@ -465,35 +473,37 @@ function Page() {
           : s.active.map(item => h(ActiveItem, { key: item.task_id, item }))
       ),
     s.summary &&
-      s.summary.recent.length > 0 &&
       h(
         Section,
         { title: 'Recent activity', defaultOpen: false },
-        h(
-          'div',
-          { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-          ...s.summary.recent.map((row, i) =>
-            h(
+        h(WindowSelector, { value: s.recentHours, onPick: setRecentHours, 'data-recent-window': '' }),
+        s.recent.length === 0
+          ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, `No activity in the last ${windowLabel(s.recentHours)}.`)
+          : h(
               'div',
-              { key: i, style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0 10px', fontSize: '0.8125rem', alignItems: 'baseline' } },
-              h(
-                'div',
-                { style: { display: 'flex', gap: 8, alignItems: 'center', minWidth: '6rem' } },
-                h('span', { style: { width: 8, height: 8, borderRadius: '50%', backgroundColor: actionDot(row), flex: 'none' } }),
-                h('span', { style: { ...muted, fontSize: '0.6875rem' } }, age(Date.now() / 1000 - row.ts))
-              ),
-              h(
-                'div',
-                { style: { display: 'grid', gridTemplateColumns: '1fr auto', gap: '2px 12px' } },
-                h('div', { style: { whiteSpace: 'pre-wrap' } }, sentence(row)),
-                h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline' } },
-                  h('span', { style: { fontSize: '0.75rem' } }, row.title || row.task),
-                  h('span', { style: { ...muted, fontSize: '0.6875rem' } }, row.board || '')
+              { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              ...s.recent.map((row, i) =>
+                h(
+                  'div',
+                  { key: i, style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0 10px', fontSize: '0.8125rem', alignItems: 'baseline' } },
+                  h(
+                    'div',
+                    { style: { display: 'flex', gap: 8, alignItems: 'center', minWidth: '6rem' } },
+                    h('span', { style: { width: 8, height: 8, borderRadius: '50%', backgroundColor: actionDot(row), flex: 'none' } }),
+                    h('span', { style: { ...muted, fontSize: '0.6875rem' } }, age(Date.now() / 1000 - row.ts))
+                  ),
+                  h(
+                    'div',
+                    { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                    h('div', { style: { whiteSpace: 'pre-wrap' } }, sentence(row)),
+                    h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline' } },
+                      h('span', { style: { fontSize: '0.75rem' } }, row.title || row.task),
+                      h('span', { style: { ...muted, fontSize: '0.6875rem' } }, row.board || '')
+                    )
+                  )
                 )
               )
             )
-          )
-        )
       )
   )
 }
@@ -529,7 +539,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24) })
+    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24), recentHours: ctx.storage.get('recentHours', 24) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },
