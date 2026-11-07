@@ -5,9 +5,7 @@ POST /answer, which goes through the plugin's ``answer_card`` (the same door as 
 """
 import importlib.util
 import re
-import sqlite3
 import time
-from contextlib import closing
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -74,17 +72,15 @@ def _active():
 
 def _last_chat(board, task):
     """The last assistant message of the card's worker session (what the LLM last said), null when there is none.
-    The session id is the ``Session:`` header of the card's worker log; the messages live in the worker profile's ``state.db``."""
+    The session id is the ``Session:`` header of the card's worker log; Hermes' own session reader finds the message."""
     try:
         header = (mom()._core.kb.worker_logs_dir(board) / f"{task.id}.log").read_text(encoding="utf-8").splitlines()[0]
         if not header.startswith("Session:"):
             return None
-        with closing(sqlite3.connect(f"file:{mom()._core.profile_home(task.assignee or 'default') / 'state.db'}?mode=ro", uri=True)) as db:
-            row = db.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 AND trim(content) != '' "
-                             "ORDER BY id DESC LIMIT 1", (header.removeprefix("Session:").strip(),)).fetchone()
-    except (OSError, IndexError, ValueError, sqlite3.Error):
+        text = mom()._core.last_assistant_message(task.assignee or "default", header.removeprefix("Session:").strip())
+    except Exception:  # a display must never break the page: no log, no store, an unknown profile, a Hermes change
         return None
-    return row[0].strip()[:300] if row else None
+    return text[:300] if text else None
 
 
 def _active_tasks(board):

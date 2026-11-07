@@ -112,6 +112,22 @@ def profile_home(name):
     return get_profile_dir(name)
 
 
+def last_assistant_message(profile, session_id):
+    """The newest assistant message with text of a session's live tip, or None. Read-only through Hermes' own
+    SessionDB: it follows a compression split to the continuation and owns the schema. Raises when the store is unreadable."""
+    from hermes_state import SessionDB
+    db = SessionDB(profile_home(profile) / "state.db", read_only=True)
+    try:
+        tip = db.resolve_resume_session_id(session_id)
+        # ponytail: the newest 100 messages; a run of 100 tool-only turns shows "no message yet" until it speaks again
+        for m in reversed(db.get_messages(tip, limit=100, latest=True)):
+            if m.get("role") == "assistant" and (m.get("content") or "").strip():
+                return m["content"].strip()
+    finally:
+        db.close()
+    return None
+
+
 def list_providers(cfg) -> list:
     """Authenticated providers with their models, for the setup list. Empty: setup asks you to type the pair."""
     try:
