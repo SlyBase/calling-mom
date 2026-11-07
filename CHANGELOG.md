@@ -9,6 +9,10 @@ versioning: [SemVer](https://semver.org/).
 - **Desktop: the page shows the version under the title** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The tagline is gone; the line reads `v1.5.6`, or `Desktop v… · Backend v…` when the app's copy and the gateway differ, so a stale Desktop half is visible at once, with a note next to the version. `GET /summary` gains `version` (from `plugin.yaml`); a test keeps `plugin.js` and `plugin.yaml` equal.
 - **Desktop: right-click menu of an Active card has "Copy task id"** (`desktop/plugin.js`).
 
+### Security
+- **Disclosure of the session read** (`SECURITY.md`, `README.md`): the Active cards read the worker's last message from the profile's `state.db`; catalog rule 13 asks to list reads outside the plugin's own data.
+- **Install scan is `safe`** (`test_rules.py`): the test list spelled a recursive delete of the filesystem root literally, which the install scanner flags as `destructive_root_rm` (`caution`). A `caution` verdict holds an unattended Git update as "needs review", so `plugins.auto_apply` never moved the install. The command is now built from `RM`.
+
 ### Removed
 - **`hermes calling-mom desktop-sync`** (added in 1.5.5). A command that downloads and replaces the plugin's own Desktop file is a self-updater, which the Hermes plugin catalog forbids (admission rule 3), and it exists only where the plugin is installed, which a Mac without a gateway does not have. Install the Desktop half through **Capabilities -> Plugins -> Install** and update it with the plugin's Update button. `setup` and `doctor` name this path; README and TECHNICAL.md describe it.
 

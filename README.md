@@ -232,6 +232,7 @@ its title; when the app's copy and the gateway differ, a note next to it says so
 - **`[local-only]` on a card always wins**: nothing from that card is sent anywhere.
 - **What Mom sees:** the card text, the last tool steps and the signal. For a pre-flight check: the card title, the first 800 characters and the one command. For a question: the question, the card text and the last comments. **Secrets are blanked out first.** The log keeps hashes, never the command.
 - **Answers are a separate switch** (`calling_mom.answer`, off by default). Questions about secrets, money, legal matters, personal data or publishing never get an answer from Mom. Only a person can release a HOLD.
+- **The Desktop page shows the worker's last message** (read-only, from the worker profile's own session store, never sent anywhere). It is the one place Calling Mom reads message text; see [SECURITY.md](SECURITY.md).
 - **Other people on your board are counted, not read:** author ids, event kinds and times. Never comment text.
 - **Chat waits are a separate switch** (`calling_mom.count.chat_waits`, off by default): kind, seconds and outcome of a prompt, never the text.
 - **Olymp is limited by number of calls**, so a subscription never surprises you. Mom has a daily dollar and token cap.
