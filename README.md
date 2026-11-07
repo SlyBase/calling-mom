@@ -226,7 +226,7 @@ hermes calling-mom desktop-sync
 ```
 
 This pulls the latest `desktop/plugin.js` from the repository and writes it to `~/.hermes/desktop-plugins/calling-mom/`.
-Pass a tag to pin a version: `hermes calling-mom desktop-sync v1.5.5`.
+Pass a tag to pin a version: `hermes calling-mom desktop-sync v1.5.6`.
 
 Press **⌘K**, choose **Reload desktop plugins**, and switch Calling Mom on under **Capabilities -> Plugins**.
 Run `hermes calling-mom desktop-sync` again after each plugin update.

@@ -4,6 +4,7 @@ Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanb
 POST /answer, which goes through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``).
 """
 import importlib.util
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -35,6 +36,11 @@ def mom():
         _plugin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(_plugin)
     return _plugin
+
+
+def _version():
+    """The plugin version from plugin.yaml (no YAML parser in the gateway needed for one line)."""
+    return re.search(r"^version:\s*(\S+)", (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(), re.M).group(1)
 
 
 def _rows(since=0):
@@ -211,7 +217,7 @@ def summary(days: int = Query(7, ge=1, le=90), hours: int | None = Query(None, g
     rows = [r for r in rows if r.get("ts", 0) >= start and (end is None or r.get("ts", 0) < end)]
     out["today"] = {"mom_calls": mom().report.build(rows, since=now - now % DAY)["mom"]["calls"]}
     out["you"]["waiting"] = len(_needs_you())
-    return {**out, "recent": _recent(rows)}
+    return {**out, "recent": _recent(rows), "version": _version()}
 
 
 class Answer(BaseModel):

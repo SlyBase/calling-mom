@@ -3,9 +3,13 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.5.6] - 2026-11-07
+
+### Added
+- **Desktop: the page shows the version under the title** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The tagline is gone; the line reads `v1.5.6`, or `Desktop v… · Backend v…` when the app's copy and the gateway differ, so a stale Desktop half is visible at once. `GET /summary` gains `version` (from `plugin.yaml`); a test keeps `plugin.js` and `plugin.yaml` equal.
 
 ### Changed
+- **Desktop: the status-bar chip no longer shows the Mom call count** (`desktop/plugin.js`). It appears only for `N for you` (items waiting) or `mom offline`. `today.mom_calls` stays in `GET /summary` for older Desktop copies.
 - **Desktop: the Active cards show the worker's last session message, never a comment** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The worker log is written only when the worker exits, so a running card had no chat line and fell back to its last comment. `last_chat` now reads the last non-empty assistant message of the worker session (the `Session:` header of the card's log, the messages in the worker profile's `state.db`, read-only), up to 300 characters, shown in two lines. `GET /active` no longer returns `last_comment`; a card without a message shows "No messages yet — the worker is on it.".
 
 ## [1.5.5] - 2026-11-07

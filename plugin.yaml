@@ -1,7 +1,7 @@
 name: calling-mom
 label: Calling Mom
 kind: standalone
-version: 1.5.5
+version: 1.5.6
 requires_hermes: ">=0.22"
 manifest_version: 2
 description: >

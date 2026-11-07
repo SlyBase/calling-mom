@@ -8,6 +8,7 @@ a fake Mom. The route module is pointed at the same plugin instance, so a test s
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -179,6 +180,14 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         for hours in (0, 2161, "x"):
             with self.subTest(hours=hours):
                 self.assertEqual(self.client.get("/summary", params={"hours": hours}).status_code, 422)
+
+    def test_summary_carries_the_plugin_version(self):
+        self.assertEqual(self.get("/summary")["version"], re.search(r"^version:\s*(\S+)", (PLUGIN_DIR / "plugin.yaml").read_text(), re.M).group(1))
+
+    def test_the_desktop_half_carries_the_same_version_as_the_plugin(self):
+        """The page shows the version of plugin.js; a drift from plugin.yaml would hide which copy runs."""
+        js = (PLUGIN_DIR / "desktop" / "plugin.js").read_text()
+        self.assertEqual(re.search(r"^const VERSION = '([^']+)'", js, re.M).group(1), self.get("/summary")["version"])
 
     def test_today_starts_at_utc_midnight(self):
         midnight = int(time.time()) // 86400 * 86400

@@ -398,7 +398,7 @@ backend routes above live in the gateway and work either way. On the machine tha
 
 ```bash
 hermes calling-mom desktop-sync        # the latest release
-hermes calling-mom desktop-sync v1.5.5 # a pinned tag
+hermes calling-mom desktop-sync v1.5.6 # a pinned tag
 ```
 
 This pulls `desktop/plugin.js` from the repository and writes it to `~/.hermes/desktop-plugins/calling-mom/plugin.js`

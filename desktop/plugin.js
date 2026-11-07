@@ -5,6 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
+const VERSION = '1.5.6' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
@@ -447,7 +448,7 @@ function Page() {
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
       h(WindowSelector, { value: s.hours, onPick: setHours })
     ),
-    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, `Worker, then Mom, then Olymp, then you. Your attention is the most expensive model in the stack. Last ${windowLabel(s.hours)}.`),
+    h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, versionLine(s.summary && s.summary.version)),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
     !s.loaded && h('div', { style: muted }, 'Loading...'),
@@ -508,6 +509,10 @@ function Page() {
 
 // ---- the status-bar chip ---------------------------------------------------------------------------------------
 
+function versionLine(backend) {
+  return !backend || backend === VERSION ? `v${VERSION}` : `Desktop v${VERSION} · Backend v${backend}`
+}
+
 function Chip() {
   const s = useStore()
 
@@ -516,13 +521,17 @@ function Chip() {
   }
 
   const count = waiting(s).length
-  const text = s.error ? 'mom offline' : `mom ${s.summary.today.mom_calls}${count ? ` · ${count} for you` : ''}`
+  const text = s.error ? 'mom offline' : `${count} for you`
+
+  if (!s.error && !count) {
+    return null
+  }
 
   return h(
     'button',
     {
       type: 'button',
-      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: calls today and items waiting for you',
+      title: s.error ? 'The Calling Mom backend is not reachable' : 'Calling Mom: items waiting for you',
       onClick: () => host.navigate(PATH),
       style: { padding: '0 6px', fontSize: '0.6875rem', color: count ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)' }
     },
