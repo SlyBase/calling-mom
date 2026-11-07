@@ -37,6 +37,23 @@ def running_cards(conn) -> list:
     return kb.list_tasks(conn, status="running")
 
 
+def guarded_cards(conn) -> list:
+    """``[(task, since, reason)]``: the ready cards the dispatcher's respawn guard holds back (``respawn_guarded`` events, written
+    each tick). ``since`` is the first guard event of the current streak, ``reason`` the newest one's. Any other event ends the
+    streak, except ``commented`` (our own notice is one). Read only."""
+    out = []
+    for task in kb.list_tasks(conn, status="ready"):
+        streak = []
+        for e in kb.list_events(conn, task.id):
+            if e.kind == "respawn_guarded":
+                streak.append(e)
+            elif e.kind != "commented":
+                streak = []
+        if streak:
+            out.append((task, streak[0].created_at, (streak[-1].payload or {}).get("reason") or "unknown"))
+    return out
+
+
 def board_cards(conn) -> tuple:
     """``(tasks, links)`` of the connected board: its live cards and the ``(parent, child)`` pairs between them, read only."""
     tasks = kb.list_tasks(conn)

@@ -483,6 +483,104 @@ class StalledTest(StallFixture, unittest.TestCase):
         self.assertEqual(self.stalled(), [])
 
 
+class GuardFixture(QuotaFixture):
+    """A ready card the dispatcher holds back: ``respawn_guarded`` events, the way Hermes writes them each tick."""
+
+    def setUp(self):
+        super().setUp()
+        with_conn(lambda c: c.execute("UPDATE task_events SET created_at = created_at - 86400") and c.commit())   # the card is a day old
+
+    def event(self, kind, ago_min, reason="active_pr", tid=None):
+        def write(c):
+            with kb.write_txn(c):
+                kb._append_event(c, tid or self.tid, kind, {"reason": reason})
+                c.execute("UPDATE task_events SET created_at = ? WHERE id = last_insert_rowid()", (int(time.time()) - ago_min * 60,))
+        with_conn(write)
+
+    def guarded_for(self, minutes, ticks=3):
+        for i in range(ticks):
+            self.event("respawn_guarded", minutes - i)
+
+    def sweep(self):
+        plugin._last_scan.clear()
+        plugin.DEFAULTS["guard_minutes"] = self._minutes
+        return plugin.sweep(board=BOARD)
+
+    _minutes = 30
+
+    def guarded(self, tid=None):
+        return [c for c in self.comments(tid) if c.startswith("[guarded]")]
+
+
+class GuardedTest(GuardFixture, unittest.TestCase):
+    def test_forty_minutes_held_back_is_one_comment_and_one_row(self):
+        self.guarded_for(40)
+        self.sweep()
+        (body,) = self.guarded()
+        self.assertIn("reason: active_pr", body)
+        self.assertIn("PR #N", body)       # the workaround: no PR URL in a comment
+        (row,) = self.rows("guard")
+        self.assertEqual((row["task"], row["board"], row["reason"], row["minutes"]), (self.tid, BOARD, "active_pr", 40))
+        self.assertEqual(with_conn(lambda c: kb.get_task(c, self.tid)).status, "ready")      # the guard is never bypassed
+        self.assertEqual(with_conn(lambda c: kb.list_comments(c, self.tid))[-1].author, plugin.NOTICE_AUTHOR)
+
+    def test_a_reason_without_a_hint_still_names_the_reason(self):
+        for i in range(3):
+            self.event("respawn_guarded", 40 - i, reason="recent_success")
+        self.sweep()
+        (body,) = self.guarded()
+        self.assertIn("reason: recent_success", body)
+        self.assertNotIn("PR #N", body)
+
+    def test_ten_minutes_is_not_held_long_enough(self):
+        self.guarded_for(10)
+        self.sweep()
+        self.assertEqual(self.guarded(), [])
+
+    def test_a_second_sweep_adds_nothing_and_our_own_comment_does_not_end_the_streak(self):
+        self.guarded_for(40)
+        self.sweep()
+        self.sweep()
+        self.assertEqual(len(self.guarded()), 1)
+
+    def test_a_new_streak_may_comment_again(self):
+        self.guarded_for(90)
+        self.sweep()
+        self.event("claimed", 60)          # a worker got through: the streak is over
+        self.event("respawn_guarded", 45)
+        self.sweep()
+        self.assertEqual(len(self.guarded()), 2)
+
+    def test_a_card_that_left_ready_is_forgotten(self):
+        self.guarded_for(40)
+        self.sweep()
+        with_conn(lambda c: c.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (self.tid,)) and c.commit())
+        self.sweep()
+        self.assertEqual(self.state().get("guarded"), {})
+
+    def test_a_ready_card_with_no_guard_event_is_left_alone(self):
+        self.sweep()
+        self.assertEqual(self.guarded(), [])
+
+    def test_zero_switches_it_off(self):
+        self.guarded_for(600)
+        self._minutes = 0
+        self.sweep()
+        self.assertEqual(self.guarded(), [])
+
+    def test_a_board_that_did_not_opt_in_is_not_watched(self):
+        self.guarded_for(60)
+        plugin._last_scan.clear()
+        plugin.sweep(board="elsewhere")
+        self.assertEqual(self.guarded(), [])
+
+    def test_a_broken_board_read_does_not_break_the_sweep(self):
+        self.guarded_for(60)
+        with mock.patch.object(plugin._core, "guarded_cards", side_effect=RuntimeError("gone")):
+            self.sweep()
+        self.assertEqual(self.guarded(), [])
+
+
 class PaceFixture(QuotaFixture):
     def setUp(self):
         super().setUp()

@@ -190,6 +190,9 @@ it warns, it cannot undo. (The pre-flight HOLD is the part that stops a command 
 is kept). Mom and Olymp do not call a limited or dead provider: one `[advisor unavailable]` comment says until when.
 `setup --fallback provider/model` names a second model for Mom (never for Olymp). A card `running` without a heartbeat
 for `stall_minutes` (default 15) gets one `[stalled]` comment with the reclaim command. The plugin never reclaims by itself.
+A `ready` card the dispatcher's respawn guard holds back for `guard_minutes` (default 30) gets one `[guarded]` comment with the
+reason. The guard fires no block hook, so such a card otherwise sits quiet for hours (for example `active_pr`: a PR URL in a
+comment of the last 24 hours). The plugin never bypasses the guard.
 Models from *Advanced Delegation* can be reused: [how](docs/TECHNICAL.md#reuse-your-advanced-delegation-models).
 
 ## What a card looks like
@@ -262,6 +265,7 @@ calling_mom:
   answer: {enabled: true, boards: [my-board]}   # optional: Mom answers worker questions first
   mom_fallback: {provider: openrouter, model: deepseek/deepseek-v4.1-flash-1017}   # optional: answers while Mom's provider is limited or down
   stall_minutes: 15                             # optional: flag a running card without a heartbeat (0 = off)
+  guard_minutes: 30                             # optional: flag a ready card the respawn guard holds back (0 = off)
 ```
 
 Hermes only lets a plugin use a model you have granted (`plugins.entries.calling-mom.llm.*`); `setup` does that too.
