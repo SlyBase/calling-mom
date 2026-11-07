@@ -30,7 +30,7 @@ card stops every flow marked "remote" for that card.
 
 | Flow | Leaves the machine? | What is sent or stored | Switch |
 |---|---|---|---|
-| Advice on a stuck signal, a risky command, a completion check, `SECOND-OPINION:` | Remote: Mom, and Olymp after `ESCALATE` | Card text, the last tool steps, the signal. Redacted, cut to `advisor.context_chars`. | `advisor.enabled` + a board or `[advisor]` on the card |
+| Advice on a stuck signal, a risky command, a completion check, `SECOND-OPINION:` | Remote: Mom, and Olymp after `ESCALATE` | Card text, the last tool steps, the signal. Redacted, cut to `advisor.context_chars`. With `advisor.extract_state` a completion check and a critical-change review send the same text twice (extraction, then judge) and the judge also gets the extracted list; Mom only, never Olymp for the extraction. | `advisor.enabled` + a board or `[advisor]` on the card; `advisor.extract_state` (off) |
 | Late advice | No | The answer, written as a card comment and added to the worker's next tool result. | follows the advisor |
 | Pre-flight check | Remote: Mom | The card title and the first 800 characters of its text, the command, the last tool steps. The log keeps only the command hash. | `preflight.enabled` (needs the advisor) |
 | Pre-flight HOLD | No | A card comment with Mom's reason, and a stored block (task, command hash) in the plugin state. A person releases it. | follows pre-flight |

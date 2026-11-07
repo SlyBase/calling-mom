@@ -813,6 +813,125 @@ class ContraArgumentTest(AdvisorFixture, unittest.TestCase):
         self.assertEqual(len(self.llm.calls), 2)
 
 
+class StateExtractionTest(AdvisorFixture, unittest.TestCase):
+    """SMART 'Identify': before a completion check or a review of a critical change, one extra call lists the
+    stateful entities (CI, tests, PR, ...) with a few facts each; the judging call reads that state first."""
+
+    STATE = "- CI: green on the PR; 1111 tests; coverage 100%\n- PR: draft #33; stacked on #32"
+
+    def setUp(self):
+        super().setUp()
+        plugin.DEFAULTS["olymp"].update(model="m/olymp", provider="p/olymp")
+        plugin.DEFAULTS["categories"] = {"architecture": {"max": 2, "patterns": [], "commands": [r"terraform apply"]}}
+        plugin._arch_seen.clear()
+
+    def on(self, *texts):
+        plugin.DEFAULTS["advisor"]["extract_state"] = True
+        self.llm = SeqLlm(texts)
+        plugin._ctx.llm = self.llm
+
+    def complete(self):
+        return plugin.on_pre_tool(tool_name="kanban_complete", args={"summary": "Fixed the parser, PR #1 merged."})
+
+    def critical(self):
+        return plugin.on_tool_result(tool_name="terminal", args={"command": "terraform apply"}, result="r", status="ok")
+
+    def judged(self, i=1):
+        return self.llm.calls[i]["messages"][1]["content"]
+
+    def test_it_is_off_by_default(self):
+        self.llm = SeqLlm(["DONE"])
+        plugin._ctx.llm = self.llm
+        self.assertIsNone(self.complete())
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_a_completion_check_extracts_the_state_then_judges_on_it(self):
+        self.on(self.STATE, "GAP: no merge.")
+        self.assertEqual(self.complete()["action"], "block")
+        self.assertEqual(len(self.llm.calls), 2)
+        self.assertEqual(self.llm.calls[0]["messages"][0]["content"], plugin._STATE_ASK)
+        self.assertIn("Fixed the parser", self.llm.calls[0]["messages"][1]["content"])  # sees the same context
+        self.assertIn("completion", self.llm.calls[1]["messages"][0]["content"].lower())
+        self.assertTrue(self.judged().startswith("Extracted state"))
+        self.assertIn("- CI: green on the PR", self.judged())
+        self.assertIn("Fixed the parser", self.judged())  # the raw context stays
+
+    def test_a_critical_change_review_extracts_the_state_too(self):
+        self.on(self.STATE, "Fine.")
+        self.assertIn("Fine", self.critical())
+        self.assertEqual(len(self.llm.calls), 2)
+        self.assertIn("- PR: draft #33", self.judged())
+
+    def test_a_stuck_signal_costs_no_extra_call(self):
+        self.on("Root cause: X.")
+        self.stuck(3)
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_a_reply_without_entity_lines_falls_back_to_the_raw_context(self):
+        self.on("I cannot tell.", "DONE")
+        self.assertIsNone(self.complete())
+        self.assertEqual(len(self.llm.calls), 2)
+        self.assertNotIn("Extracted state", self.judged())
+
+    def test_an_empty_reply_falls_back_to_the_raw_context(self):
+        self.on("", "DONE")
+        self.assertIsNone(self.complete())
+        self.assertNotIn("Extracted state", self.judged())
+
+    def test_at_most_five_entities_of_300_characters_reach_the_judge(self):
+        self.on("\n".join(f"- e{i}: " + "x" * 400 for i in range(7)), "DONE")
+        self.complete()
+        lines = [ln for ln in self.judged().splitlines() if ln.startswith("- e")]
+        self.assertEqual([ln[:4] for ln in lines], [f"- e{i}" for i in range(5)])
+        self.assertTrue(all(len(ln) <= 300 for ln in lines))
+
+    def test_the_extracted_state_is_redacted_before_it_goes_on(self):
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        self.on(f"- deploy: key {token} in the log", "DONE")
+        self.complete()
+        self.assertNotIn(token, self.judged())
+
+    def test_the_extraction_counts_against_the_daily_caps_and_adds_no_comment(self):
+        self.on(self.STATE, "GAP: x")
+        self.complete()
+        self.assertEqual(plugin._spent_today()["tokens"], 2 * 550)
+        self.assertEqual(len(advice_comments(self.tid)), 1)
+
+    def test_the_log_row_carries_the_tokens_of_the_extraction(self):
+        self.on(self.STATE, "GAP: x")
+        self.complete()
+        self.assertEqual(log_rows("advisor")[0]["state_tokens"], 550)
+
+    def test_the_extraction_runs_on_mom_never_on_olymp(self):
+        self.on(self.STATE, "ESCALATE: prod deploy without a fallback", "Olymp: keep the cron.")
+        self.critical()
+        self.assertEqual(len(self.llm.calls), 3)
+        self.assertEqual(self.llm.calls[0]["model"], plugin.DEFAULTS["model"])
+        self.assertEqual(self.llm.calls[2]["model"], "m/olymp")
+        self.assertIn("- CI: green", self.judged(2))  # olymp judges on the state as well
+
+    def test_a_failed_extraction_call_is_reported_once_and_the_dead_model_is_not_asked_again(self):
+        plugin.DEFAULTS["advisor"]["extract_state"] = True
+        self.llm = FakeLlm(boom=True)
+        plugin._ctx.llm = self.llm
+        self.assertIsNone(self.complete())
+        self.assertEqual(len(self.llm.calls), 1)  # the judge would hit the same dead model: no second call
+        self.assertTrue(advice_comments(self.tid)[0].body.startswith("[advisor unavailable]"))
+
+    def test_a_local_only_card_sends_nothing(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="[local-only] secret infra", assignee="worker"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        self.on(self.STATE, "GAP: x")
+        self.assertIsNone(self.complete())
+        self.assertEqual(self.llm.calls, [])
+
+    def test_a_card_that_did_not_opt_in_sends_nothing(self):
+        plugin.DEFAULTS["advisor"]["boards"] = []
+        self.on(self.STATE, "GAP: x")
+        self.assertIsNone(self.complete())
+        self.assertEqual(self.llm.calls, [])
+
+
 class NoActionTest(AdvisorTest):
     """Audit: the advisor invented a problem the worker had already solved, and echoed the card's guess."""
 

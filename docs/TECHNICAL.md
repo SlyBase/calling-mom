@@ -117,7 +117,7 @@ plugins:
 | `marker` | `[crit]` | Pin the card to the mom model. |
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. (The dashboard field `completion_contract: local-only` is a different thing: the board default.) |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
-| `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only). |
+| `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only), `extract_state false` (see "State first"). |
 | `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
 | `answer.*` | disabled, `boards []`, `max_per_card 2` | Mom answers a worker's `needs_input` question before it reaches you (see "Mom answers first"). `setup` asks. Model calls use `advisor.timeout_s`, `advisor.max_output_tokens`, `advisor.context_chars` and the daily caps of the advisor. |
 | `answer.precedents` | `true` | Keep a person's answers to `[for you]` briefs as text and show Mom up to three (see "Precedents"). Meaningful only where `answer` is on. |
@@ -260,6 +260,48 @@ tool history of the run: the verdict was identical with and without the line in 
 verdict); all 5 replies parsed. The line appeared in 5 of 5 replies with the new prompt. No false `GAP` on the two `DONE`
 cards, and no extra catch either: this set shows **no gain in verdicts**, only a logged reason and sharper `GAP` text on
 one card. Build a set with known wrong summaries before claiming more.
+
+## State first
+
+With `advisor.extract_state: true` a completion check and a review of a critical change make one extra call before the
+judging call ("Identify" stage of SMART, see References). The call gets the same redacted context as the judge, with the
+prompt `_STATE_ASK`: list at most 5 stateful things the claim depends on (CI, tests, PR, DB schema, API, deploy), one line
+each, 3 to 5 facts per line, `unknown` for a fact the text does not give. `_state` keeps the first 5 lines that start with
+`-` (300 characters each, redacted again) and the judge reads them as an `Extracted state` block above the raw context,
+which stays. Stuck signals, `watch_change` and `second_opinion` never extract: they would pay a call for a short answer.
+`[crit]` and `[review]` cards reach the feature through these two checks (the review of a critical change, the completion).
+
+- **Same rules as the judge.** The call runs inside `_advise`, after the opt-in and `[local-only]` checks, so a card that
+  may not leave the machine sends nothing. It uses Mom's route (or the category override), never Olymp: when Mom then
+  escalates, Olymp reads the same state. Its tokens and cost go to the daily caps; it writes no comment, so the per-card
+  budgets (one completion check per run, `max` of `architecture`) are unchanged. The `advisor` row carries `state_tokens`.
+- **Fail-open for the content.** A reply without an entity line (empty, prose, garbled) is dropped and the judge reads the
+  raw context as before. A model-call error is NOT swallowed: the judge goes to the same model and would fail the same
+  way, so the provider is called and reported once (`[advisor unavailable]`), not twice.
+- **Off by default.** It adds a call and its latency to a check that already runs close to the hook deadline
+  (`_advise_soon` waits at most `min(8 s, 0.25 x budget)`; a late verdict still reaches the card and the worker).
+
+Measured on the same 5 recorded completion checks as "Counter-claim first" (3 `GAP`, 2 `DONE`), `claude-sonnet-5-5` as recorded,
+one sample per arm, no tool history, thinking off; the arms are the raw context (A) and extraction + judge (B). Input
+tokens are estimated from the prompt text (characters / 4: the CLI used to call the model adds a variable cache overhead),
+output tokens and wall time are as reported, the CLI start-up is part of the time:
+
+| | A: raw | B: state first | B / A |
+|---|---|---|---|
+| input tokens, 5 cards | ~3 700 | ~8 100 | 2.2x |
+| output tokens, 5 cards | 4 400 | 8 500 (of that 4 700 extraction) | 1.9x |
+| wall time, 5 cards | 48 s | 90 s (of that 45 s extraction) | 1.9x |
+| verdict = A | | 5 of 5 | |
+| verdict = recorded verdict | 2 of 5 | 2 of 5 | |
+
+**No gain in verdicts, about twice the cost.** Both arms gave the same verdict on 5 of 5 cards and matched the recorded
+verdict on 2 of 5 (run without the tool history: 1 of 3 gaps caught, 1 of 2 `DONE` kept, in both arms). The verdict line is read from the
+reply's last `DONE` / `GAP` line here, as the harness model writes prose first; the two arms are read the same way. In an
+earlier pass of the same set (output cap 700, two replies cut off) one card flipped between the arms (A `DONE`, B `GAP`,
+recorded `GAP`) and gave `DONE` in both arms in the final pass: one sample per arm cannot tell noise from signal. The extra
+call also doubles the latency of a check whose synchronous wait is 8 s (`_advise_soon`): a `GAP` then reaches the card late
+instead of blocking the first `kanban_complete`. That is why `extract_state` is off by default. Test it on a set with known
+wrong summaries and a tool history before turning it on.
 
 ## Mom answers first
 
@@ -566,5 +608,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 - Vallurupalli, Ferraro (UMBC): *SMART: State-based Multi Agent Reasoning Traces for Verification-oriented Problem-Solving*,
   arXiv:2611.08196v1, <https://arxiv.org/abs/2611.08196v1>. We take the pattern, not the benchmark. Used for: every verdict of
-  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"); the completion check and the review of a critical change name the most plausible way the claim is wrong first (contrastive premise, see "Counter-claim first"). Nothing in it makes a card
+  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"); the completion check and the review of a critical change name the most plausible way the claim is wrong first (contrastive premise, see "Counter-claim first"); with `advisor.extract_state` those two checks first extract 3-5 stateful entities with their facts and judge on that state ("Identify", see "State first"). Nothing in it makes a card
   text leave the machine: the local model stays the default, the redaction (`redact_for_egress`) and `[local-only]` are unchanged.

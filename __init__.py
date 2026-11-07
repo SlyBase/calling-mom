@@ -129,6 +129,9 @@ DEFAULTS = {
         "enabled": False,  # master switch; even when on, nothing is sent unless a board or card opts in:
         "boards": [],  # board slugs that opt in ("*" = all); a card with `marker` in title/body opts in itself
         "marker": "[advisor]",
+        # SMART "Identify": a completion check and a review of a critical change get one extra call first that lists the
+        # stateful entities (CI, tests, PR, ...) with a few facts each; the judge reads that state. Off: it costs a call.
+        "extract_state": False,
         "max_consults_per_card": 3, "max_output_tokens": 700,
         "context_chars": 6000, "daily_usd_cap": 2.0, "daily_token_cap": 200000, "timeout_s": 40,
     },
@@ -938,6 +941,21 @@ def _counter(text) -> "tuple[str, str | None]":
     return _COUNTER_LINE.sub("", text).strip(), hit.group(1).strip() or None if hit else None
 
 
+# State first (SMART "Identify", arXiv:2611.08196v1): the checks whose verdict depends on what is true of CI, tests, a PR or a
+# deploy read those facts as a short list instead of finding them in the raw card text. Stuck signals do not: they cost a call.
+_STATE_SIGNALS = {"completion", "critical_change"}
+_STATE_ENTITIES, _STATE_LINE = 5, 300
+_STATE_ASK = ("From the card, the steps and the details, list the stateful things the claim or change depends on (CI, tests, "
+              "PR, DB schema, API, deploy, ...): at most 5, one line each, '- <entity>: <fact>; <fact>; <fact>' with 3 to 5 "
+              "short facts that the text states. Write 'unknown' for a fact the text does not give. No advice, no verdict.")
+
+
+def _state(text) -> "str | None":
+    """The first 5 entity lines (``- ...``) of an extraction reply, redacted; None when it has none (fail-open: raw context)."""
+    lines = [ln.strip()[:_STATE_LINE] for ln in (text or "").splitlines() if ln.strip().startswith("-")]
+    return _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", "\n".join(lines[:_STATE_ENTITIES]))) or None
+
+
 _URL_CREDS = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", re.I)
 _GATE = ("\n\nYou are the FIRST reviewer; a far more expensive reviewer exists. Give your normal answer. "
          "Only for a rare high-stakes case that you cannot judge as safe from this context (irreversible "
@@ -1047,6 +1065,13 @@ def _advise(key, category, signal, note="") -> "str | None":
             return _guarded(r, call, mom=mom, task=task.id)
 
         msgs = _build_messages(task, signal, _history.get(key), note, adv["context_chars"], latest_comment, prev_runs)
+        state_tokens = 0
+        if adv["extract_state"] and signal in _STATE_SIGNALS:  # one extra call on mom's route, same context, same caps
+            ex, _ = ask(route, [{"role": "system", "content": _STATE_ASK}, msgs[1]])
+            state_tokens = (ex.usage.input_tokens or 0) + (ex.usage.output_tokens or 0)
+            _add_spend(ex.usage.cost_usd or 0.0, state_tokens)
+            if state := _state(ex.text):  # no entity lines: the judge reads the raw context as before
+                msgs[1] = {**msgs[1], "content": f"Extracted state (facts from the card and the steps):\n{state}\n\n{msgs[1]['content']}"}
         is_olymp, confidence = False, None
         if gate:  # mom first, with the escalation instruction
             first, route = ask(route, [{**msgs[0], "content": msgs[0]["content"] + _GATE}, *msgs[1:]])
@@ -1071,7 +1096,8 @@ def _advise(key, category, signal, note="") -> "str | None":
         if text.upper().startswith("NO_ACTION"):  # nothing to say: no comment, no interruption
             _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                        provider=route["provider"], olymp=is_olymp, confidence=confidence,
-                       tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True)
+                       tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost, noop=True,
+                       **({"state_tokens": state_tokens} if state_tokens else {}))
             return None
         price = f", ${cost:.4f}" if cost else ""  # some providers report no cost: tokens are the truth
         _post_comment(task.id, f"[{category}/{signal}] run {key[1] or '?'} · {res.model} "
@@ -1080,6 +1106,7 @@ def _advise(key, category, signal, note="") -> "str | None":
         _trace_row("advisor", task=task.id, category=category, signal=signal, model=res.model,
                    provider=route["provider"], olymp=is_olymp, confidence=confidence,
                    tokens_in=res.usage.input_tokens, tokens_out=res.usage.output_tokens, usd=cost,
+                   **({"state_tokens": state_tokens} if state_tokens else {}),
                    **({"contra": _core.redact_for_egress(contra)[:160]} if contra else {}))
         return f"[ADVISOR {res.model}] {text}"
     except _CoolingDown:
