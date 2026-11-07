@@ -64,6 +64,19 @@ def _active():
     return sorted(items, key=lambda i: -i.pop("_last_activity"))
 
 
+def _last_chat(board, task_id):
+    """The last worker line of the card's log (what the LLM last communicated), null when there is none.
+    ``Session:`` headers and the ``[kanban-worker-exit]`` trailer are not chat."""
+    try:
+        text = (mom()._core.kb.worker_logs_dir(board) / f"{task_id}.log").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("Session:")]
+    if lines and lines[-1].startswith("[kanban-worker-exit]"):
+        lines.pop()
+    return lines[-1][:200] if lines else None
+
+
 def _active_tasks(board):
     """The running/ready cards of one board, each with its last comment and its last-activity stamp."""
     with mom()._connect(board) as conn:
@@ -75,6 +88,7 @@ def _active_tasks(board):
                 out.append({
                     "board": board, "task_id": t.id, "title": t.title, "status": t.status,
                     "last_comment": {"author": last.author, "body": (last.body or "")[:200], "created_at": last.created_at} if last else None,
+                    "last_chat": _last_chat(board, t.id),
                     "_last_activity": max([t.created_at or 0] + [c.created_at for c in comments])})
         return out
 

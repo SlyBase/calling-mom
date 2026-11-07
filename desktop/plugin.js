@@ -389,7 +389,9 @@ function WindowSelector({ value, onPick, ...props }) {
 
 function ActiveItem({ item }) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const noComment = !item.last_comment
+  const chat = item.last_chat || null
+  const comment = item.last_comment
+  const noActivity = !chat && !comment
   const moves = MOVES[item.status] || []
   const card = h(
     'div',
@@ -406,13 +408,19 @@ function ActiveItem({ item }) {
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
-    noComment
-      ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No comment yet — the worker is on it.')
+    noActivity
+      ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No activity yet — the worker is on it.')
       : h(
           'div',
           { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          h('span', { style: muted }, `${item.last_comment.author}: `),
-          item.last_comment.body
+          chat
+            ? chat
+            : h(
+                'span',
+                null,
+                h('span', { style: muted }, `${comment.author}: `),
+                comment.body
+              )
         )
   )
   return ContextMenu
