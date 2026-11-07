@@ -574,3 +574,93 @@ class RecentIdentityTest(DashboardFixture, unittest.TestCase):
                      {"board": "t-board", "task_id": self.tid, "accept": "maybe"}):
             with self.subTest(body=body):
                 self.assertEqual(self.client.post("/answer", json=body).status_code, 422)
+
+
+class MoveTest(DashboardFixture, unittest.TestCase):
+    """POST /move: one bucket move, via the status's transition verb (never a raw write)."""
+
+    def set_status(self, tid, status):
+        with_conn(lambda c: c.execute("UPDATE tasks SET status = ? WHERE id = ? AND claim_lock IS NULL", (status, tid)).connection.commit())
+
+    def move(self, tid, to, board="t-board"):
+        res = self.client.post("/move", json={"board": board, "task_id": tid, "to": to})
+        return res
+
+    def test_a_ready_card_moves_to_blocked_via_block_task(self):
+        tid = self.card()
+        self.assertEqual(self.move(tid, "blocked").status_code, 200)
+        self.assertEqual(self.status(tid), "blocked")
+
+    def test_a_ready_card_moves_to_archived_via_archive_task(self):
+        tid = self.card()
+        self.assertEqual(self.move(tid, "archived").status_code, 200)
+        self.assertEqual(self.status(tid), "archived")
+
+    def test_a_todo_card_moves_to_ready_via_promote_task(self):
+        tid = self.card()
+        self.set_status(tid, "todo")
+        self.assertEqual(self.move(tid, "ready").status_code, 200)
+        self.assertEqual(self.status(tid), "ready")
+
+    def test_a_blocked_card_unblocks_via_unblock_task(self):
+        tid = self.card()
+        self.set_status(tid, "blocked")
+        self.assertEqual(self.move(tid, "unblocked").status_code, 200)
+        self.assertNotEqual(self.status(tid), "blocked")
+
+    def test_a_done_card_moves_to_archived_via_archive_task(self):
+        tid = self.card()
+        self.set_status(tid, "done")
+        self.assertEqual(self.move(tid, "archived").status_code, 200)
+        self.assertEqual(self.status(tid), "archived")
+
+    def test_a_running_card_moves_to_review_via_request_review(self):
+        tid = self.card()
+        self.set_status(tid, "running")
+        self.assertEqual(self.move(tid, "review").status_code, 200)
+        self.assertEqual(self.status(tid), "review")
+
+    def test_a_running_card_moves_to_done_via_complete_task(self):
+        tid = self.card()
+        self.set_status(tid, "running")
+        self.assertEqual(self.move(tid, "done").status_code, 200)
+        self.assertEqual(self.status(tid), "done")
+
+    def test_an_invalid_move_is_a_409(self):
+        tid = self.card()
+        # ready -> running has no public transition
+        res = self.move(tid, "running")
+        self.assertEqual(res.status_code, 409)
+        self.assertTrue(res.json()["detail"])
+
+    def test_an_unknown_target_is_a_409(self):
+        tid = self.card()
+        res = self.move(tid, "nowhere")
+        self.assertEqual(res.status_code, 409)
+        self.assertTrue(res.json()["detail"])
+
+    def test_a_board_that_does_not_exist_is_a_404(self):
+        tid = self.card()
+        res = self.move(tid, "blocked", board="no-such-board")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.json()["detail"], "no board 'no-such-board'")
+
+    def test_a_card_that_does_not_exist_is_a_404(self):
+        res = self.move("t_missing", "blocked")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.json()["detail"], "no card 't_missing'")
+
+    def test_the_body_must_have_the_right_types(self):
+        for body in ({"task_id": "t_x"}, {"board": "t-board"}, {"board": "t-board", "task_id": "t_x"},
+                     {"board": "t-board", "task_id": "t_x", "to": 5}):
+            with self.subTest(body=body):
+                self.assertEqual(self.client.post("/move", json=body).status_code, 422)
+
+    def test_a_complete_refused_by_an_open_parent_is_a_409(self):
+        parent = self.card(title="the parent")
+        child = self.card()
+        with_conn(lambda c: kb.link_tasks(c, parent, child))
+        self.set_status(child, "ready")
+        res = self.move(child, "done")
+        self.assertEqual(res.status_code, 409)
+        self.assertTrue(res.json()["detail"])

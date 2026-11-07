@@ -54,6 +54,30 @@ function setDays(days) {
   refresh()
 }
 
+// The card's board door: the Kanban page opens its own drawer, and the drawer has no URL
+// door a plugin can park on, so a card opens there, not here.
+function openCard(item) {
+  host.navigate('/kanban')
+}
+
+function moveCard(item, to) {
+  ctx.rest('/move', { method: 'POST', body: { board: item.board, task_id: item.task_id, to } })
+    .then(() => refresh())
+    .catch(error => host.notify({ kind: 'error', message: message(error) }))
+}
+
+// The card's bucket moves, per its current status: the same verbs as the Kanban board's menu,
+// only the ones a public transition can do (ready→todo stays in the board's drag).
+const MOVES = {
+  ready: [['blocked', 'To blocked'], ['archived', 'Archive']],
+  todo: [['ready', 'To ready']],
+  running: [['blocked', 'Block'], ['done', 'Complete'], ['review', 'To review'], ['archived', 'Archive']],
+  blocked: [['unblocked', 'Unblock'], ['archived', 'Archive']],
+  review: [['done', 'Complete'], ['archived', 'Archive']],
+  done: [['archived', 'Archive']],
+  triage: [['archived', 'Archive']]
+}
+
 // ---- card badges (Hermes Desktop 0.22.6 and later; an older app loads the page without them) ------------------
 
 const BADGES = {
@@ -98,11 +122,10 @@ function age(seconds) {
     return 'just now'
   }
 
-  if (seconds < 3600) {
-    return `${Math.round(seconds / 60)} min`
-  }
+  const h = seconds / 3600
+  const d = seconds / 86400
 
-  return seconds < 86400 ? `${Math.round(seconds / 3600)} h` : `${Math.round(seconds / 86400)} d`
+  return h < 0.5 ? `${Math.round(seconds / 60)} min` : h < 36 ? `${Math.round(h)} h` : `${Math.round(d)} d`
 }
 
 const BRIEF_LINE = /^(Question|Options|Recommendation|If nobody answers):\s*(.*)$/
@@ -119,6 +142,29 @@ function briefRows(text) {
 
 const PREFLIGHT = { go: 'Pre-flight: Mom said go', hold: 'Pre-flight HOLD on a risky command', held_again: 'A held command was tried again' }
 const VERIFY = { pass: 'verify passed', fail: 'verify failed', timeout: 'verify timed out' }
+
+// The action of a recent row, colored by what it did: the dot says it at a glance,
+// the sentence stays the text.
+function actionDot(row) {
+  const { kind, detail } = row
+  if (kind === 'verify') {
+    return detail === 'pass' ? 'var(--ui-accent-green, #22c55e)' : 'var(--ui-text-destructive, #ef4444)'
+  }
+
+  if (kind === 'preflight') {
+    return detail === 'go' ? 'var(--ui-accent-green, #22c55e)' : detail === 'hold' ? 'var(--ui-accent-amber, #f59e0b)' : muted.color
+  }
+
+  if (kind === 'question') {
+    return detail === 'answered' ? 'var(--ui-accent-violet, #8b5cf6)' : 'var(--ui-text-secondary)'
+  }
+
+  if (kind === 'advisor') {
+    return 'var(--ui-accent, #3b82f6)'
+  }
+
+  return kind === 'human_answer' ? 'var(--ui-text-secondary)' : 'var(--ui-accent-amber, #f59e0b)'
+}
 
 function sentence(row) {
   const who = row.by === 'olymp' ? 'Olymp' : 'Mom'
@@ -326,10 +372,12 @@ function WindowSelector() {
 }
 
 function ActiveItem({ item }) {
+  const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
   const noComment = !item.last_comment
-  return h(
+  const moves = MOVES[item.status] || []
+  const card = h(
     'div',
-    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6 } },
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6, cursor: 'pointer' }, onClick: () => openCard(item) },
     h(
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' } },
@@ -340,17 +388,31 @@ function ActiveItem({ item }) {
         h(Badge, { variant: item.status === 'running' ? 'warn' : 'default' }, item.status),
         h('span', { style: muted }, item.board)
       ),
-      h('div', { style: { ...muted, fontSize: '0.6875rem', fontFamily: 'var(--font-mono, monospace)' } }, item.task_id)
+      h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
     noComment
       ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No comment yet — the worker is on it.')
       : h(
           'div',
-          { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap' } },
+          { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
           h('span', { style: muted }, `${item.last_comment.author}: `),
           item.last_comment.body
         )
   )
+  return ContextMenu
+    ? h(
+        ContextMenu,
+        null,
+        h(ContextMenuTrigger, { asChild: true }, card),
+        h(
+          ContextMenuContent,
+          null,
+          h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
+          moves.length > 0 && h(ContextMenuSeparator),
+          moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
+        )
+      )
+    : card
 }
 
 function Page() {
@@ -401,18 +463,28 @@ function Page() {
         { title: 'Recent activity', defaultOpen: false },
         h(
           'div',
-          { style: { display: 'grid', gridTemplateColumns: 'max-content 1fr max-content', gap: '4px 16px', fontSize: '0.8125rem' } },
-          ...s.summary.recent.flatMap((row, i) => [
-            h('div', { key: `${i}-t`, style: muted }, sdk.relativeTime ? sdk.relativeTime(row.ts * 1000) : age(Date.now() / 1000 - row.ts)),
-            h('div', { key: `${i}-s` }, sentence(row)),
+          { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          ...s.summary.recent.map((row, i) =>
             h(
               'div',
-              { key: `${i}-i`, style: { display: 'flex', gap: 8, alignItems: 'baseline', justifyContent: 'flex-end' } },
-              h('span', row.title && row.board ? { fontWeight: 600 } : muted, row.title || row.task),
-              row.title && row.board ? h('span', { style: muted }, row.board) : null,
-              h('span', { style: { ...muted, fontSize: '0.6875rem', fontFamily: 'var(--font-mono, monospace)' } }, row.task || '')
+              { key: i, style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0 10px', fontSize: '0.8125rem', alignItems: 'baseline' } },
+              h(
+                'div',
+                { style: { display: 'flex', gap: 8, alignItems: 'center', minWidth: '6rem' } },
+                h('span', { style: { width: 8, height: 8, borderRadius: '50%', backgroundColor: actionDot(row), flex: 'none' } }),
+                h('span', { style: { ...muted, fontSize: '0.6875rem' } }, sdk.relativeTime ? sdk.relativeTime(row.ts * 1000) : age(Date.now() / 1000 - row.ts))
+              ),
+              h(
+                'div',
+                { style: { display: 'grid', gridTemplateColumns: '1fr auto', gap: '2px 12px' } },
+                h('div', { style: { whiteSpace: 'pre-wrap' } }, sentence(row)),
+                h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline' } },
+                  h('span', { style: { fontSize: '0.75rem' } }, row.title || row.task),
+                  h('span', { style: { ...muted, fontSize: '0.6875rem' } }, row.board || '')
+                )
+              )
             )
-          ])
+          )
         )
       )
   )

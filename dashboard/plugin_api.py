@@ -201,6 +201,55 @@ class Answer(BaseModel):
     allow_once: bool = False
 
 
+class Move(BaseModel):
+    board: str
+    task_id: str
+    to: str
+
+
+# Where a card of each status may go, and the verb that gets it there: each one is a real
+# ``kanban_db`` transition, so a move never bypasses the dependency gate (the ready re-check,
+# the review gate, the live-claim fence). ``to`` outside this map is a 409, and the current
+# status must be a source the transition fires from (the verb's own guard re-checks).
+_MOVE_SOURCES = {
+    "ready": {"todo", "blocked"},
+    "blocked": {"running", "ready"},
+    "review": {"running", "ready"},
+    "done": {"running", "ready", "blocked", "review"},
+    "unblocked": {"blocked"},
+    "archived": {"triage", "todo", "ready", "running", "blocked", "review", "done"},
+}
+
+
+def _move_verbs(conn, task_id):
+    kb = mom().kb
+    return {
+        "ready": lambda: kb.promote_task(conn, task_id, actor="calling-mom")[0],
+        "blocked": lambda: kb.block_task(conn, task_id, reason="moved from the Calling Mom page", kind="needs_input"),
+        "review": lambda: kb.request_review(conn, task_id, force=True),
+        "done": lambda: kb.complete_task(conn, task_id, result="completed from the Calling Mom page", force=True),
+        "unblocked": lambda: kb.unblock_task(conn, task_id),
+        "archived": lambda: kb.archive_task(conn, task_id),
+    }
+
+
+@router.post("/move")
+def move(body: Move):
+    """A card click in the context menu: one bucket move, via the status's transition verb."""
+    if body.board not in mom()._core.list_board_slugs():
+        raise HTTPException(404, f"no board {body.board!r}")
+    with mom()._connect(body.board) as conn:
+        task = mom().kb.get_task(conn, body.task_id)
+        if task is None:
+            raise HTTPException(404, f"no card {body.task_id!r}")
+        verb = _move_verbs(conn, body.task_id)
+        if task.status not in _MOVE_SOURCES.get(body.to, ()):
+            raise HTTPException(409, f"cannot move {task.status!r} to {body.to!r}")
+        if not verb[body.to]():
+            raise HTTPException(409, f"cannot move {task.status!r} to {body.to!r}")
+        return {"ok": True, "status": mom().kb.get_task(conn, body.task_id).status}
+
+
 @router.post("/answer")
 def answer(body: Answer):
     """A person's click: ``answer_card`` with ``by="desktop"``. The board must exist, so a name is never turned into a path."""
