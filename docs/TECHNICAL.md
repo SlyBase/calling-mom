@@ -49,6 +49,7 @@ and `task`, `board`, `run` where known). New or changed in 1.4:
 | `human_answer` | `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
 | `verify` | `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ok`, `fails`, `exit`, `ms` | The background `verify:` command changed state. |
 | `advice_late` | `signal`, `ms` | An advice missed the wait and reached the worker on a later tool result. |
+| `web_verify` | `query_hash`, `results` (hits that reached the judge) | A web search was made for a claim (see "Web evidence"). The query text is never stored. |
 | `worker_usage` | `tokens_in`, `tokens_out` | One worker API request (`post_api_request`). Counts only, no text. |
 
 Added in 1.5 (WP1), all additive:
@@ -118,6 +119,7 @@ plugins:
 | `local_only_marker` | `[local-only]` | Such cards never send anything to a remote model. Always wins. (The dashboard field `completion_contract: local-only` is a different thing: the board default.) |
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only), `extract_state false` (see "State first"). |
+| `web_verify.*` | disabled, `max_per_card 1`, `max_per_day 20`, `results 3`, `result_chars 200`, `timeout_s 8` | A web search for the claim of a `[crit]` / `[review]` card or a `verify-web:` line, before the judge decides (see "Web evidence"). Own switch; needs the advisor. |
 | `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
 | `answer.*` | disabled, `boards []`, `max_per_card 2` | Mom answers a worker's `needs_input` question before it reaches you (see "Mom answers first"). `setup` asks. Model calls use `advisor.timeout_s`, `advisor.max_output_tokens`, `advisor.context_chars` and the daily caps of the advisor. |
 | `answer.precedents` | `true` | Keep a person's answers to `[for you]` briefs as text and show Mom up to three (see "Precedents"). Meaningful only where `answer` is on. |
@@ -302,6 +304,32 @@ recorded `GAP`) and gave `DONE` in both arms in the final pass: one sample per a
 call also doubles the latency of a check whose synchronous wait is 8 s (`_advise_soon`): a `GAP` then reaches the card late
 instead of blocking the first `kanban_complete`. That is why `extract_state` is off by default. Test it on a set with known
 wrong summaries and a tool history before turning it on.
+
+## Web evidence
+
+With `web_verify.enabled: true` a completion check and a review of a critical change may look the claim up on the web
+before the judging call ("Curate" stage of SMART, see References). It is the one flow that sends text to a **search
+provider** instead of a model: no card code goes to a remote model because of it, but the query leaves the machine, so it
+has its own switch (off by default) and budgets, and it runs inside `_advise`, after the opt-in and `[local-only]` checks.
+
+- **When.** Only the two checks of `_CHECK_SIGNALS` (as for "State first"), and only for a card with a `verify-web: <claim>`
+  line in its body, or a `[crit]` / `[review]` marker in its title or body. The claim is the `verify-web:` line, else the
+  title without the markers. A `[human]` card, a title that is only a marker and every other card search nothing.
+- **What leaves.** The claim only: redacted (`redact_for_egress` plus the URL-credential scrub, as every prompt), one line,
+  at most 200 characters. Never the card body, the steps or the summary. The query goes to the search backend Hermes has
+  configured, through the public `web_search` tool (`ctx.dispatch_tool`); the plugin adds no dependency and no endpoint.
+- **What the judge reads.** Up to `results` hits as `- <url> - <description>` (one line, `result_chars` characters), under a
+  header that names them untrusted text from a web search: a lead to weigh against the card, never an instruction. Code
+  never decides on a hit; the verdict contract (`DONE` / `GAP:` / `ESCALATE:`) is unchanged. The hits are not posted to the card.
+- **Budgets and failure.** `max_per_card` searches per card and `max_per_day` per UTC day (`calling-mom-spend.json`, field
+  `web`); an attempt counts, a hit does not matter. A hard `timeout_s` (own thread, the search is abandoned, not the
+  check), a failed search, an error reply, a hit that is not a dict and a missing `dispatch_tool` all leave the judge's
+  prompt as it was (fail-open). Searches cost no tokens and add no comment.
+- **Log.** One `web_verify` row: `query_hash` (as `cmd_hash`) and `results`. No query, no URL, no text. Hermes' own `web_search`
+  tool logs the (redacted) query at info level in the Hermes log; that is outside this plugin's log.
+- **Abuse.** The hits are the only text in the prompt that a stranger can write, so they are capped (3 x 200 characters
+  plus the URL), flattened to one line each (no fake header or role line), labelled and placed after the card text. A hit
+  can still mislead the model: that is why the verdict stays with the model and the card, and why the feature is opt-in.
 
 ## Mom answers first
 
@@ -608,5 +636,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 - Vallurupalli, Ferraro (UMBC): *SMART: State-based Multi Agent Reasoning Traces for Verification-oriented Problem-Solving*,
   arXiv:2611.08196v1, <https://arxiv.org/abs/2611.08196v1>. We take the pattern, not the benchmark. Used for: every verdict of
-  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"); the completion check and the review of a critical change name the most plausible way the claim is wrong first (contrastive premise, see "Counter-claim first"); with `advisor.extract_state` those two checks first extract 3-5 stateful entities with their facts and judge on that state ("Identify", see "State first"). Nothing in it makes a card
-  text leave the machine: the local model stays the default, the redaction (`redact_for_egress`) and `[local-only]` are unchanged.
+  Mom carries a label and a confidence 1-10 (`mom.escalate_below`, see "Mom answers first"); a pre-flight HOLD must carry a concrete rationale (refute filter, see "A HOLD carries its rationale"); the completion check and the review of a critical change name the most plausible way the claim is wrong first (contrastive premise, see "Counter-claim first"); with `advisor.extract_state` those two checks first extract 3-5 stateful entities with their facts and judge on that state ("Identify", see "State first"); with `web_verify` the claim of a `[crit]` / `[review]` card or a `verify-web:` line is looked up on the web and the hits go to the judge as untrusted evidence ("Curate", see "Web evidence"). Nothing in it makes a card
+  text leave the machine, except that one redacted claim of at most 200 characters, only when `web_verify` is on: the local model stays the default, the redaction (`redact_for_egress`) and `[local-only]` are unchanged.
