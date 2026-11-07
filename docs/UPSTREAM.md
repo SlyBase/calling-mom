@@ -1,6 +1,6 @@
 # Requests to Hermes
 
-Five things calling-mom 1.5 works around because Hermes has no public seam for them. Each section says what is missing,
+Six things calling-mom 1.5 works around because Hermes has no public seam for them. Each section says what is missing,
 what calling-mom does today, which file and function would use the seam, and what the seam would remove. They are drafts
 for an upstream issue each; Timon files them. Every private import stays in `_core.py` (`test_core.OneDoorTest`), so a
 seam replaces code in one place.
@@ -84,3 +84,19 @@ settle.
 
 **Removes.** Most `[stalled]` comments. On start, a dispatcher would release the claims whose `claim_lock` names a host or
 process that is gone (`on_kanban_worker_stale_claim` exists as an observer; the missing part is the release itself).
+
+## 6. A public read of a session's last message
+
+**Missing.** A plugin cannot ask "what did this session last say?" without opening Hermes' session store. The REST route
+`GET /api/sessions/{id}/messages` needs the user's login, which a plugin's backend route does not hold, and the SDK offers
+session rows with a preview of the first user message only.
+
+**Today.** `_core.py` `last_assistant_message` opens `hermes_state.SessionDB` read-only for the worker profile, follows the
+compression split with `resolve_resume_session_id` and returns the newest assistant message with text. The Desktop page
+shows it on every Active card (`dashboard/plugin_api.py` `_last_chat`). It is a private import and a read outside the
+plugin's own data, so it is disclosed in `SECURITY.md` (catalog rule 13).
+
+**Would use it.** `_core.py` `last_assistant_message` only.
+
+**Removes.** The `hermes_state` import and the `profile_home` helper. A `ctx.sessions.last_message(session_id, profile=None,
+role="assistant")` returning `{text, at}` or `None`, with the same profile scoping as `host.requestProfile`, would be enough.

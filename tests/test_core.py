@@ -4,6 +4,7 @@ import builtins
 import importlib.util
 import logging
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -189,6 +190,46 @@ class HookBudgetTest(unittest.TestCase):
             with self.subTest(junk=junk):
                 self.assertEqual(self.budget({"hook_callback_timeout": junk}), 30)
         self.assertEqual(self.budget("not a dict"), 30)
+
+
+class SessionMessageTest(unittest.TestCase):
+    """last_assistant_message reads through Hermes' own SessionDB (read-only), so the schema and the compression chain are Hermes' business."""
+
+    def setUp(self):
+        from hermes_state import SessionDB
+        self.home = Path(tempfile.mkdtemp(prefix="calling-mom-sessions-"))
+        self.db = SessionDB(self.home / "state.db")
+        self.addCleanup(self.db.close)
+        self.core = load()
+        self.core.profile_home = lambda name: self.home
+
+    def last(self, sid="s1"):
+        return self.core.last_assistant_message("any", sid)
+
+    def test_it_is_the_last_assistant_message_with_text(self):
+        self.db.create_session("s1", "cli")
+        for role, text in (("user", "task"), ("assistant", "first"), ("assistant", "  last words \n"), ("assistant", ""), ("tool", "{}")):
+            self.db.append_message("s1", role, text)
+        self.assertEqual(self.last(), "last words")
+
+    def test_a_session_without_assistant_text_gives_none(self):
+        self.db.create_session("s1", "cli")
+        self.db.append_message("s1", "assistant", "")
+        self.assertIsNone(self.last())
+
+    def test_after_a_compression_split_it_reads_the_continuation_not_the_old_session(self):
+        self.db.create_session("old", "cli")
+        self.db.append_message("old", "assistant", "before the split")
+        self.db.end_session("old", "compression")
+        self.db.create_session("new", "cli", parent_session_id="old")
+        self.db.append_message("new", "assistant", "after the split")
+        self.assertEqual(self.last("old"), "after the split")
+
+    def test_other_sessions_are_not_read(self):
+        self.db.create_session("s1", "cli")
+        self.db.create_session("s2", "cli")
+        self.db.append_message("s2", "assistant", "not mine")
+        self.assertIsNone(self.last("s1"))
 
 
 class HelpersTest(unittest.TestCase):
