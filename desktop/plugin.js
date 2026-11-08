@@ -453,6 +453,9 @@ function withMenu(item, card) {
 }
 
 function ActiveItem({ item }) {
+  const chatLine = item.last_comment
+    ? `${item.last_comment.author}: ${item.last_comment.body}`
+    : item.last_chat
   const card = h(
     'div',
     { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6, cursor: 'pointer' }, onClick: () => openCard(item) },
@@ -468,11 +471,11 @@ function ActiveItem({ item }) {
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
-    item.last_chat
+    chatLine
       ? h(
           'div',
           { style: { ...muted, fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          item.last_chat
+          chatLine
         )
       : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )

@@ -549,13 +549,16 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         """The /active item for one card (the fixture's base card is also running, so filter by id)."""
         return [i for i in self.get("/active") if i["task_id"] == tid]
 
-    def test_a_running_card_shows_its_title_board_and_status_and_no_comment(self):
+    def test_a_running_card_shows_its_title_board_and_status_and_its_last_comment(self):
         tid = self.card(title="ship the parser")
         self.set_status(tid, "running")
         with_conn(lambda c: kb.add_comment(c, tid, "worker", "Parser done, running tests."))
         (item,) = self.active(tid)
         self.assertEqual((item["board"], item["task_id"], item["title"], item["status"]), ("t-board", tid, "ship the parser", "running"))
-        self.assertNotIn("last_comment", item)
+        self.assertIsInstance(item["last_comment"], dict)
+        self.assertEqual(item["last_comment"]["author"], "worker")
+        self.assertEqual(item["last_comment"]["body"], "Parser done, running tests.")
+        self.assertIsNotNone(item["last_comment"]["created_at"])
 
     def test_only_running_ready_and_blocked_cards_are_active(self):
         for status, active in (("running", True), ("ready", True), ("blocked", True), ("todo", False), ("done", False)):
