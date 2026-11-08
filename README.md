@@ -178,7 +178,7 @@ it warns, it cannot undo. (The pre-flight HOLD is the part that stops a command 
 
 | Command | What it does |
 |---|---|
-| `hermes calling-mom setup` | Choose Mom and Olymp from your own providers. Safe to repeat. Scripts: `--mom provider/model --olymp none --boards '*'`, exit code 2 when a flag is missing. |
+| `hermes calling-mom setup` | Choose Mom and Olymp from your own providers. Safe to repeat. Scripts: `--mom provider/model --olymp none --boards '*'`, exit code 2 when a flag is missing. `--notify telegram` sends what needs you to your phone too. |
 | `hermes calling-mom status` | Who is Mom, who is Olymp, Olymp calls today, providers that are limited or down. |
 | `hermes calling-mom doctor` | Checks the setup and makes a real call to each model. Run it after every Hermes update. |
 | `hermes calling-mom report` | What reached whom and what it cost, per rung. `--days 7`, `--board X`, `--json`. Example: [a real report](docs/TECHNICAL.md#a-real-report). |
@@ -238,6 +238,16 @@ so the Desktop half must be installed on that machine. Use Hermes' own way:
 Later, the **Update** button of the plugin moves the Desktop half to the new version. The page shows the version under
 its title; when the app's copy and the gateway differ, a note next to it says so.
 
+## Answer from your phone
+
+Off until you set a target (`setup` asks, or `--notify telegram`). Then whatever waits under "Needs you" (Mom's four-line brief, a held
+command, a worker's own question) is also sent **once** to your phone, through Hermes' own messaging: Telegram, Signal, Discord, Slack,
+WhatsApp, whatever your gateway already serves. `calling_mom.notify.target` is `telegram` (its home channel) or `telegram:<chat>`. The
+message names the card and ends with `Reply: A, B, or your own answer`. Your reply in that chat answers the card: the chat agent calls the
+tool `calling_mom_answer`, which is the same door as the Desktop buttons (`A` becomes the text of option A, `accept` takes Mom's
+recommendation, `allow` lets a held command run once). The plugin has no bot token and no connection of its own. Sending never waits
+for you; a failed send is tried twice more and the card stays in Needs you. `[local-only]` cards are never sent. `doctor` shows the last result.
+
 ## Your money and your data
 
 - **Nothing leaves your machine until you say so.** Helpers are off until you enable them and name a board (or put `[advisor]` on a card).
@@ -246,6 +256,7 @@ its title; when the app's copy and the gateway differ, a note next to it says so
 - **A web search is a separate switch** (`calling_mom.web_verify`, off by default): for a `[crit]` / `[review]` card or a `verify-web: <claim>` line, the completion check and the review of a critical change may search the web for the claim. Only that one line leaves (secrets blanked out, at most 200 characters), never the card body, and never for `[local-only]` or `[human]` cards. The hits reach the judge as untrusted text; nothing blocks on them.
 - **Answers are a separate switch** (`calling_mom.answer`, off by default). Questions about secrets, money, legal matters, personal data or publishing never get an answer from Mom. Only a person can release a HOLD.
 - **The Desktop page shows the worker's last message** (read-only, from the worker profile's own session store, never sent anywhere). It is the one place Calling Mom reads message text; see [SECURITY.md](SECURITY.md).
+- **Your phone is a separate switch** (`calling_mom.notify.target`, off by default): the brief, the held command or the worker's question of a card that waits for you, redacted, goes through Hermes' own `send_message` to the platform you named. Never for `[local-only]` cards.
 - **Other people on your board are counted, not read:** author ids, event kinds and times. Never comment text.
 - **Chat waits are a separate switch** (`calling_mom.count.chat_waits`, off by default): kind, seconds and outcome of a prompt, never the text.
 - **Olymp is limited by number of calls**, so a subscription never surprises you. Mom has a daily dollar and token cap.
