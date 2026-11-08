@@ -3,6 +3,16 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.7.1] - 2026-11-08
+
+### Added
+- **Desktop: the New card form can pin a model** (`dashboard/plugin_api.py`, `desktop/plugin.js`). A **Model** select next to Board and Assignee offers `profile default` and every model of every authenticated provider (`provider · model`); the pick goes to the public `kanban_create` as `model` / `provider`, so the card's worker runs on that model from its first run. A provider without its model is refused (400 `a provider needs a model`); a model alone keeps the profile's provider. `GET /new-card` gains `models`. No new hook or tool.
+- **Desktop: the New card form explains a 404** (`desktop/plugin.js`). If `GET /new-card` fails, the form says to restart the gateway if Calling Mom was just updated: a gateway that loaded the plugin before the update answers 404 for the new routes until it restarts.
+
+### Changed
+- **Desktop: the New card button reads `+ New card`** (`desktop/plugin.js`).
+- **Desktop: the `verify:` field sits in a collapsed row of the New card form** (`desktop/plugin.js`). It is an optional detail, so it no longer takes a line of its own until opened.
+
 ## [1.7.0] - 2026-11-08
 
 ### Changed

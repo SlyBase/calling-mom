@@ -5,7 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
-const VERSION = '1.7.0' // must equal plugin.yaml (a test checks it): the page shows which copy runs
+const VERSION = '1.7.1' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
@@ -519,7 +519,7 @@ const FLAGS = [   // the plain prefixes and the verify line the plugin understan
   ['crit', '[crit]', 'Mom checks risky commands and the finished result; the card runs on Mom\'s model.'],
   ['review', '[review]', 'The result goes to the reviewer profile before the card is done.']
 ]
-const BLANK = { title: '', body: '', board: '', assignee: '', priority: 0, crit: false, review: false, verify: '' }
+const BLANK = { title: '', body: '', board: '', assignee: '', priority: 0, crit: false, review: false, verify: '', model: '' }
 const newKey = () => Math.random().toString(36).slice(2) + Date.now().toString(36)   // one per attempt: a double click is one card
 
 function NewCardForm({ onClose }) {
@@ -536,13 +536,15 @@ function NewCardForm({ onClose }) {
         setOpts(o)
         setF(prev => ({ ...prev, board: o.default_board || '', assignee: o.profiles.includes('default') ? 'default' : o.profiles[0] || '' }))
       })
-      .catch(e => setError(message(e)))
+      .catch(e => setError(`${message(e)} — restart the gateway if Calling Mom was just updated.`))
   }, [])
 
   const set = (name, value) => setF(prev => ({ ...prev, [name]: value }))
   const text = (name, props) => ({ name, value: f[name], onChange: e => set(name, e.target.value), disabled: busy, ...props })
   const row = (label, node) => h('label', { style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: '0.75rem', ...muted } }, label, node)
-  const select = (name, values) => h('select', { ...text(name), style: field }, values.map(v => h('option', { key: v, value: v }, v)))
+  const selectOptions = (name, options) => h('select', { ...text(name), style: field },
+    options.map(o => h('option', { key: o.value, value: o.value }, o.label)))
+  const select = (name, values) => selectOptions(name, values.map(v => ({ value: v, label: v })))
   const ready = opts && f.title.trim() && f.board && f.assignee && !busy
 
   async function submit(e) {
@@ -551,7 +553,9 @@ function NewCardForm({ onClose }) {
     setError(null)
 
     try {
-      const out = await ctx.rest('/card', { method: 'POST', body: { ...f, priority: Number(f.priority) || 0, key } })
+      const { model, ...rest } = f
+      const pin = model === '' || !opts ? {} : { model: opts.models[Number(model)].model, provider: opts.models[Number(model)].provider }
+      const out = await ctx.rest('/card', { method: 'POST', body: { ...rest, ...pin, priority: Number(f.priority) || 0, key } })
 
       setMade(out.task_id)
       host.notify({ kind: 'success', message: `Card ${out.task_id} created` })
@@ -587,13 +591,17 @@ function NewCardForm({ onClose }) {
       : h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
           row('Board', select('board', opts ? opts.boards : [])),
           row('Assignee', select('assignee', opts ? opts.profiles : [])),
+          row('Model', selectOptions('model', [{ value: '', label: 'profile default' },
+            ...(opts ? opts.models : []).map((m, i) => ({ value: String(i), label: `${m.provider} · ${m.model}` }))])),
           row('Priority', h('input', { ...text('priority', { type: 'number', min: 0, max: 100 }), style: { ...field, width: 72 } }))),
     h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: '0.8125rem' } },
       FLAGS.map(([name, marker, what]) => h('label', { key: name, style: { display: 'flex', gap: 6, alignItems: 'baseline' } },
         h('input', { type: 'checkbox', name, checked: f[name], disabled: busy, onChange: e => set(name, e.target.checked) }),
         h('span', null, h('code', null, (opts && opts.flags[name]) || marker), h('span', { style: muted }, ` ${what}`)))),
-      row('verify: (optional)', h('input', { ...text('verify', { maxLength: 300, placeholder: 'pytest -q' }), style: field })),
-      h('div', { style: { ...muted, fontSize: '0.75rem' } }, 'This command must pass before the worker may complete the card (only for creators listed in calling_mom.verify.trusted_creators).')),
+      h('details', { style: { fontSize: '0.8125rem' } },
+        h('summary', { style: { cursor: 'pointer', ...muted } }, 'verify: (optional)'),
+        row('', h('input', { ...text('verify', { maxLength: 300, placeholder: 'pytest -q' }), style: field })),
+        h('div', { style: { ...muted, fontSize: '0.75rem' } }, 'This command must pass before the worker may complete the card (only for creators listed in calling_mom.verify.trusted_creators).'))),
     error && h('div', { style: { color: 'var(--ui-accent)', fontSize: '0.8125rem' } }, error),
     h('div', { style: { display: 'flex', gap: 8 } },
       h(Button, { type: 'submit', size: 'sm', disabled: !ready }, 'Create card'), openKanban,
@@ -633,7 +641,7 @@ function Page() {
       { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 } },
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
       h('div', { style: { display: 'flex', gap: 12, alignItems: 'center' } },
-        h(Button, { size: 'sm', onClick: () => setCreating(!creating) }, 'New card'),
+        h(Button, { size: 'sm', onClick: () => setCreating(!creating) }, '+ New card'),
         h(WindowSelector, { value: s.hours, onPick: setHours }))
     ),
     creating && h(NewCardForm, { onClose: () => setCreating(false) }),
