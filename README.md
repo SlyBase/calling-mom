@@ -3,6 +3,7 @@
 # Calling Mom
 
 [![ci](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SlyBase/calling-mom/actions/workflows/ci.yml)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/slydlake)
 
 **Your attention is the most expensive model in the stack. Calling Mom calls it last.**
 
