@@ -254,6 +254,7 @@ for you; a failed send is tried twice more and the card stays in Needs you. `[lo
 - **`[local-only]` on a card always wins**: nothing from that card is sent anywhere.
 - **What Mom sees:** the card text, the last tool steps and the signal. For a pre-flight check: the card title, the first 800 characters and the one command. For a question: the question, the card text and the last comments. **Secrets are blanked out first.** The log keeps hashes, never the command.
 - **A web search is a separate switch** (`calling_mom.web_verify`, off by default): for a `[crit]` / `[review]` card or a `verify-web: <claim>` line, the completion check and the review of a critical change may search the web for the claim. Only that one line leaves (secrets blanked out, at most 200 characters), never the card body, and never for `[local-only]` or `[human]` cards. The hits reach the judge as untrusted text; nothing blocks on them.
+- **If Mom cannot answer, a risky command runs** (fail-open, the default). On a shared remote switch it to fail-closed (`calling_mom.preflight.fail_closed: true`, or `setup --fail-closed`): then a risky command stays held when her call fails, times out or is out of quota, until a person allows it. Commands that are not risky always run.
 - **Answers are a separate switch** (`calling_mom.answer`, off by default). Questions about secrets, money, legal matters, personal data or publishing never get an answer from Mom. Only a person can release a HOLD.
 - **The Desktop page shows the worker's last message** (read-only, from the worker profile's own session store, never sent anywhere). It is the one place Calling Mom reads message text; see [SECURITY.md](SECURITY.md).
 - **Your phone is a separate switch** (`calling_mom.notify.target`, off by default): the brief, the held command or the worker's question of a card that waits for you, redacted, goes through Hermes' own `send_message` to the platform you named. Never for `[local-only]` cards.
@@ -273,6 +274,7 @@ calling_mom:
   mom:   {provider: openrouter, model: deepseek/deepseek-v4.1-flash-1017}
   olymp: {provider: claude-subscription-directsdk-experimental, model: claude-opus-5-5}   # leave empty for no Olymp
   advisor: {enabled: true, boards: [my-board]}
+  preflight: {fail_closed: true}                # optional: a risky command stays held when Mom cannot check it (default: it runs)
   answer: {enabled: true, boards: [my-board]}   # optional: Mom answers worker questions first
   mom_fallback: {provider: openrouter, model: deepseek/deepseek-v4.1-flash-1017}   # optional: answers while Mom's provider is limited or down
   stall_minutes: 15                             # optional: flag a running card without a heartbeat (0 = off)

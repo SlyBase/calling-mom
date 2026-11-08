@@ -13,7 +13,8 @@ One page for what 1.4 and 1.5 added. The details are in the sections named in ea
 |---|---|---|---|
 | `preflight.enabled` | `true` | Mom checks a critical command before it runs. Active only where the advisor is. | Hook deadlines |
 | `preflight.timeout_s` | `12` | Deadline of that one synchronous question. The effective deadline is `min(timeout_s, 0.4 x hook budget)`. | Hook deadlines |
-| `preflight.max_per_card` | `4` | Model calls per card for pre-flight. Past it, critical commands run. | Hook deadlines |
+| `preflight.max_per_card` | `4` | Model calls per card for pre-flight. Past it, critical commands run (held with `fail_closed`). | Hook deadlines |
+| `preflight.fail_closed` | `false` | When Mom cannot check a critical command (error, timeout, quota, unclear answer, a cap), hold it like a normal HOLD instead of running it. Not critical commands always run. `setup --fail-closed` / `--no-fail-closed`. | Pre-flight fail-closed |
 | `answer.enabled` | `false` | Mom answers a worker's `needs_input` question first. `setup` asks. | Mom answers first |
 | `answer.boards` | `[]` | Boards where she may. `"*"` = all. | Mom answers first |
 | `answer.max_per_card` | `2` | Answers and briefs per card. | Mom answers first |
@@ -45,7 +46,7 @@ and `task`, `board`, `run` where known). New or changed in 1.4:
 
 | kind | Fields | Written when |
 |---|---|---|
-| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `no_rationale`, `allowance`, `local_only`), `rationale` (on `hold`: redacted, 160 characters), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
+| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `closed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `no_rationale`, `allowance`, `local_only`), `error_class` (on `closed`: the text the worker read), `rationale` (on `hold`: redacted, 160 characters), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
 | `question` | `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`, `ms`, `tokens_in`, `tokens_out`, `usd` | A worker's `needs_input` question was handled. |
 | `human_answer` | `via` (`cli`, `desktop`, `phone`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
 | `verify` | `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ok`, `fails`, `exit`, `ms` | The background `verify:` command changed state. |
@@ -121,7 +122,7 @@ plugins:
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only), `extract_state false` (see "State first"). |
 | `web_verify.*` | disabled, `max_per_card 1`, `max_per_day 20`, `results 3`, `result_chars 200`, `timeout_s 8` | A web search for the claim of a `[crit]` / `[review]` card or a `verify-web:` line, before the judge decides (see "Web evidence"). Own switch; needs the advisor. |
-| `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
+| `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4`, `fail_closed false` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
 | `answer.*` | disabled, `boards []`, `max_per_card 2` | Mom answers a worker's `needs_input` question before it reaches you (see "Mom answers first"). `setup` asks. Model calls use `advisor.timeout_s`, `advisor.max_output_tokens`, `advisor.context_chars` and the daily caps of the advisor. |
 | `answer.precedents` | `true` | Keep a person's answers to `[for you]` briefs as text and show Mom up to three (see "Precedents"). Meaningful only where `answer` is on. |
 | `human_marker` | `[human]` | A card with this marker is for a person: Mom never answers its questions (no brief either). |
@@ -233,11 +234,22 @@ value through `_core.hook_budget()` (1..600 s) and keeps every synchronous wait 
   during the run, in a workspace without git, is not seen.
 - **The prompt tip** (`SECOND-OPINION`, `verify:`) is added to Kanban worker sessions only (`HERMES_KANBAN_TASK`).
 - **Untyped blocks** are escalated only on cards with an assignee; a card nobody works on is a human to-do.
-- **Pre-flight is bounded and fail-open.** A critical command gets ONE synchronous question, on its own thread, with
+- **Pre-flight is bounded and fail-open by default (see fail-closed below).** A critical command gets ONE synchronous question, on its own thread, with
   a deadline of `min(preflight.timeout_s, 0.4 x budget)` (default 12 s). A timeout, a down provider, an unparseable
   answer or the per-card cap (`preflight.max_per_card`) lets the command run and the post-hoc review happens as before.
   A HOLD persists in the plugin state (task, normalized command hash) and blocks later runs of the card without a
   model call; only a human release removes it (WP3/WP4).
+- **Pre-flight fail-closed (opt-in).** `preflight.fail_closed: true` turns every case above that lets the command run into
+  a HOLD: a provider error, a provider the quota check skips (`provider limited or down`), a model in its cooldown
+  (`provider cooling down`), a timeout, an unparseable or reasonless answer (`malformed answer`), the per-card cap
+  (`call limit per card reached`) and the daily budget (`daily budget reached`). Only critical commands (the same
+  `rules.classify` test as before) are touched; `[local-only]` cards are still skipped, because nothing may be sent for them.
+  The hold uses the normal record: `_record_hold` with a `fail_closed` field (the class), the card comment
+  `[pre-flight] HOLD: Mom could not check this command (<class>) ...`, so Needs you, the `held` badge, `allow_once`
+  and the one-shot allowance work unchanged. The worker reads `calling-mom pre-flight HOLD (fail-closed): Mom could not
+  check this command (<class>). It stays blocked until a person allows it.` A repeat of the command is held without a
+  model call. The trace row is `verdict: closed` with `error_class`. The deadline is unchanged (`min(timeout_s, 0.4 x
+  budget)`). Known limit: an unexpected exception inside the check (not a Mom failure) still lets the command run.
 - **A HOLD carries its rationale (refute filter).** The pre-flight prompt asks for `HOLD: <what is not verified, one concrete
   sentence>. Instead: ...`. A reason shorter than 4 words ("too risky") is downgraded: the command runs, nothing is
   recorded as a hold, the row says `allowed` / `no_rationale`. That is the fail-open path of an unparseable answer, so no
@@ -469,6 +481,7 @@ JSON fields (`days` and `board` are added by `attention_report`; `olymp.today` a
 | `mom.calls` | advisor rows (an Olymp advice was asked of Mom first) + pre-flight checks that reached the model + questions she answered or briefed (`outcome` answered/human) |
 | `mom.answered` | questions with `outcome=answered`, `by=mom` |
 | `mom.checked` / `holds` | pre-flight `go` + `hold` rows / `hold` rows |
+| `mom.closed` | pre-flight `closed` rows: fail-closed holds, where Mom gave no answer (not a Mom call, not in `checked` or `holds`). `render` shows `, N fail-closed holds` after the hold count when N > 0 |
 | `mom.verified` / `verify_failed` | finished `verify` rows: `pass` / `fail` + `timeout` (`started` and `stale` are not results) |
 | `advice.calls` | advisor rows that were not silent (`noop`): advice that reached the worker |
 | `advice.followed` / `acted` / `ignored` | `advice_feedback` rows by `result`; a 1.4 row counts by its old `verdict` (`followed` is `acted`, `rejected` has no result) |

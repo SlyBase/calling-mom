@@ -19,7 +19,7 @@ BADGES = ("held", "for you", "stalled", "verify failed", "olymp", "mom", "verifi
 _SHOWN = {  # rows worth a line in the activity list
     "advisor": lambda r: not r.get("noop"),
     "question": lambda r: r.get("outcome") in ("answered", "human"),
-    "preflight": lambda r: r.get("verdict") in ("go", "hold", "held_again"),
+    "preflight": lambda r: r.get("verdict") in ("go", "hold", "held_again", "closed"),
     "verify": lambda r: r.get("state") in _FINISHED,
     "human_answer": lambda r: True,
     "escalated": lambda r: True,
@@ -197,6 +197,7 @@ def summary(days: int = Query(7, ge=1, le=90), hours: int | None = Query(None, g
     rows = [r for r in rows if r.get("ts", 0) >= start and (end is None or r.get("ts", 0) < end)]
     out["today"] = {"mom_calls": mom().report.build(rows, since=now - now % DAY)["mom"]["calls"]}
     out["you"]["waiting"] = len(_needs_you())
+    out["preflight"] = {"fail_closed": bool(mom().settings()["preflight"]["fail_closed"])}
     return {**out, "recent": _recent(rows), "version": _version()}
 
 

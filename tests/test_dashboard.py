@@ -94,7 +94,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
     def test_an_empty_log_counts_zero_everywhere(self):
         out = self.get("/summary")
         self.assertEqual((out["worker"]["tool_calls"], out["worker"]["signals"]), (0, 0))
-        self.assertEqual(out["mom"], {"calls": 0, "answered": 0, "checked": 0, "holds": 0, "verified": 0, "verify_failed": 0})
+        self.assertEqual(out["mom"], {"calls": 0, "answered": 0, "checked": 0, "holds": 0, "closed": 0, "verified": 0, "verify_failed": 0})
         self.assertEqual((out["advice"]["calls"], out["you"]["outside"]["comments"], out["you"]["chat_waits"]["count"]), (0, 0, 0))
         self.assertEqual(out["olymp"]["calls"], 0)
         self.assertEqual((out["you"]["briefs"], out["you"]["answered"]), (0, 0))
@@ -110,6 +110,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.put("preflight", task="t_a", verdict="hold")
         self.put("preflight", task="t_a", verdict="held_again")                      # no model call
         self.put("preflight", task="t_a", verdict="allowed", reason="cap")           # no model call
+        self.put("preflight", task="t_a", verdict="closed", reason="timeout")        # fail-closed: counted on its own
         self.put("question", task="t_a", outcome="answered", by="mom")
         self.put("question", task="t_a", outcome="human", by="mom")
         self.put("question", task="t_a", outcome="answered", by="olymp")             # Mom escalated, Olymp answered
@@ -124,7 +125,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         out = self.get("/summary")
         self.assertEqual((out["worker"]["tool_calls"], out["worker"]["signals"]), (3, 3))
         # Mom: 3 advice (the Olymp one was asked of her first) + 2 pre-flight + 3 questions
-        self.assertEqual(out["mom"], {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "verified": 1, "verify_failed": 2})
+        self.assertEqual(out["mom"], {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "closed": 1, "verified": 1, "verify_failed": 2})
         self.assertEqual(out["olymp"]["calls"], 2)
         self.assertEqual((out["you"]["briefs"], out["you"]["answered"]), (1, 2))
 
@@ -226,6 +227,11 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.assertEqual(recent[0], {"ts": t0 + 1002, "kind": "question", "task": "t_q", "board": "t-board", "detail": "human", "by": "mom", "title": None})
         self.assertEqual(set(recent[1]), {"ts", "kind", "task", "board", "detail", "by", "title"})
 
+    def test_the_summary_names_the_preflight_mode(self):
+        self.assertEqual(self.get("/summary")["preflight"], {"fail_closed": False})
+        plugin.DEFAULTS["preflight"]["fail_closed"] = True
+        self.assertEqual(self.get("/summary")["preflight"], {"fail_closed": True})
+
     def test_each_kind_has_a_detail_and_a_name(self):
         t0 = int(time.time()) - 5000
         self.put("advisor", ts=t0, task="t_1", category="loop", olymp=True)
@@ -234,9 +240,11 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.put("human_answer", ts=t0 + 3, task="t_4", via="desktop")
         self.put("escalated", ts=t0 + 4, task="t_5", reason="blocked")
         self.put("verify", ts=t0 + 5, task="t_6", state="stale")
+        self.put("preflight", ts=t0 + 6, task="t_7", verdict="closed", reason="timeout")
         rows = {r["task"]: (r["kind"], r["detail"], r["by"]) for r in self.get("/summary", days=90)["recent"]}
         self.assertEqual(rows, {"t_1": ("advisor", "loop", "olymp"), "t_2": ("preflight", "hold", None), "t_3": ("verify", "fail", None),
-                                "t_4": ("human_answer", "desktop", None), "t_5": ("escalated", "blocked", None)})
+                                "t_4": ("human_answer", "desktop", None), "t_5": ("escalated", "blocked", None),
+                                "t_7": ("preflight", "closed", None)})
 
 
 class NeedsYouTest(DashboardFixture, unittest.TestCase):

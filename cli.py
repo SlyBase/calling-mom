@@ -186,12 +186,13 @@ def _get(cfg, dotted, default=None):
     return cfg
 
 
-def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None, notify=None) -> dict:
+def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None, notify=None, fail_closed=None) -> dict:
     """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay.
     ``answer`` None leaves the answer block alone; True/False switches "Mom answers worker questions" on/off.
     ``chat_waits`` None leaves the count block alone; True/False switches the counting of your waits in chat.
     ``fallback`` None leaves Mom's fallback alone; False clears it; a (provider, model) pair sets it and grants it like Mom.
-    ``notify`` None leaves the phone target alone; "" switches the phone off; ``telegram`` or ``telegram:<chat>`` sets it."""
+    ``notify`` None leaves the phone target alone; "" switches the phone off; ``telegram`` or ``telegram:<chat>`` sets it.
+    ``fail_closed`` None leaves the pre-flight mode alone; True holds a critical command when Mom cannot check it, False runs it."""
     pairs = [p for p in (mom, olymp, fallback) if p]
     upd = {
         "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
@@ -212,6 +213,8 @@ def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None
         upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"] = fallback or ("", "")
     if notify is not None:
         upd["calling_mom.notify.target"] = notify
+    if fail_closed is not None:
+        upd["calling_mom.preflight.fail_closed"] = fail_closed
     return upd
 
 
@@ -226,10 +229,11 @@ def apply_updates(cfg, upd) -> dict:
     return out
 
 
-def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None, fallback=None, notify=None):
+def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None, fallback=None, notify=None, fail_closed=None):
     """Ask (or take a preset), return ``(updates, summary_lines)``. Writes nothing. ``answer`` True/False skips the
     question "Let Mom answer worker questions before they reach you?", ``chat_waits`` the one about counting your waits in chat,
-    ``fallback`` (False or a pair) the one about Mom's fallback, ``notify`` (a target or "") the one about your phone."""
+    ``fallback`` (False or a pair) the one about Mom's fallback, ``notify`` (a target or "") the one about your phone,
+    ``fail_closed`` (True/False) the one about a critical command when Mom cannot check it."""
     if preset:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
@@ -267,11 +271,17 @@ def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), a
         notify = pick("Send what needs you to your phone too (through Hermes' own messaging, you answer by reply)?",
                       [("no", ""), *[(t + (" (its home channel)" if t == "telegram" else ""), t) for t in targets]],
                       ask, say, choose=choose, default=targets.index(current) + 1 if current else 0)
-    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits, fallback, notify)
+    if fail_closed is None:
+        was_on = bool(_get(cfg, "calling_mom.preflight.fail_closed", False))
+        fail_closed = pick("When Mom cannot check a risky command (error, timeout, quota), what happens to it?",
+                           [("it runs (fail-open, the default)", False),
+                            ("it stays held until a person allows it (fail-closed; recommended on shared remotes)", True)],
+                           ask, say, other=False, choose=choose, default=int(was_on))
+    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits, fallback, notify, fail_closed)
 
 
-def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None, notify=None):
-    upd = updates(mom, olymp, boards, cfg, answer, chat_waits, fallback, notify)
+def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None, notify=None, fail_closed=None):
+    upd = updates(mom, olymp, boards, cfg, answer, chat_waits, fallback, notify, fail_closed)
     summary = [f"mom     : {mom[1]} ({mom[0]})", f"olymp   : {f'{olymp[1]} ({olymp[0]})' if olymp else 'off'}",
                f"boards  : {', '.join(upd['calling_mom.advisor.boards']) or '(none)'}"]
     if answer is not None:
@@ -282,6 +292,9 @@ def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None
         summary.append(f"fallback: {fallback[1]} ({fallback[0]})" if fallback else "fallback: off")
     if notify is not None:
         summary.append(f"phone   : {notify}" if notify else "phone   : off")
+    if fail_closed is not None:
+        summary.append("pre-flight: fail-closed (a risky command stays held when Mom cannot check it)" if fail_closed
+                       else "pre-flight: fail-open (a risky command runs when Mom cannot check it)")
     return upd, summary
 
 
@@ -349,6 +362,11 @@ def count_errors(path, now=None):
     return count, last
 
 
+def _pf_mode(cm) -> str:
+    return "fail-closed (a risky command stays held when Mom cannot check it)" if (cm.get("preflight") or {}).get("fail_closed") \
+        else "fail-open (a risky command runs when Mom cannot check it)"
+
+
 def status_lines(cm, spent, errors=None, health=None) -> list:
     sp, sm = mom_pair(cm)
     olymp = cm.get("olymp") or {}
@@ -368,6 +386,7 @@ def status_lines(cm, spent, errors=None, health=None) -> list:
     lines.append(f"answer  : on, boards: {', '.join(answer_boards) or '(none)'}" if ans.get("enabled") else "answer  : off")
     lines.append(f"count   : chat waits {'on' if (cm.get('count') or {}).get('chat_waits') else 'off'} (kind, seconds, outcome; never the text)")
     lines.append(f"phone   : {(cm.get('notify') or {}).get('target') or 'off'}")
+    lines.append(f"pre-flight: {_pf_mode(cm)}")
     if ans.get("enabled") and not answer_boards:
         lines.append("warning : answer is on but no board is listed, Mom answers nothing (run: hermes calling-mom setup)")
     if adv.get("enabled") and not boards:
@@ -459,6 +478,9 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False
         add("advisor", "warn", "off or no board opted in: nothing is sent to the mom or olymp")
     if health:
         add("provider health", "warn", "; ".join(health))
+    closed = bool((cm.get("preflight") or {}).get("fail_closed"))
+    add("pre-flight", "ok", "fail-closed: a risky command stays held when Mom cannot check it" if closed else
+        "fail-open (default): a risky command runs when Mom cannot check it; to hold it instead: hermes calling-mom setup --fail-closed")
     target = (cm.get("notify") or {}).get("target")
     if target:
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(phone["ts"])) if phone else ""
@@ -520,7 +542,7 @@ def _blocks(env):
     return (cfg.get("calling_mom") or {}), (_get(cfg, "plugins.entries.calling-mom.llm", {}) or {})
 
 
-def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fallback=None, notify=None):
+def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fallback=None, notify=None, fail_closed=None):
     """Updates and summary: from flags when they say everything, otherwise by asking."""
     routes = env.routes()
     if notify is not None:
@@ -540,7 +562,7 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fa
                 raise SetupError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
             pair_mom, pair_olymp = PRESETS[preset]["mom"], PRESETS[preset]["olymp"]
         chosen = parse_boards(boards) if boards else ([] if _get(cfg, "calling_mom.advisor.boards") else ["*"])
-        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits, fallback, notify)
+        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits, fallback, notify, fail_closed)
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
                          "optionally --olymp, --boards and --cron/--no-cron.")
@@ -548,13 +570,13 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fa
     if hint:
         env.say(hint)
     return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes,
-                 answer=answer, chat_waits=chat_waits, fallback=fallback, notify=notify)
+                 answer=answer, chat_waits=chat_waits, fallback=fallback, notify=notify, fail_closed=fail_closed)
 
 
-def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None, fallback=None, notify=None) -> int:
+def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None, fallback=None, notify=None, fail_closed=None) -> int:
     cfg = env.load()
     try:
-        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits, fallback, notify)
+        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits, fallback, notify, fail_closed)
     except SetupError as exc:
         env.say(str(exc))
         return 2
@@ -716,6 +738,9 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
                    "or none (default: ask; alone, it keeps the Mom that is configured)")
     s.add_argument("--notify", metavar="TARGET", help="also send what needs you to your phone: telegram (its home channel), telegram:<chat>, "
                    "signal:..., or none (default: ask; with flags, keep the current choice)")
+    s.add_argument("--fail-closed", action=argparse.BooleanOptionalAction, default=None,
+                   help="hold a risky command until a person allows it when Mom cannot check it; recommended on shared remotes "
+                   "(default: ask; with flags, keep the current choice)")
     s.add_argument("--yes", action="store_true", help="accepted for scripts; setup never asks before writing")
     a = sub.add_parser("answer", help="answer a card that carries Mom's brief or a pre-flight HOLD")
     a.add_argument("task", metavar="TASK", help="the card id")
@@ -747,7 +772,7 @@ def dispatch(args, spent, effective, log_path, core, answer=None, build_report=N
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron,
-                         answer=args.answer, chat_waits=args.chat_waits, fallback=args.fallback, notify=args.notify)
+                         answer=args.answer, chat_waits=args.chat_waits, fallback=args.fallback, notify=args.notify, fail_closed=args.fail_closed)
     if cmd == "pace":
         return cmd_pace(env, args.board, args.max, dry_run=args.dry_run, undo=args.undo)
     if cmd == "answer":
