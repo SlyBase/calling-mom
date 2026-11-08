@@ -5,11 +5,10 @@ version: 1.6.1
 requires_hermes: ">=0.22"
 manifest_version: 2
 description: >
-  Two-tier help for a cheap Kanban worker, without asking it to judge itself.
-  Mom (a good, affordable model) answers stuck signals and risky changes;
-  Olymp (the expensive heavyweight) is asked only when Mom escalates a rare edge
-  case. Cards that give up or carry [crit] are pinned to Mom's model. Setup, status and
-  doctor commands: hermes calling-mom.
+  Your attention is the most expensive model in the stack. Calling Mom calls it
+  last. A cheap model works your Kanban cards; when it is stuck or about to do
+  something risky, a better model steps in, and only what neither can settle
+  reaches you, with a four-line brief.
 provides_tools:
   - second_opinion
   - calling_mom_answer
