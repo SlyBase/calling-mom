@@ -3,7 +3,7 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
-## [1.7.0] - unreleased
+## [1.7.0] - 2026-11-08
 
 ### Changed
 - **README rewritten: shorter, USP first, plain words** (`README.md`, `docs/TECHNICAL.md`, `plugin.yaml`). The 289-line README is now a one-minute read: the pitch, the problem, the ladder as a small diagram, six plain-language advantages (signals, the pre-flight HOLD with optional fail-closed, the hard Olymp caps with real numbers, the four-line brief with phone and Decide-later, the dashboard with New card, the measured benchmark), a three-line quick start, the screenshots, and the safety summary. The detail it carried (sequence diagram, card examples, the command table, the troubleshooting table, minimal configuration, the Desktop-on-another-machine path) moves to `docs/TECHNICAL.md` unchanged. The `plugin.yaml` description matches the new README pitch. No behaviour change.
