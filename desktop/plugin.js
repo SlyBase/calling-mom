@@ -358,7 +358,7 @@ function Item({ item }) {
   )
 }
 
-function Section({ title, count, children, defaultOpen = true }) {
+function Section({ title, count, action, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen)   // a state per section; the header toggles it
   return h(
     'section',
@@ -371,7 +371,8 @@ function Section({ title, count, children, defaultOpen = true }) {
       },
       h(Codicon, { name: open ? 'chevron-down' : 'chevron-right', style: { ...muted } }),
       title,
-      count ? h(Badge, { variant: 'default', style: { marginLeft: 8 } }, count) : null
+      count ? h(Badge, { variant: 'default', style: { marginLeft: 8 } }, count) : null,
+      action ? h('span', { style: { marginLeft: 'auto' }, onClick: e => e.stopPropagation() }, action) : null
     ),
     open ? children : null
   )
@@ -488,8 +489,7 @@ function Page() {
     s.summary &&
       h(
         Section,
-        { title: 'Active', count: active.length },
-        h(Button, { variant: 'text', size: 'inline', onClick: toggleBlocked }, s.showBlocked ? 'Hide blocked' : 'Show blocked'),
+        { title: 'Active', count: active.length, action: h(Button, { variant: 'text', size: 'inline', onClick: toggleBlocked }, s.showBlocked ? 'Hide blocked' : 'Show blocked') },
         active.length === 0
           ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running, ready or blocked card on the boards you opted in.' })
           : active.map(item => h(ActiveItem, { key: item.task_id, item }))
