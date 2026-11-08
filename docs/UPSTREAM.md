@@ -1,6 +1,6 @@
 # Requests to Hermes
 
-Seven things calling-mom works around because Hermes has no public seam for them. Each section says what is missing,
+Eight things calling-mom works around because Hermes has no public seam for them. Each section says what is missing,
 what calling-mom does today, which file and function would use the seam, and what the seam would remove. They are drafts
 for an upstream issue each; Timon files them. Every private import stays in `_core.py` (`test_core.OneDoorTest`), so a
 seam replaces code in one place.
@@ -118,3 +118,16 @@ which the chat agent calls when the person answers the mirrored message. It is a
 **Removes.** The `tools.send_message_tool` import. A `ctx.send_message(target, text, *, reply_to=None) -> {ok, id}` with the same
 target syntax as `hermes send` would be enough, and `ctx.on_reply(message_id, handler)` (called with the person's text when they
 reply to that message, authorised by the platform's own allow-list) would remove the dependency on the chat agent choosing the tool.
+
+## 8. A public way for a dashboard route to call a tool, and to open a Kanban card
+
+**Missing.** `ctx.dispatch_tool(...)` exists only on the `PluginContext` that `register()` receives; a dashboard route
+(`dashboard/plugin_api.py`) is loaded by path in the dashboard process and gets no `ctx`. The Desktop SDK has no verb that opens a
+card's detail drawer (`host.openKanbanCard(board, id)`), so after creating a card the page can only `host.navigate('/kanban')`.
+
+**Today.** `_core.py` `dispatch_tool` imports `tools.registry.registry` (the registry `ctx.dispatch_tool` calls) and runs the public
+`kanban_create` tool; the **New card** form shows the id and a plain **Open in Kanban** button. Private import, listed in `SECURITY.md`.
+
+**Would use it.** `dashboard/plugin_api.py` `create_card` (tool call), `desktop/plugin.js` `NewCardForm` (open the new card).
+
+**Removes.** The `tools.registry` import: a `ctx` argument for plugin routes (`def create_card(body, ctx=Depends(plugin_ctx))`) would be enough.

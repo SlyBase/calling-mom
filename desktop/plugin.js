@@ -467,9 +467,98 @@ function ActiveItem({ item }) {
   return withMenu(item, card)
 }
 
+// ---- New card: the page starts work too, through the backend's POST /card (the public kanban_create tool) -----------
+
+const field = { border: '1px solid var(--ui-stroke-secondary)', borderRadius: 6, padding: '4px 8px', fontSize: '0.8125rem', background: 'transparent', color: 'inherit', font: 'inherit' }
+const FLAGS = [   // the plain prefixes and the verify line the plugin understands, with what each one does
+  ['crit', '[crit]', 'Mom checks risky commands and the finished result; the card runs on Mom\'s model.'],
+  ['review', '[review]', 'The result goes to the reviewer profile before the card is done.']
+]
+const BLANK = { title: '', body: '', board: '', assignee: '', priority: 0, crit: false, review: false, verify: '' }
+const newKey = () => Math.random().toString(36).slice(2) + Date.now().toString(36)   // one per attempt: a double click is one card
+
+function NewCardForm({ onClose }) {
+  const [opts, setOpts] = useState(null)
+  const [f, setF] = useState(BLANK)
+  const [key, setKey] = useState(newKey)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [made, setMade] = useState(null)
+
+  useEffect(() => {
+    ctx.rest('/new-card')
+      .then(o => {
+        setOpts(o)
+        setF(prev => ({ ...prev, board: o.default_board || '', assignee: o.profiles.includes('default') ? 'default' : o.profiles[0] || '' }))
+      })
+      .catch(e => setError(message(e)))
+  }, [])
+
+  const set = (name, value) => setF(prev => ({ ...prev, [name]: value }))
+  const text = (name, props) => ({ name, value: f[name], onChange: e => set(name, e.target.value), disabled: busy, ...props })
+  const row = (label, node) => h('label', { style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: '0.75rem', ...muted } }, label, node)
+  const select = (name, values) => h('select', { ...text(name), style: field }, values.map(v => h('option', { key: v, value: v }, v)))
+  const ready = opts && f.title.trim() && f.board && f.assignee && !busy
+
+  async function submit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+
+    try {
+      const out = await ctx.rest('/card', { method: 'POST', body: { ...f, priority: Number(f.priority) || 0, key } })
+
+      setMade(out.task_id)
+      host.notify({ kind: 'success', message: `Card ${out.task_id} created` })
+      refresh()
+    } catch (err) {
+      setError(message(err))
+    }
+
+    setBusy(false)
+  }
+
+  function again() {
+    setF({ ...BLANK, board: f.board, assignee: f.assignee })
+    setKey(newKey())
+    setMade(null)
+  }
+
+  const openKanban = h(Button, { key: 'kanban', type: 'button', size: 'sm', variant: 'ghost', onClick: () => host.navigate('/kanban') }, 'Open in Kanban')
+
+  if (made) {
+    return h('div', { style: { ...box, marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
+      h('div', { style: { fontWeight: 600 } }, `Card ${made} created`),
+      h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'It shows under Active once it runs.'),
+      h('div', { style: { display: 'flex', gap: 8 } },
+        h(Button, { size: 'sm', onClick: again }, 'Create another'), openKanban, h(Button, { size: 'sm', variant: 'ghost', onClick: onClose }, 'Close')))
+  }
+
+  return h('form', { onSubmit: submit, style: { ...box, marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 } },
+    row('Title', h('input', { ...text('title', { maxLength: 200, autoFocus: true }), style: field })),
+    row('Body', h(Textarea, { ...text('body', { maxLength: 8000, rows: 4 }) })),
+    opts && opts.boards.length === 0
+      ? h('div', { style: { fontSize: '0.8125rem' } }, 'No board has opted in to Calling Mom yet. Run "hermes calling-mom setup" on the gateway.')
+      : h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
+          row('Board', select('board', opts ? opts.boards : [])),
+          row('Assignee', select('assignee', opts ? opts.profiles : [])),
+          row('Priority', h('input', { ...text('priority', { type: 'number', min: 0, max: 100 }), style: { ...field, width: 72 } }))),
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: '0.8125rem' } },
+      FLAGS.map(([name, marker, what]) => h('label', { key: name, style: { display: 'flex', gap: 6, alignItems: 'baseline' } },
+        h('input', { type: 'checkbox', name, checked: f[name], disabled: busy, onChange: e => set(name, e.target.checked) }),
+        h('span', null, h('code', null, (opts && opts.flags[name]) || marker), h('span', { style: muted }, ` ${what}`)))),
+      row('verify: (optional)', h('input', { ...text('verify', { maxLength: 300, placeholder: 'pytest -q' }), style: field })),
+      h('div', { style: { ...muted, fontSize: '0.75rem' } }, 'This command must pass before the worker may complete the card (only for creators listed in calling_mom.verify.trusted_creators).')),
+    error && h('div', { style: { color: 'var(--ui-accent)', fontSize: '0.8125rem' } }, error),
+    h('div', { style: { display: 'flex', gap: 8 } },
+      h(Button, { type: 'submit', size: 'sm', disabled: !ready }, 'Create card'), openKanban,
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', onClick: onClose }, 'Cancel')))
+}
+
 function Page() {
   const s = useStore()
   const [showKept, setShowKept] = useState(false)
+  const [creating, setCreating] = useState(false)
 
   useEffect(() => void refresh(), []) // fresh numbers the moment the page opens, not up to 15 s later
 
@@ -497,8 +586,11 @@ function Page() {
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 } },
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
-      h(WindowSelector, { value: s.hours, onPick: setHours })
+      h('div', { style: { display: 'flex', gap: 12, alignItems: 'center' } },
+        h(Button, { size: 'sm', onClick: () => setCreating(!creating) }, 'New card'),
+        h(WindowSelector, { value: s.hours, onPick: setHours }))
     ),
+    creating && h(NewCardForm, { onClose: () => setCreating(false) }),
     h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, h(VersionLine, { backend: s.summary && s.summary.version })),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),

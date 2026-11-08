@@ -108,6 +108,10 @@ In Hermes Desktop: the **Calling Mom page** (the ladder with the last 7 days, a 
 
 ![The Calling Mom page: the ladder worker, Mom, Olymp, you with counts](assets/screenshots/calling-mom-page.png)
 
+The page also starts work: **New card** in the header opens a small form (title, body, board, assignee, priority, `[crit]`,
+`[review]`, `verify:`) and creates the card through Hermes' own `kanban_create` tool, on a board you opted in. This is a write
+action behind the dashboard login; see [SECURITY.md](SECURITY.md). <!-- screenshot placeholder: assets/screenshots/new-card.png, taken by the README card -->
+
 | A Kanban board with badges | A brief with **Accept recommendation** | A HOLD that stopped a command |
 |---|---|---|
 | ![Badges on cards](assets/screenshots/card-badges.png) | ![Needs you](assets/screenshots/needs-you.png) | ![HOLD on a card](assets/screenshots/hold-on-card.png) |
