@@ -956,6 +956,34 @@ class NewCardTest(DashboardFixture, unittest.TestCase):
         plugin.DEFAULTS["answer"].update(boards=["*"])
         self.assertEqual(self.get("/new-card")["boards"], ["t-board", "other"])
 
+    def test_the_form_offers_the_configured_models_for_a_pin(self):
+        """The Model select: every model of every authenticated provider, provider first."""
+        self._providers = plugin._core.list_providers
+        plugin._core.list_providers = lambda cfg: [{"slug": "vllm", "name": "vLLM", "models": ["slybase/a", "slybase/b"]},
+                                                   {"slug": "radiance", "name": "Radiance", "models": ["swift-c"]}]
+        self.addCleanup(setattr, plugin._core, "list_providers", self._providers)
+        self.assertEqual(self.get("/new-card")["models"], [{"provider": "vllm", "model": "slybase/a"},
+                                                           {"provider": "vllm", "model": "slybase/b"},
+                                                           {"provider": "radiance", "model": "swift-c"}])
+        plugin._core.list_providers = lambda cfg: []
+        self.assertEqual(self.get("/new-card")["models"], [])
+
+    def test_a_pinned_model_and_provider_reach_the_public_tool(self):
+        res = self.create(model="slybase/a", provider="vllm")
+        self.assertEqual(res.status_code, 200, res.text)
+        (_, args), = self.calls
+        self.assertEqual((args["model"], args["provider"]), ("slybase/a", "vllm"))
+
+    def test_a_model_without_a_provider_uses_the_profile_provider(self):
+        self.create(model="slybase/a")
+        (_, args), = self.calls
+        self.assertEqual((args["model"], "provider" in args), ("slybase/a", False))
+
+    def test_a_provider_without_a_model_is_refused(self):
+        res = self.create(provider="vllm")
+        self.assertEqual((res.status_code, res.json()["detail"]), (400, "a provider needs a model"))
+        self.assertEqual(self.calls, [])
+
     def test_the_card_is_created_through_the_public_kanban_create_tool(self):
         res = self.create(body="Please do it.", priority=3, key="abc")
         self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "task_id": "t_new1", "board": "t-board", "status": "ready"}))
@@ -998,6 +1026,8 @@ class NewCardTest(DashboardFixture, unittest.TestCase):
             ("priority negative", {"priority": -1}, 422),
             ("key too long", {"key": "k" * 65}, 422),
             ("assignee too long", {"assignee": "a" * 65}, 422),
+            ("model too long", {"model": "m" * 201}, 422),
+            ("provider too long", {"provider": "p" * 65}, 422),
             ("board that does not exist", {"board": "nowhere"}, 404),
             ("board that did not opt in", {"board": "closed"}, 403),
             ("profile that does not exist", {"assignee": "ghost"}, 400),

@@ -347,11 +347,13 @@ def _boards():
 
 @router.get("/new-card")
 def new_card_options():
-    """What the page's New card form offers: opted-in boards, installed profiles, the plain flags the plugin understands."""
+    """What the page's New card form offers: opted-in boards, installed profiles, the plain flags the plugin understands,
+    and the models of the authenticated providers (the optional pin)."""
     boards, cfg = _boards(), mom().settings()
     current = mom()._core.kb.get_current_board() if boards else None
+    models = [{"provider": p["slug"], "model": m} for p in mom()._core.list_providers(mom()._core.load_config()) for m in p["models"]]
     return {"boards": boards, "default_board": current if current in boards else (boards[0] if boards else None),
-            "profiles": mom()._core.profile_names(), "flags": {"crit": cfg["marker"], "review": cfg["review"]["marker"]}}
+            "profiles": mom()._core.profile_names(), "models": models, "flags": {"crit": cfg["marker"], "review": cfg["review"]["marker"]}}
 
 
 class NewCard(BaseModel):
@@ -363,16 +365,21 @@ class NewCard(BaseModel):
     crit: bool = False
     review: bool = False
     verify: str = Field("", max_length=300)
+    model: str = Field("", max_length=200)     # the optional pin: this card's worker runs on this model
+    provider: str = Field("", max_length=64)
     key: str | None = Field(None, max_length=64)  # the form's id for this attempt: a double click creates one card
 
 
 @router.post("/card")
 def create_card(body: NewCard):
     """A person's New card: the card is made by the PUBLIC ``kanban_create`` tool (never a raw write), on an opted-in
-    board, for an installed profile. ``crit`` / ``review`` become the plain title prefixes and ``verify`` the ``verify:`` line."""
-    title, text, verify = body.title.strip(), body.body.strip(), body.verify.strip()
+    board, for an installed profile. ``crit`` / ``review`` become the plain title prefixes, ``verify`` the ``verify:`` line,
+    and ``model`` / ``provider`` pin the worker's model (a provider only with its model)."""
+    title, text, verify, model, provider = body.title.strip(), body.body.strip(), body.verify.strip(), body.model.strip(), body.provider.strip()
     if not title:
         raise HTTPException(400, "give the card a title")
+    if provider and not model:
+        raise HTTPException(400, "a provider needs a model")
     if "\n" in verify:
         raise HTTPException(400, "verify is one command on one line")
     if body.board not in mom()._core.list_board_slugs():
@@ -388,7 +395,8 @@ def create_card(body: NewCard):
     if verify:
         text = f"{text}\nverify: {verify}".strip()
     args = {"title": title, "assignee": body.assignee, "board": body.board, "priority": body.priority,
-            **({"body": text} if text else {}), **({"idempotency_key": body.key} if body.key else {})}
+            **({"body": text} if text else {}), **({"idempotency_key": body.key} if body.key else {}),
+            **({"model": model} if model else {}), **({"provider": provider} if provider else {})}
     try:
         out = json.loads(mom()._core.dispatch_tool("kanban_create", args))
         task_id = out["task_id"] if out.get("ok") else None
