@@ -301,9 +301,12 @@ function Item({ item }) {
   const button = (key, label, props) => h(Button, { key, size: 'sm', disabled: busy, ...props }, label)
   const holds = item.holds.length > 0
 
-  return h(
+  // a click on the card opens it; a click on a control inside (button, field, code) does not
+  const onCardClick = e => !e.target.closest('button, textarea, code, a') && openCard(item)
+
+  return withMenu(item, h(
     'div',
-    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 8 } },
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 8, cursor: 'pointer' }, onClick: onCardClick },
     h(
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
@@ -355,7 +358,7 @@ function Item({ item }) {
               holds && button('keep', 'Keep blocked', { variant: 'ghost', onClick: keep })
             ].filter(Boolean))
       )
-  )
+  ))
 }
 
 function Section({ title, count, action, children, defaultOpen = true }) {
@@ -413,9 +416,29 @@ function StatusBadge({ status }) {
   return h(Badge, { variant: 'default', style: { color: tone, backgroundColor: `color-mix(in srgb, ${tone} 16%, transparent)` } }, status)
 }
 
-function ActiveItem({ item }) {
+// The right-click menu of a card, shared by Active and Needs you.
+function withMenu(item, card) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const moves = MOVES[item.status] || []
+  const moves = MOVES[item.status || (item.stalled ? 'running' : 'blocked')] || []
+
+  return ContextMenu
+    ? h(
+        ContextMenu,
+        null,
+        h(ContextMenuTrigger, { asChild: true }, card),
+        h(
+          ContextMenuContent,
+          null,
+          h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
+          h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
+          moves.length > 0 && h(ContextMenuSeparator),
+          moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
+        )
+      )
+    : card
+}
+
+function ActiveItem({ item }) {
   const card = h(
     'div',
     { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6, cursor: 'pointer' }, onClick: () => openCard(item) },
@@ -439,21 +462,7 @@ function ActiveItem({ item }) {
         )
       : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )
-  return ContextMenu
-    ? h(
-        ContextMenu,
-        null,
-        h(ContextMenuTrigger, { asChild: true }, card),
-        h(
-          ContextMenuContent,
-          null,
-          h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
-          h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
-          moves.length > 0 && h(ContextMenuSeparator),
-          moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
-        )
-      )
-    : card
+  return withMenu(item, card)
 }
 
 function Page() {
