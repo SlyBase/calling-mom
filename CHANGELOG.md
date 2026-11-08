@@ -3,6 +3,12 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.7.0] - unreleased
+
+### Added
+- **Answer from your phone** (`__init__.py`, `_core.py`, `cli.py`, `desktop/plugin.js`, `dashboard/plugin_api.py`). What waits under "Needs you" (Mom's brief, a held command, a worker's own question) is also sent once to your phone through Hermes' own messaging (Telegram, Signal, Discord, Slack, WhatsApp, ...). New setting `calling_mom.notify.target` (`telegram` = home channel, `telegram:<chat>`; default empty = off); `setup` asks, or `--notify telegram|none`. New tool `calling_mom_answer(card_id, answer, board)` (toolset `calling-mom`, chat sessions only while a target is set): your reply in that chat answers the card through `answer_card(by="phone")`. `A`/`B` become the option text, `accept` takes Mom's recommendation, `allow` lets a held command run once. Redacted like every prompt, never for `[local-only]` cards, never waits for you, a failed send is tried twice more and the card stays in Needs you. `doctor` shows the last result (`phone`), `status` the target, the Desktop card says "sent to telegram". The one private import (`tools.send_message_tool`; `send_message` is not a registered tool) is in `_core.py` and in `docs/UPSTREAM.md`.
+- `GET /needs-you` items gain `sig`, `local_only` and `sent_to`; `waiting()` moved from the dashboard module into the plugin so the sweep and the page read the same list.
+
 ## [1.6.1] - 2026-11-08
 
 ### Added
