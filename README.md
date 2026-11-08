@@ -112,6 +112,10 @@ The page also starts work: **New card** in the header opens a small form (title,
 `[review]`, `verify:`) and creates the card through Hermes' own `kanban_create` tool, on a board you opted in. This is a write
 action behind the dashboard login; see [SECURITY.md](SECURITY.md). <!-- screenshot placeholder: assets/screenshots/new-card.png, taken by the README card -->
 
+**Decide later**: right-click a card under *Needs you* or *Active* and choose it. A card that waits for your answer is put aside (it
+stays blocked, its brief or hold stays recorded, no phone message); any other card is parked in Hermes' `scheduled` status, so
+no worker runs it. Both wait in the collapsible *Later* section until you press **Resume**.
+
 | A Kanban board with badges | A brief with **Accept recommendation** | A HOLD that stopped a command |
 |---|---|---|
 | ![Badges on cards](assets/screenshots/card-badges.png) | ![Needs you](assets/screenshots/needs-you.png) | ![HOLD on a card](assets/screenshots/hold-on-card.png) |
