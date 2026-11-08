@@ -1849,15 +1849,15 @@ def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False
             return fail(409, f"{task_id} is not blocked (it is {task.status})")
         comments, holds = kb.list_comments(conn, task_id), holds_for(task_id)
         briefs = [c for c in comments if (c.body or "").startswith(_FOR_YOU)]
-        if not (briefs or holds):
-            return fail(409, f"{task_id} carries no brief and no hold")
+        if not (briefs or holds or task.block_kind == "needs_input"):
+            return fail(409, f"{task_id} carries no brief, no hold and no question")
         if allow_once and not holds:
             return fail(409, f"{task_id} has no held command to allow")
         if accept:
             text = _recommendation(comments)
             if not text:
                 return fail(400, f"{task_id} has no recommendation to accept")
-        asked = max([c.created_at for c in briefs] + [h.get("ts", 0) for h in holds])
+        asked = max([c.created_at for c in briefs] + [h.get("ts", 0) for h in holds], default=int(time.time()))
         kb.add_comment(conn, task_id, "you", f"{_YOU} {text or 'Allowed once: the held command may run.'}")
         if allow_once:
             for hold in holds:

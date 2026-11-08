@@ -391,7 +391,7 @@ same card goes to `triage` and reaches a person directly. `answer.max_per_card` 
 (`by="cli"`) and the Desktop page (`by="desktop"`). It returns `{"ok": True, "task_id", "text", "unblocked"}` or
 `{"ok": False, "status", "error"}`, with `status` 400 (bad arguments: nothing to do, text and `accept` together, text
 empty or over 2000 characters, unknown `by`, `accept` without a recommendation), 404 (board not opted in, no such
-card) or 409 (not blocked, no brief and no hold, `allow_once` without a hold). Nothing changes on an error. On success:
+card) or 409 (not blocked, no brief, no hold and no question, `allow_once` without a hold). Nothing changes on an error. On success:
 comment `[you via calling-mom] <text>` (`accept` copies the `Recommendation:` line of the newest `[for you]` brief;
 `allow_once` alone writes "Allowed once..."), an allowance for every held command of the card through `allow_once()`
 of the pre-flight, `kb.unblock_task`, and a `human_answer` row. "Opted in" means the board is in `answer.boards` or

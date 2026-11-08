@@ -103,8 +103,19 @@ def _board(board):
         return [(t, mom().kb.list_comments(conn, t.id) if t.status == "blocked" else []) for t in mom().kb.list_tasks(conn)]
 
 
+def _question(board, task):
+    """The reason of the card's last block, i.e. what the worker asked (empty when unknown)."""
+    try:
+        with mom()._connect(board) as conn:
+            blocks = [e for e in mom().kb.list_events(conn, task.id) if e.kind == "blocked"]
+        return str((blocks[-1].payload or {}).get("reason") or "") if blocks else ""
+    except Exception:  # a display must never break the page
+        return ""
+
+
 def _waiting(board, cards, state, now):
-    """The cards of a board that wait for a person: a `[for you]` brief nobody answered yet, or a pre-flight hold nobody allowed."""
+    """The cards of a board that wait for a person: a `[for you]` brief nobody answered yet, a pre-flight hold nobody
+    allowed, or the worker's own question (``needs_input``) when no brief was ever written for it."""
     answered, allowed = state.get("answered") or {}, state.get("allowances") or {}
     items = []
     for task, comments in cards:
@@ -113,10 +124,14 @@ def _waiting(board, cards, state, now):
         briefs = [c for c in comments if (c.body or "").startswith(mom()._FOR_YOU)]
         brief = briefs[-1] if briefs and answered.get(task.id) != briefs[-1].id else None
         holds = [h for h in mom().holds_for(task.id) if h["cmd_hash"] not in (allowed.get(task.id) or {})]
-        if brief or holds:
-            since = min(([brief.created_at] if brief else []) + [h.get("ts", now) for h in holds])
+        asks = not (briefs or mom().holds_for(task.id)) and task.block_kind == "needs_input"  # a brief that was answered means: handled
+        if asks:
+            question = _question(board, task)
+            asks = bool(question) and not question.startswith("Goal-mode")
+        if brief or holds or asks:
+            since = min(([brief.created_at] if brief else []) + [h.get("ts", now) for h in holds] + ([task.last_heartbeat_at or task.created_at or now] if asks else []))
             items.append({"board": board, "task_id": task.id, "title": task.title,
-                          "brief": brief.body.removeprefix(mom()._FOR_YOU).strip() if brief else None,
+                          "brief": brief.body.removeprefix(mom()._FOR_YOU).strip() if brief else (question if asks else None),
                           "holds": [{"reason": h.get("reason"), "alternative": h.get("alternative")} for h in holds],
                           "can_accept": bool(brief and mom()._recommendation(comments)),
                           "age_s": max(0, int(now - since))})

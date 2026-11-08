@@ -289,9 +289,16 @@ class NeedsYouTest(DashboardFixture, unittest.TestCase):
         with_conn(lambda c: kb.add_comment(c, tid, "worker", "[for you] Question: what? (a brief by hand)"))
         self.assertFalse(self.get("/needs-you")[0]["can_accept"])
 
+    def test_a_workers_own_question_waits_for_a_person(self):
+        tid = self.card()
+        with_conn(lambda c: kb.block_task(c, tid, reason="Ship it? yes or no", kind="needs_input"))
+        (item,) = self.get("/needs-you")
+        self.assertEqual((item["task_id"], item["brief"], item["can_accept"]), (tid, "Ship it? yes or no", False))
+        self.assertTrue(plugin.answer_card("t-board", tid, "yes", by="desktop")["ok"])
+
     def test_cards_that_are_not_waiting_for_a_person_are_left_out(self):
         plain = self.card()
-        with_conn(lambda c: kb.block_task(c, plain, reason="x", kind="needs_input"))              # blocked, no brief, no hold
+        with_conn(lambda c: kb.block_task(c, plain, reason="x", kind="capability"))               # blocked, no brief, no hold, no question
         running = self.card()
         with_conn(lambda c: kb.add_comment(c, running, "worker", "[for you] Question: old brief"))  # brief, but not blocked
         self.assertEqual(self.get("/needs-you"), [])

@@ -18,7 +18,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [], showBlocked: true }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [], showBlocked: true, boards: [] }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -404,6 +404,15 @@ function copyTaskId(item) {
     .catch(error => host.notify({ kind: 'error', message: message(error) }))
 }
 
+// A status tag's color: blocked red, running green, ready blue, review violet, the rest grey.
+const STATUS_TONE = { blocked: '#ef4444', running: '#22c55e', ready: '#3b82f6', review: '#8b5cf6', todo: '#9ca3af' }
+
+function StatusBadge({ status }) {
+  const tone = STATUS_TONE[status] || '#9ca3af'
+
+  return h(Badge, { variant: 'default', style: { color: tone, backgroundColor: `color-mix(in srgb, ${tone} 16%, transparent)` } }, status)
+}
+
 function ActiveItem({ item }) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
   const moves = MOVES[item.status] || []
@@ -417,7 +426,7 @@ function ActiveItem({ item }) {
         'div',
         { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
         h('span', { style: { fontWeight: 600 } }, item.title),
-        h(Badge, { variant: item.status === 'running' || item.status === 'blocked' ? 'warn' : 'default' }, item.status),
+        h(StatusBadge, { status: item.status }),
         h('span', { style: muted }, item.board)
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
@@ -456,7 +465,15 @@ function Page() {
   const open = waiting(s)
   const kept = s.needs.filter(item => s.kept.includes(keepKey(item)))
   const asking = new Set(s.needs.map(item => item.task_id)) // already shown under "Needs you"
-  const active = s.active.filter(item => item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id)))
+  const boardNames = [...new Set(s.active.map(item => item.board))].sort()
+  const picked = s.boards.filter(name => boardNames.includes(name))   // empty = all boards
+  const active = s.active.filter(item => (item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id))) && (!picked.length || picked.includes(item.board)))
+  const pickBoard = name => {
+    const boards = name === null ? [] : picked.includes(name) ? picked.filter(b => b !== name) : [...picked, name]
+
+    ctx.storage.set('boards', boards)
+    update({ boards })
+  }
   const toggleBlocked = () => {
     ctx.storage.set('showBlocked', !s.showBlocked)
     update({ showBlocked: !s.showBlocked })
@@ -489,7 +506,10 @@ function Page() {
     s.summary &&
       h(
         Section,
-        { title: 'Active', count: active.length, action: h(Button, { variant: 'text', size: 'inline', onClick: toggleBlocked }, s.showBlocked ? 'Hide blocked' : 'Show blocked') },
+        { title: 'Active', count: active.length, action: h('span', { style: { display: 'flex', gap: 4, alignItems: 'center' } },
+          boardNames.length > 1 && h(Button, { size: 'sm', variant: picked.length ? 'ghost' : 'default', onClick: () => pickBoard(null) }, 'All'),
+          boardNames.length > 1 && boardNames.map(name => h(Button, { key: name, size: 'sm', variant: picked.includes(name) ? 'default' : 'ghost', onClick: () => pickBoard(name) }, name)),
+          h(Button, { variant: 'text', size: 'inline', onClick: toggleBlocked }, s.showBlocked ? 'Hide blocked' : 'Show blocked')) },
         active.length === 0
           ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running, ready or blocked card on the boards you opted in.' })
           : active.map(item => h(ActiveItem, { key: item.task_id, item }))
@@ -586,7 +606,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24), showBlocked: ctx.storage.get('showBlocked', true) })
+    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24), showBlocked: ctx.storage.get('showBlocked', true), boards: ctx.storage.get('boards', []) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },

@@ -3322,7 +3322,7 @@ class AnswerCardTest(QuestionFixture, unittest.TestCase):
 
     def test_bad_requests_change_nothing(self):
         other_card = self.card()                                       # blocked, but no brief and no hold
-        with_conn(lambda c: kb.block_task(c, other_card, reason="x", kind="needs_input"))
+        with_conn(lambda c: kb.block_task(c, other_card, reason="x", kind="capability"))
         gone = self.card()                                             # not blocked
         rows = [  # (case, kwargs, expected status, fragment of the error)
             ("nothing to do", dict(), 400, "nothing to do"),
@@ -3334,9 +3334,9 @@ class AnswerCardTest(QuestionFixture, unittest.TestCase):
             ("unknown board", dict(text="x", board="nowhere"), 404, "did not opt in"),
             ("unknown card", dict(text="x", tid="t_missing"), 404, "no card"),
             ("not blocked", dict(text="x", tid=gone), 409, "not blocked"),
-            ("no brief and no hold", dict(text="x", tid=other_card), 409, "no brief and no hold"),
+            ("no brief and no hold", dict(text="x", tid=other_card), 409, "no brief, no hold"),
             ("allow_once without a hold", dict(allow_once=True), 409, "no held command"),
-            ("accept without a recommendation", dict(accept=True, tid=other_card), 409, "no brief and no hold"),
+            ("accept without a recommendation", dict(accept=True, tid=other_card), 409, "no brief, no hold"),
         ]
         for name, kw, status, fragment in rows:
             with self.subTest(case=name):
