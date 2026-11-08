@@ -18,7 +18,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [], showBlocked: true, boards: [] }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], later: [], kept: [], hours: 24, recent: [], showBlocked: true, boards: [] }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -38,14 +38,15 @@ async function refresh() {
 
   try {
     const hours = state.hours || 24
-    const [summary, needs, cards, active] = await Promise.all([
+    const [summary, needs, cards, active, later] = await Promise.all([
       ctx.rest(`/summary?hours=${hours}`),
       ctx.rest('/needs-you'),
       ctx.rest('/cards'),
-      ctx.rest('/active')
+      ctx.rest('/active'),
+      ctx.rest('/later').catch(() => [])   // a backend from before Decide later has no such route: the page still loads
     ])
 
-    update({ loaded: true, error: null, summary, needs, cards, active, recent: summary.recent })
+    update({ loaded: true, error: null, summary, needs, cards, active, later, recent: summary.recent })
     paintBadges()
   } catch (error) {
     update({ loaded: true, error: message(error) })
@@ -81,11 +82,18 @@ function openCard(item) {
   }, 150)
 }
 
-function moveCard(item, to) {
-  ctx.rest('/move', { method: 'POST', body: { board: item.board, task_id: item.task_id, to } })
+function post(path, item, extra) {
+  ctx.rest(path, { method: 'POST', body: { board: item.board, task_id: item.task_id, ...extra } })
     .then(() => refresh())
     .catch(error => host.notify({ kind: 'error', message: message(error) }))
 }
+
+const moveCard = (item, to) => post('/move', item, { to })
+
+// Decide later: the card stops and waits in the "Later" section (a card that waits on you is only put aside).
+const LATER_FROM = ['todo', 'ready', 'running', 'blocked']
+const laterCard = item => post('/later', item)
+const resumeCard = item => post('/resume', item)
 
 // The card's bucket moves, per its current status: the same verbs as the Kanban board's menu,
 // only the ones a public transition can do (ready→todo stays in the board's drag).
@@ -410,7 +418,7 @@ function copyTaskId(item) {
 }
 
 // A status tag's color: blocked red, running green, ready blue, review violet, the rest grey.
-const STATUS_TONE = { blocked: '#ef4444', running: '#22c55e', ready: '#3b82f6', review: '#8b5cf6', todo: '#9ca3af' }
+const STATUS_TONE = { blocked: '#ef4444', running: '#22c55e', ready: '#3b82f6', review: '#8b5cf6', todo: '#9ca3af', scheduled: '#f59e0b' }
 
 function StatusBadge({ status }) {
   const tone = STATUS_TONE[status] || '#9ca3af'
@@ -421,7 +429,10 @@ function StatusBadge({ status }) {
 // The right-click menu of a card, shared by Active and Needs you.
 function withMenu(item, card) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const moves = MOVES[item.status || (item.stalled ? 'running' : 'blocked')] || []
+  const status = item.status || (item.stalled ? 'running' : 'blocked')
+  const parked = item.parked   // a card of the Later section: it resumes, it is not put off again
+  const moves = parked ? [['archived', 'Archive']] : MOVES[status] || []
+  const decide = parked ? ['Resume', resumeCard] : LATER_FROM.includes(status) && ['Decide later', laterCard]
 
   return ContextMenu
     ? h(
@@ -433,6 +444,7 @@ function withMenu(item, card) {
           null,
           h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
           h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
+          decide && h(ContextMenuItem, { onSelect: () => decide[1](item) }, decide[0]),
           moves.length > 0 && h(ContextMenuSeparator),
           moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
         )
@@ -465,6 +477,36 @@ function ActiveItem({ item }) {
       : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )
   return withMenu(item, card)
+}
+
+// One card of the "Later" section: parked in Hermes' `scheduled` status, or a wait of yours put aside (still blocked).
+function LaterItem({ item }) {
+  const parked = { ...item, parked: true }
+  const first = item.brief ? item.brief.split('\n').find(line => line.trim()) : item.holds.length ? `HOLD: ${item.holds[0].reason}` : null
+
+  return withMenu(parked, h(
+    'div',
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6 } },
+    h(
+      'div',
+      { style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' } },
+      h(
+        'div',
+        { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
+        h('span', { style: { fontWeight: 600 } }, item.title),
+        h(StatusBadge, { status: item.status }),
+        h('span', { style: muted }, item.board)
+      ),
+      h('span', { style: { ...muted, fontSize: '0.6875rem', whiteSpace: 'nowrap' } }, `${item.task_id} · ${item.status === 'scheduled' ? 'put off' : 'waiting'} ${age(item.age_s)}`)
+    ),
+    first && h('div', { style: { ...muted, fontSize: '0.8125rem', whiteSpace: 'pre-wrap' } }, first),
+    h(
+      'div',
+      { style: { display: 'flex', gap: 6 } },
+      h(Button, { size: 'sm', onClick: () => resumeCard(item) }, 'Resume'),
+      h(Button, { size: 'sm', variant: 'ghost', onClick: () => openCard(item) }, 'Open in Kanban')
+    )
+  ))
 }
 
 // ---- New card: the page starts work too, through the backend's POST /card (the public kanban_create tool) -----------
@@ -567,7 +609,8 @@ function Page() {
   const asking = new Set(s.needs.map(item => item.task_id)) // already shown under "Needs you"
   const boardNames = [...new Set(s.active.map(item => item.board))].sort()
   const picked = s.boards.filter(name => boardNames.includes(name))   // empty = all boards
-  const active = s.active.filter(item => (item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id))) && (!picked.length || picked.includes(item.board)))
+  const putOff = new Set(s.later.map(item => item.task_id))   // shown under "Later", not twice
+  const active = s.active.filter(item => (item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id) && !putOff.has(item.task_id))) && (!picked.length || picked.includes(item.board)))
   const pickBoard = name => {
     const boards = name === null ? [] : picked.includes(name) ? picked.filter(b => b !== name) : [...picked, name]
 
@@ -616,6 +659,14 @@ function Page() {
         active.length === 0
           ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running, ready or blocked card on the boards you opted in.' })
           : active.map(item => h(ActiveItem, { key: item.task_id, item }))
+      ),
+    s.summary &&
+      h(
+        Section,
+        { title: 'Later', count: s.later.length, defaultOpen: false },
+        s.later.length === 0
+          ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'Nothing put off. Right-click a card and choose "Decide later" to set it aside.')
+          : s.later.map(item => h(LaterItem, { key: item.task_id, item }))
       ),
     s.summary &&
       h(
