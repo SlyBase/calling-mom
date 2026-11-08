@@ -47,7 +47,7 @@ and `task`, `board`, `run` where known). New or changed in 1.4:
 |---|---|---|
 | `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `no_rationale`, `allowance`, `local_only`), `rationale` (on `hold`: redacted, 160 characters), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
 | `question` | `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`, `ms`, `tokens_in`, `tokens_out`, `usd` | A worker's `needs_input` question was handled. |
-| `human_answer` | `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
+| `human_answer` | `via` (`cli`, `desktop`, `phone`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
 | `verify` | `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ok`, `fails`, `exit`, `ms` | The background `verify:` command changed state. |
 | `advice_late` | `signal`, `ms` | An advice missed the wait and reached the worker on a later tool result. |
 | `web_verify` | `query_hash`, `results` (hits that reached the judge) | A web search was made for a claim (see "Web evidence"). The query text is never stored. |
@@ -388,7 +388,7 @@ same card goes to `triage` and reaches a person directly. `answer.max_per_card` 
 ### `answer_card`
 
 `answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False) -> dict` is the entry point of the CLI
-(`by="cli"`) and the Desktop page (`by="desktop"`). It returns `{"ok": True, "task_id", "text", "unblocked"}` or
+(`by="cli"`), the Desktop page (`by="desktop"`) and the phone tool (`by="phone"`). It returns `{"ok": True, "task_id", "text", "unblocked"}` or
 `{"ok": False, "status", "error"}`, with `status` 400 (bad arguments: nothing to do, text and `accept` together, text
 empty or over 2000 characters, unknown `by`, `accept` without a recommendation), 404 (board not opted in, no such
 card) or 409 (not blocked, no brief, no hold and no question, `allow_once` without a hold). Nothing changes on an error. On success:
@@ -402,9 +402,38 @@ the dashboard) gets one `human_answer via=card` row per brief.
 
 New log rows: `question` has `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`,
 `ms` and, after a model call, `tokens_in`, `tokens_out`, `usd` (Mom's; Olymp is counted in calls). `human_answer` has
-`via` (`cli`, `desktop`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
+`via` (`cli`, `desktop`, `phone`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
 `worker_usage` (one per worker API request) has `task`, `run`, `tokens_in`, `tokens_out`; `preflight` rows that
 reached the model also carry `tokens_in`, `tokens_out`, `usd`.
+
+## Answer from your phone
+
+`calling_mom.notify.target` (default `""` = off) names a Hermes delivery target: `telegram` (the home channel of the platform),
+`telegram:<chat>`, `signal:...`. The sweep (`sweep` -> `notify_waiting(board)`, every 30 s per board, in the dispatcher hook and
+in the cron script) takes the cards of `waiting()` (the one function behind `GET /needs-you`: a `[for you]` brief nobody answered,
+a pre-flight hold nobody allowed, a worker's `needs_input` question without a brief). Each item has a `sig` (`brief:<comment id>`,
+`hold:<hash>`, `ask:<event id>`): a new brief on the same card is a new notice, the same one is never sent twice.
+
+Send path: `_claim_notice` books the try under a file lock (`calling-mom-state.json.lock`; the dispatcher and the cron job both
+sweep) before anything leaves, then `_send_notice` calls `_core.send_message` on a thread (the sweep waits `NOTIFY_WAIT_S` = 15 s
+at most) and records `ok` and an error class in the state (`notified.<card>`, `notify_last`) and as a `notify` log row. A failure
+is retried after 120 s, then 240 s (`NOTIFY_TRIES` = 3, `_retry_due`); a card never leaves Needs you because of it. The text is
+built by `_notice` and redacted by `_redact` (the redactor of the precedents); no redactor, no send. `[local-only]` cards are
+skipped. Why not `ctx.dispatch_tool("send_message")`: Hermes registers no such tool (`tools/send_message_tool.py`: "intentionally NOT
+registered as an agent-callable model tool"), so the call would answer "unknown tool"; `hermes send` and the cron delivery import the
+function, and so does `_core.send_message` (docs/UPSTREAM.md, 7). A subprocess `hermes send` would cost a Hermes start per notice.
+
+Reply path: Hermes mirrors the sent message into the chat session, so the gateway agent sees the card id. It calls the tool
+`calling_mom_answer(card_id, answer, board=None)` (toolset `calling-mom`; `check_fn` = a target is set and the process is not a
+Kanban worker). `handle_answer` finds the board (the first opted-in board that holds the card), maps `accept` / `allow` to the flags
+of `answer_card`, turns a single letter into `A) <option>` from the Options line of the newest brief, and calls
+`answer_card(..., by="phone")`: precedents, comments, unblock and the `human_answer via=phone` row are exactly those of the Desktop
+buttons. Why a tool and not `register_approval_transport` / `ask_choice`: the first is for tool approvals, the second for a slash
+command waiting in one session; neither carries "a card from the board asked you something while nobody was in the chat".
+
+`doctor` shows a `phone` check while a target is set (target and the last result); `status` shows `phone   : <target>|off`.
+`GET /needs-you` items gain `sig`, `local_only` and `sent_to` (the platform of the notice that matches the current `sig`; the
+Desktop page shows "sent to telegram").
 
 ## Precedents
 

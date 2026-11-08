@@ -1248,7 +1248,7 @@ class PromptTest(AdvisorTest):
     def test_tool_has_its_own_toolset_and_is_hidden_outside_workers(self):
         from types import SimpleNamespace as NS
         seen = {}
-        plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: seen.update(kw), llm=self.llm))
+        plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: seen.update(kw) if kw["name"] == "second_opinion" else None, llm=self.llm))
         # "kanban" is a static list in toolsets.py: a tool registered there never reaches the model.
         self.assertEqual(seen["toolset"], "calling-mom")
         self.assertTrue(seen["check_fn"]())
@@ -3330,7 +3330,7 @@ class AnswerCardTest(QuestionFixture, unittest.TestCase):
             ("blank text", dict(text="   "), 400, "1 to 2000"),
             ("text too long", dict(text="x" * 2001), 400, "1 to 2000"),
             ("text is not a string", dict(text=5), 400, "1 to 2000"),
-            ("unknown who", dict(text="x", by="mom"), 400, "'cli' or 'desktop'"),
+            ("unknown who", dict(text="x", by="mom"), 400, "'phone'"),
             ("unknown board", dict(text="x", board="nowhere"), 404, "did not opt in"),
             ("unknown card", dict(text="x", tid="t_missing"), 404, "no card"),
             ("not blocked", dict(text="x", tid=gone), 409, "not blocked"),

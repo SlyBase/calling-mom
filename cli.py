@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -185,11 +186,12 @@ def _get(cfg, dotted, default=None):
     return cfg
 
 
-def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None) -> dict:
+def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None, notify=None) -> dict:
     """Dotted key -> value for one ``setup``. Allowlists only grow: entries you already granted stay.
     ``answer`` None leaves the answer block alone; True/False switches "Mom answers worker questions" on/off.
     ``chat_waits`` None leaves the count block alone; True/False switches the counting of your waits in chat.
-    ``fallback`` None leaves Mom's fallback alone; False clears it; a (provider, model) pair sets it and grants it like Mom."""
+    ``fallback`` None leaves Mom's fallback alone; False clears it; a (provider, model) pair sets it and grants it like Mom.
+    ``notify`` None leaves the phone target alone; "" switches the phone off; ``telegram`` or ``telegram:<chat>`` sets it."""
     pairs = [p for p in (mom, olymp, fallback) if p]
     upd = {
         "calling_mom.mom.provider": mom[0], "calling_mom.mom.model": mom[1],
@@ -208,6 +210,8 @@ def updates(mom, olymp, boards, cfg, answer=None, chat_waits=None, fallback=None
         upd["calling_mom.count.chat_waits"] = chat_waits
     if fallback is not None:
         upd["calling_mom.mom_fallback.provider"], upd["calling_mom.mom_fallback.model"] = fallback or ("", "")
+    if notify is not None:
+        upd["calling_mom.notify.target"] = notify
     return upd
 
 
@@ -222,10 +226,10 @@ def apply_updates(cfg, upd) -> dict:
     return out
 
 
-def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None, fallback=None):
+def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), answer=None, chat_waits=None, fallback=None, notify=None):
     """Ask (or take a preset), return ``(updates, summary_lines)``. Writes nothing. ``answer`` True/False skips the
     question "Let Mom answer worker questions before they reach you?", ``chat_waits`` the one about counting your waits in chat,
-    ``fallback`` (False or a pair) the one about Mom's fallback."""
+    ``fallback`` (False or a pair) the one about Mom's fallback, ``notify`` (a target or "") the one about your phone."""
     if preset:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
@@ -257,11 +261,17 @@ def setup(cfg, listing, boards, ask, say, preset=None, choose=None, routes=(), a
                       ask, say, other=False, choose=choose, default=int(all(current)))
         fallback = _pick_pair("Mom fallback", listing, ask, say, current=current if current[0] else None, choose=choose,
                               routes=routes) if wanted else False
-    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits, fallback)
+    if notify is None:
+        current = _get(cfg, "calling_mom.notify.target", "") or ""
+        targets = [t for t in dict.fromkeys(["telegram", current]) if t]
+        notify = pick("Send what needs you to your phone too (through Hermes' own messaging, you answer by reply)?",
+                      [("no", ""), *[(t + (" (its home channel)" if t == "telegram" else ""), t) for t in targets]],
+                      ask, say, choose=choose, default=targets.index(current) + 1 if current else 0)
+    return _result(cfg, mom, olymp, chosen if chosen is not None else ["*"], answer, chat_waits, fallback, notify)
 
 
-def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None):
-    upd = updates(mom, olymp, boards, cfg, answer, chat_waits, fallback)
+def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None, notify=None):
+    upd = updates(mom, olymp, boards, cfg, answer, chat_waits, fallback, notify)
     summary = [f"mom     : {mom[1]} ({mom[0]})", f"olymp   : {f'{olymp[1]} ({olymp[0]})' if olymp else 'off'}",
                f"boards  : {', '.join(upd['calling_mom.advisor.boards']) or '(none)'}"]
     if answer is not None:
@@ -270,6 +280,8 @@ def _result(cfg, mom, olymp, boards, answer=None, chat_waits=None, fallback=None
         summary.append("chat    : waits counted (kind, seconds, outcome; never the text)" if chat_waits else "chat    : waits not counted")
     if fallback is not None:
         summary.append(f"fallback: {fallback[1]} ({fallback[0]})" if fallback else "fallback: off")
+    if notify is not None:
+        summary.append(f"phone   : {notify}" if notify else "phone   : off")
     return upd, summary
 
 
@@ -355,6 +367,7 @@ def status_lines(cm, spent, errors=None, health=None) -> list:
     answer_boards = ans.get("boards") or []
     lines.append(f"answer  : on, boards: {', '.join(answer_boards) or '(none)'}" if ans.get("enabled") else "answer  : off")
     lines.append(f"count   : chat waits {'on' if (cm.get('count') or {}).get('chat_waits') else 'off'} (kind, seconds, outcome; never the text)")
+    lines.append(f"phone   : {(cm.get('notify') or {}).get('target') or 'off'}")
     if ans.get("enabled") and not answer_boards:
         lines.append("warning : answer is on but no board is listed, Mom answers nothing (run: hermes calling-mom setup)")
     if adv.get("enabled") and not boards:
@@ -399,10 +412,11 @@ def _sweep_check(sweeps):
     return "warn", f"{len(active)} active sweep jobs: {ids}. Keep one: hermes cron remove <id> in that home"
 
 
-def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False, health=None) -> list:
+def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False, health=None, phone=None) -> list:
     """``[(name, "ok"|"warn"|"fail", detail)]``. Live calls only if the static checks passed.
     ``sweeps`` = ``find_sweeps()`` result; None skips the cron check. ``health`` = lines of the providers that are limited or down now.
-    ``board_read`` = ``_core.check_board_read()`` result (None: the board reads work, text: the error); False skips the check."""
+    ``board_read`` = ``_core.check_board_read()`` result (None: the board reads work, text: the error); False skips the check.
+    ``phone`` = the plugin's ``notify_last()`` (None: nothing sent yet); the check shows only while ``notify.target`` is set."""
     out = []
 
     def add(name, status, detail=""):
@@ -445,6 +459,12 @@ def run_checks(cm, llm, probe, version, internals, sweeps=None, board_read=False
         add("advisor", "warn", "off or no board opted in: nothing is sent to the mom or olymp")
     if health:
         add("provider health", "warn", "; ".join(health))
+    target = (cm.get("notify") or {}).get("target")
+    if target:
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(phone["ts"])) if phone else ""
+        add("phone", "warn" if phone and not phone["ok"] else "ok",
+            f"{target}: nothing sent yet" if not phone else f"{target}: last send ok, {when}" if phone["ok"]
+            else f"{target}: last send failed ({phone['error']}), {when}; the card stays in Needs you")
     if sweeps is not None:
         add("sweep cron", *_sweep_check(sweeps))
     if board_read is not False:
@@ -492,6 +512,7 @@ class Env:
     board_read: Optional[Callable] = None  # () -> None when the sweep's board reads work, else the error text
     pace: Optional[Callable] = None        # the plugin's pace_board: (board, n, dry_run=, undo=) -> {ok, lines, error}
     health: Optional[Callable] = None      # () -> lines of the providers that are limited or down now
+    phone: Optional[Callable] = None       # () -> the plugin's notify_last(): {ts, ok, target, error} or None
 
 
 def _blocks(env):
@@ -499,9 +520,11 @@ def _blocks(env):
     return (cfg.get("calling_mom") or {}), (_get(cfg, "plugins.entries.calling-mom.llm", {}) or {})
 
 
-def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fallback=None):
+def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fallback=None, notify=None):
     """Updates and summary: from flags when they say everything, otherwise by asking."""
     routes = env.routes()
+    if notify is not None:
+        notify = "" if notify.strip().lower() == "none" else notify.strip()
     if fallback is not None:
         fallback = False if fallback.strip().lower() == "none" else parse_pair(fallback, routes)
         pair = mom_pair((cfg.get("calling_mom") or {}))
@@ -517,7 +540,7 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fa
                 raise SetupError(f"unknown preset {preset!r}; choose from {sorted(PRESETS)}")
             pair_mom, pair_olymp = PRESETS[preset]["mom"], PRESETS[preset]["olymp"]
         chosen = parse_boards(boards) if boards else ([] if _get(cfg, "calling_mom.advisor.boards") else ["*"])
-        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits, fallback)
+        return _result(cfg, pair_mom, pair_olymp, chosen, answer, chat_waits, fallback, notify)
     if not env.interactive:
         raise SetupError("This is not a terminal, so there is nobody to ask. Pass --mom provider/model (or route:NAME), "
                          "optionally --olymp, --boards and --cron/--no-cron.")
@@ -525,13 +548,13 @@ def _plan(env, cfg, preset, mom, olymp, boards, answer=None, chat_waits=None, fa
     if hint:
         env.say(hint)
     return setup(cfg, env.providers(), env.boards(), env.ask, env.say, preset=preset, choose=env.choose, routes=routes,
-                 answer=answer, chat_waits=chat_waits, fallback=fallback)
+                 answer=answer, chat_waits=chat_waits, fallback=fallback, notify=notify)
 
 
-def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None, fallback=None) -> int:
+def cmd_setup(env, preset=None, yes=False, mom=None, olymp=None, boards=None, cron=None, answer=None, chat_waits=None, fallback=None, notify=None) -> int:
     cfg = env.load()
     try:
-        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits, fallback)
+        upd, summary = _plan(env, cfg, preset, mom, olymp, boards, answer, chat_waits, fallback, notify)
     except SetupError as exc:
         env.say(str(exc))
         return 2
@@ -628,7 +651,7 @@ def cmd_precedents(env, action="list", pid=None) -> int:
 def cmd_doctor(env) -> int:
     cm, llm = _blocks(env)
     checks = run_checks(cm, llm, env.probe, env.version, env.internals, env.sweeps(), env.board_read() if env.board_read else False,
-                        env.health() if env.health else None)
+                        env.health() if env.health else None, env.phone() if env.phone else None)
     for name, status, detail in checks:
         env.say(f"{ {'ok': 'OK  ', 'warn': 'WARN', 'fail': 'FAIL'}[status] }  {name:<17} {detail}".rstrip())
     env.say("INFO  " + DESKTOP_HINT)  # an info line: it never changes the exit code
@@ -637,7 +660,7 @@ def cmd_doctor(env) -> int:
 
 # ---------------------------------------------------------------- Hermes wiring (verified live, see README)
 
-def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None, pace=None, health=None):  # pragma: no cover - needs a live Hermes
+def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None, build_report=None, pace=None, health=None, phone=None):  # pragma: no cover - needs a live Hermes
     def providers():
         return core.list_providers(core.load_config())
 
@@ -673,7 +696,7 @@ def make_env(spent, effective, log_path, core, ask=input, say=print, answer=None
                effective=lambda: {**core.load_config(), "calling_mom": effective()},
                errors=lambda: count_errors(log_path()), answer=answer,
                report=lambda days, board, since=None, until=None: build_report(days, board, since=since, until=until),
-               precedents_path=lambda: precedents.path_for(log_path()), board_read=core.check_board_read, pace=pace, health=health)
+               precedents_path=lambda: precedents.path_for(log_path()), board_read=core.check_board_read, pace=pace, health=health, phone=phone)
 
 
 def setup_parser(parser):  # pragma: no cover - argparse glue
@@ -691,6 +714,8 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
                    help="count how long you wait on prompts in chat: kind, seconds, outcome (default: ask; with flags, keep the current choice)")
     s.add_argument("--fallback", metavar="PROVIDER/MODEL", help="answers when Mom's provider is limited or down: provider/model, route:NAME "
                    "or none (default: ask; alone, it keeps the Mom that is configured)")
+    s.add_argument("--notify", metavar="TARGET", help="also send what needs you to your phone: telegram (its home channel), telegram:<chat>, "
+                   "signal:..., or none (default: ask; with flags, keep the current choice)")
     s.add_argument("--yes", action="store_true", help="accepted for scripts; setup never asks before writing")
     a = sub.add_parser("answer", help="answer a card that carries Mom's brief or a pre-flight HOLD")
     a.add_argument("task", metavar="TASK", help="the card id")
@@ -717,12 +742,12 @@ def setup_parser(parser):  # pragma: no cover - argparse glue
     parser.set_defaults(cm_cmd=None)
 
 
-def dispatch(args, spent, effective, log_path, core, answer=None, build_report=None, pace=None, health=None):  # pragma: no cover - argparse glue
-    env = make_env(spent, effective, log_path, core, answer=answer, build_report=build_report, pace=pace, health=health)
+def dispatch(args, spent, effective, log_path, core, answer=None, build_report=None, pace=None, health=None, phone=None):  # pragma: no cover - argparse glue
+    env = make_env(spent, effective, log_path, core, answer=answer, build_report=build_report, pace=pace, health=health, phone=phone)
     cmd = getattr(args, "cm_cmd", None) or "status"
     if cmd == "setup":
         return cmd_setup(env, preset=args.preset, yes=args.yes, mom=args.mom, olymp=args.olymp, boards=args.boards, cron=args.cron,
-                         answer=args.answer, chat_waits=args.chat_waits, fallback=args.fallback)
+                         answer=args.answer, chat_waits=args.chat_waits, fallback=args.fallback, notify=args.notify)
     if cmd == "pace":
         return cmd_pace(env, args.board, args.max, dry_run=args.dry_run, undo=args.undo)
     if cmd == "answer":

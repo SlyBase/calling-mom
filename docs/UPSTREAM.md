@@ -1,6 +1,6 @@
 # Requests to Hermes
 
-Six things calling-mom 1.5 works around because Hermes has no public seam for them. Each section says what is missing,
+Seven things calling-mom works around because Hermes has no public seam for them. Each section says what is missing,
 what calling-mom does today, which file and function would use the seam, and what the seam would remove. They are drafts
 for an upstream issue each; Timon files them. Every private import stays in `_core.py` (`test_core.OneDoorTest`), so a
 seam replaces code in one place.
@@ -100,3 +100,21 @@ plugin's own data, so it is disclosed in `SECURITY.md` (catalog rule 13).
 
 **Removes.** The `hermes_state` import and the `profile_home` helper. A `ctx.sessions.last_message(session_id, profile=None,
 role="assistant")` returning `{text, at}` or `None`, with the same profile scoping as `host.requestProfile`, would be enough.
+
+## 7. A public way to send a message, and to receive the reply
+
+**Missing.** `send_message` is deliberately not a registered tool, so `ctx.dispatch_tool("send_message", ...)` cannot deliver a
+message to the user's phone. A plugin that wants to say "this card needs you" on Telegram, Signal or Discord has no public door.
+The reply is the second gap: nothing connects "the person answered a plugin's message" to the plugin; today the chat agent has to
+choose to call a plugin tool.
+
+**Today.** `_core.py` `send_message` imports `tools.send_message_tool.send_message_tool` (the function behind `hermes send`) and
+calls it with `{"action": "send", "target": ..., "message": ...}`. The reply goes through the plugin tool `calling_mom_answer`,
+which the chat agent calls when the person answers the mirrored message. It is a private import, listed in `SECURITY.md`
+(rule 13); the text that leaves is redacted first.
+
+**Would use it.** `__init__.py` `_send_notice` and `notify_waiting` (send), `handle_answer` (reply).
+
+**Removes.** The `tools.send_message_tool` import. A `ctx.send_message(target, text, *, reply_to=None) -> {ok, id}` with the same
+target syntax as `hermes send` would be enough, and `ctx.on_reply(message_id, handler)` (called with the person's text when they
+reply to that message, authorised by the platform's own allow-list) would remove the dependency on the chat agent choosing the tool.

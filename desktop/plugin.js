@@ -311,7 +311,7 @@ function Item({ item }) {
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
       h('div', { style: { fontWeight: 600 } }, item.title),
-      h('div', { style: { ...muted, fontSize: '0.75rem', whiteSpace: 'nowrap' } }, `${item.task_id} · ${item.board} · waiting ${age(item.age_s)}`)
+      h('div', { style: { ...muted, fontSize: '0.75rem', whiteSpace: 'nowrap' } }, `${item.task_id} · ${item.board} · waiting ${age(item.age_s)}${item.sent_to ? ` · sent to ${item.sent_to}` : ''}`)
     ),
     item.brief &&
       h(

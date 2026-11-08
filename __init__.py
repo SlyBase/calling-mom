@@ -122,6 +122,9 @@ DEFAULTS = {
     # asked (inside his limits), from `brief_short_from` a brief for the human is kept short. Next to provider/model.
     "mom": {"escalate_below": 4, "brief_short_from": 7},
     "mom_fallback": {"provider": "", "model": ""},  # answers when Mom's provider is limited or down (never replaces Olymp)
+    # What needs you also goes to your phone, through Hermes' own delivery (the `hermes send` path), once per brief.
+    # target: a platform Hermes serves (`telegram` = its home channel, `telegram:<chat>`, `signal:...`). "" = off.
+    "notify": {"target": ""},
     "stall_minutes": 15,  # a running card without a heartbeat this long gets a [stalled] comment (0 = off)
     "guard_minutes": 30,  # a ready card the dispatcher's respawn guard holds back this long gets a [guarded] comment (0 = off)
     "local_only_marker": "[local-only]",  # such cards never send anything to a remote model
@@ -701,7 +704,7 @@ def sweep(board=None) -> list:
         logger.warning("calling-mom: sweep failed on board %s: %s", board, exc)
     if board and _opted_in(board) and time.time() - _last_scan.get(board, 0) >= TOUCH_EVERY_S:
         _last_scan[board] = time.time()
-        for scan in (_record_touches, _record_stalls, _record_guards):
+        for scan in (_record_touches, _record_stalls, _record_guards, notify_waiting):
             try:
                 scan(board)
             except Exception as exc:  # counting must never break the sweep
@@ -1774,9 +1777,14 @@ def _precedents_path() -> Path:
     return precedents.path_for(_log_path())
 
 
+def _redact(text) -> str:
+    """Redacted like an outbound prompt (URL passwords, then Hermes' secret patterns). Raises when the redactor is missing."""
+    return _core.redact_for_egress(_URL_CREDS.sub(r"\1***@", str(text)))
+
+
 def _clean(text) -> str:
     """Redacted like an outbound prompt, one line, at most 500 characters. Raises when the redactor is missing."""
-    return " ".join(_core.redact_for_egress(_URL_CREDS.sub(r"\1***@", str(text))).split())[:precedents.MAX_CHARS]
+    return " ".join(_redact(text).split())[:precedents.MAX_CHARS]
 
 
 def _record_precedent(task, board, brief, answer) -> None:
@@ -1822,7 +1830,7 @@ def _opted_in(board) -> bool:
 
 
 def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False) -> dict:
-    """A person answers a card that carries Mom's brief or a pre-flight HOLD (the CLI and the Desktop page call this).
+    """A person answers a card that carries Mom's brief or a pre-flight HOLD (the CLI, the Desktop page and the phone tool call this).
 
     Writes the answer as ``[you via calling-mom] ...`` (``accept`` copies Mom's recommendation), records an
     allowance for every held command when ``allow_once``, unblocks the card and logs ``human_answer``. Returns
@@ -1830,8 +1838,8 @@ def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False
     def fail(status, error):
         return {"ok": False, "status": status, "error": error}
 
-    if by not in ("cli", "desktop"):
-        return fail(400, "by must be 'cli' or 'desktop'")
+    if by not in ("cli", "desktop", "phone"):
+        return fail(400, "by must be 'cli', 'desktop' or 'phone'")
     text = text.strip() if isinstance(text, str) else text
     if text is not None and not (isinstance(text, str) and 0 < len(text) <= 2000):
         return fail(400, "text must be 1 to 2000 characters")
@@ -1872,6 +1880,212 @@ def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False
     if briefs:
         _record_precedent(task, board, briefs[-1], text)
     return {"ok": True, "task_id": task_id, "text": text, "unblocked": bool(released)}
+
+
+def _last_block(board, task) -> tuple:
+    """``(reason, event id)`` of the card's last block, i.e. what the worker asked (``("", None)`` when unknown)."""
+    with _connect(board) as conn:
+        blocks = [e for e in kb.list_events(conn, task.id) if e.kind == "blocked"]
+    return (str((blocks[-1].payload or {}).get("reason") or ""), blocks[-1].id) if blocks else ("", None)
+
+
+def blocked_cards(board) -> list:
+    """The cards of one board, read-only: ``[(task, comments)]``; comments only for blocked cards."""
+    with _connect(board) as conn:
+        return [(t, kb.list_comments(conn, t.id) if t.status == "blocked" else []) for t in kb.list_tasks(conn)]
+
+
+def waiting(board, cards, state, now) -> list:
+    """The cards of a board that wait for a person: a `[for you]` brief nobody answered yet, a pre-flight hold nobody
+    allowed, or the worker's own question (``needs_input``) when no brief was ever written for it. ``sig`` names WHAT
+    they wait on (a new brief or question on the same card gets a new one); ``sent_to`` is the platform the phone
+    notice for exactly this ``sig`` reached, or None."""
+    answered, allowed, notified = state.get("answered") or {}, state.get("allowances") or {}, state.get("notified") or {}
+    items = []
+    for task, comments in cards:
+        if task.status != "blocked":
+            continue
+        briefs = [c for c in comments if (c.body or "").startswith(_FOR_YOU)]
+        brief = briefs[-1] if briefs and answered.get(task.id) != briefs[-1].id else None
+        holds = [h for h in holds_for(task.id) if h["cmd_hash"] not in (allowed.get(task.id) or {})]
+        asks = not (briefs or holds_for(task.id)) and task.block_kind == "needs_input"  # a brief that was answered means: handled
+        if asks:
+            question, block_id = _last_block(board, task)
+            asks = bool(question) and not question.startswith("Goal-mode")
+        if brief or holds or asks:
+            since = min(([brief.created_at] if brief else []) + [h.get("ts", now) for h in holds] + ([task.last_heartbeat_at or task.created_at or now] if asks else []))
+            sig = "|".join(([f"brief:{brief.id}"] if brief else []) + [f"hold:{h['cmd_hash']}" for h in holds] + ([f"ask:{block_id}"] if asks else []))
+            sent = notified.get(task.id) or {}
+            items.append({"board": board, "task_id": task.id, "title": task.title,
+                          "brief": brief.body.removeprefix(_FOR_YOU).strip() if brief else (question if asks else None),
+                          "holds": [{"reason": h.get("reason"), "alternative": h.get("alternative")} for h in holds],
+                          "can_accept": bool(brief and _recommendation(comments)),
+                          "sig": sig, "local_only": _is_local_only(task),
+                          "sent_to": sent.get("platform") if sent.get("ok") and sent.get("sig") == sig else None,
+                          "age_s": max(0, int(now - since))})
+    return items
+
+
+# ---------------------------------------------------------------- the phone: what needs you is sent once, a reply answers it
+
+NOTIFY_WAIT_S = 15  # ponytail: a send that hangs longer is left to its own thread (the sweep goes on); a cron run that ends first leaves it "pending" and the retry sends it again
+NOTIFY_TRIES = 3
+NOTIFY_RETRY_S = 120  # the pause after try n is n x this
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - no file lock on this platform: the worst case is one notice twice
+    fcntl = None
+
+
+@contextlib.contextmanager
+def _state_lock():
+    """One writer of the notice records at a time: the sweep runs in the dispatcher AND in the cron job."""
+    _holds_path().parent.mkdir(parents=True, exist_ok=True)
+    with open(_holds_path().with_name(_holds_path().name + ".lock"), "a") as fh:
+        if fcntl:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def notify_last() -> "dict | None":
+    """The newest phone send, ``{ts, ok, target, error}`` (the error is a class name), or None: what ``doctor`` shows."""
+    return _load_holds().get("notify_last")
+
+
+def _retry_due(entry, now) -> bool:
+    return not entry.get("ok") and entry.get("n", 0) < NOTIFY_TRIES and now - entry.get("ts", 0) >= NOTIFY_RETRY_S * entry.get("n", 1)
+
+
+def _claim_notice(task_id, sig, target, now) -> bool:
+    """Book the next try of one notice before it is sent. False: it was sent already, or another process booked it first."""
+    with _state_lock():
+        data = _load_holds()
+        entry = (data.get("notified") or {}).get(task_id) or {}
+        same = entry.get("sig") == sig
+        if same and not _retry_due(entry, now):
+            return False
+        data.setdefault("notified", {})[task_id] = {"sig": sig, "ts": int(now), "ok": False, "n": entry["n"] + 1 if same else 1,
+                                                    "target": target, "platform": target.partition(":")[0].strip().lower(), "error": "pending"}
+        _write_state(data)
+    return True
+
+
+def _notice(item, board) -> str:
+    """The text for the phone: the card, what is asked (Mom's brief, the held command or the worker's question), how to reply."""
+    one = lambda text, width=400: " ".join(str(text).split())[:width]
+    lines = [f"Calling Mom: needs you\n{item['task_id']} on board {board}: {one(item['title'], 200)}"]
+    if item["brief"]:
+        lines.append(item["brief"][:1500])
+    lines += [f"Held command: {one(h['reason'] or '?')}\nInstead: {one(h['alternative'] or '-')}" for h in item["holds"]]
+    options = ["A, B"] if item["can_accept"] or "Options:" in (item["brief"] or "") else []
+    options += ["allow (the held command runs once)"] if item["holds"] else []
+    lines.append("Reply: " + ", ".join(options + ["or your own answer"]) if options else "Reply: your answer")
+    return "\n\n".join(lines) + f"\n(card {item['task_id']}, board {board})"
+
+
+def _send_notice(task_id, board, sig, target, text) -> None:
+    """Send on a thread of its own and record the result; wait at most ``NOTIFY_WAIT_S`` for it. Never raises."""
+    def work():
+        try:
+            out = _core.send_message(target, text)
+            ok = bool(out.get("success")) and not out.get("error")
+            error = None if ok else "send_failed"
+        except Exception as exc:  # the class only: the text of an error may carry a chat id or a token
+            ok, error = False, type(exc).__name__
+        with _state_lock():
+            data = _load_holds()
+            entry = (data.get("notified") or {}).get(task_id)
+            if entry and entry.get("sig") == sig:
+                entry.update(ok=ok, error=error)
+            data["notify_last"] = {"ts": int(time.time()), "ok": ok, "target": target, "error": error}
+            _write_state(data)
+        _trace_row("notify", task=task_id, board=board, ok=ok, error=error)
+
+    thread = threading.Thread(target=work, name="calling-mom-notify", daemon=True)
+    thread.start()
+    thread.join(NOTIFY_WAIT_S)
+
+
+def notify_waiting(board, now=None) -> int:
+    """Send what waits for a person on an opted-in board to ``calling_mom.notify.target``, once per brief, hold or
+    question (``sig``). Nothing waits on the answer (rule 12): a failed send keeps the card in Needs you and is tried
+    again after a pause, three times in all. Cards marked local-only stay off the phone; nothing is sent when the
+    redactor is missing. Returns the number of sends started."""
+    target = str(settings()["notify"].get("target") or "").strip()
+    if not target or not _opted_in(board) or _core.redact_for_egress is None:
+        return 0
+    now = time.time() if now is None else now
+    started = 0
+    for item in waiting(board, blocked_cards(board), _load_holds(), now):
+        if item["local_only"] or not _claim_notice(item["task_id"], item["sig"], target, now):
+            continue
+        _send_notice(item["task_id"], board, item["sig"], target, _redact(_notice(item, board)))
+        started += 1
+    return started
+
+
+_OPTION = re.compile(r"\b([A-Z])\s*[):.]\s*(.+?)(?=\s+[A-Z]\s*[):.]|$)")
+_ACCEPT, _ALLOW = ("accept", "accept recommendation"), ("allow", "allow once")
+
+
+def _find_board(card_id) -> "str | None":
+    for board in _core.list_board_slugs():
+        if _opted_in(board):
+            with _connect(board) as conn:
+                if kb.get_task(conn, card_id) is not None:
+                    return board
+    return None
+
+
+def _option_text(board, card_id, letter) -> str:
+    """``A`` -> ``A) Okta`` from the Options line of the card's newest brief; the letter as it is when there is none."""
+    with _connect(board) as conn:
+        briefs = [c.body for c in kb.list_comments(conn, card_id) if (c.body or "").startswith(_FOR_YOU)]
+    match = _BRIEF.search(briefs[-1]) if briefs else None
+    found = dict(_OPTION.findall(match.group(2))) if match else {}
+    return f"{letter}) {found[letter].strip(' ,;')}" if letter in found else letter
+
+
+def handle_answer(args, **_):
+    """Tool ``calling_mom_answer``: the person replied on their phone. Goes through ``answer_card`` like the Desktop buttons.
+    A single letter stands for that option of Mom's brief; ``accept`` takes her recommendation; ``allow`` runs a held command once."""
+    card, text = str((args or {}).get("card_id") or "").strip(), str((args or {}).get("answer") or "").strip()
+    if not (card and text):
+        return json.dumps({"ok": False, "error": "needs card_id and answer"})
+    try:
+        board = str(args.get("board") or "").strip() or _find_board(card)
+        if board is None:
+            return json.dumps({"ok": False, "error": f"no card {card!r} on a board that opted in to calling-mom"})
+        low = text.lower()
+        if low in _ACCEPT + _ALLOW:
+            out = answer_card(board, card, None, by="phone", accept=low in _ACCEPT, allow_once=low in _ALLOW)
+        else:
+            out = answer_card(board, card, _option_text(board, card, text.upper()) if len(text) == 1 and text.isalpha() else text, by="phone")
+    except Exception as exc:  # a board that does not exist, a store Hermes cannot open
+        return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    return json.dumps(out)
+
+
+def _answer_tool_on() -> bool:
+    """The tool exists in chat sessions only (a Kanban worker must not answer its own question) and only when the phone is set up."""
+    return bool(settings()["notify"].get("target")) and not os.environ.get("HERMES_KANBAN_TASK")
+
+
+_ANSWER_TOOL = {
+    "name": "calling_mom_answer",
+    "description": "The person replied on their phone to a 'Calling Mom: needs you' message (it names a card id). Pass the card id "
+                   "and their reply: a letter (A, B) for one of the options in the message, 'accept' for Mom's recommendation, "
+                   "'allow' to let the held command run once, or their own words. Use it only for such a reply.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "card_id": {"type": "string", "description": "The card id from the message (t_...)."},
+            "answer": {"type": "string", "description": "A, B, accept, allow, or the person's own words."},
+            "board": {"type": "string", "description": "The board named in the message (optional)."},
+        },
+        "required": ["card_id", "answer"],
+    },
+}
 
 
 class _Verify:
@@ -2305,7 +2519,7 @@ def register(ctx) -> None:
     if register_cli is not None:  # older Hermes: no plugin CLI, the config keys still work
         register_cli(name="calling-mom", help="set up, inspect and test the Calling Mom plugin",
                      setup_fn=cli.setup_parser,
-                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card, attention_report, pace_board, provider_health_lines),
+                     handler_fn=lambda args: cli.dispatch(args, _spent_today, settings, _log_path, _core, answer_card, attention_report, pace_board, provider_health_lines, notify_last),
                      description="setup: choose mom/olymp from your providers. status: show setup and usage. "
                                  "doctor: check the setup with one real call per model. "
                                  "answer: answer a card that carries Mom's brief or a pre-flight HOLD. "
@@ -2328,6 +2542,8 @@ def register(ctx) -> None:
     ctx.register_tool(name="second_opinion", toolset="calling-mom", schema=_SECOND_OPINION,
                       handler=handle_second_opinion, check_fn=lambda: bool(os.environ.get("HERMES_KANBAN_TASK")),
                       emoji="\U0001f9d0")
+    ctx.register_tool(name="calling_mom_answer", toolset="calling-mom", schema=_ANSWER_TOOL, handler=handle_answer,
+                      check_fn=_answer_tool_on, emoji="\U0001f4f1")
     ctx.register_hook("on_kanban_dispatch_tick", on_dispatch_tick)
     ctx.register_hook("on_kanban_worker_exited", on_worker_exited)
     ctx.register_hook("api_request_error", on_api_error)
