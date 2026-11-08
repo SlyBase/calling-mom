@@ -18,7 +18,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [] }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [], showBlocked: true }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -60,8 +60,25 @@ function setHours(hours) {
 
 // The card's board door: the Kanban page opens its own drawer, and the drawer has no URL
 // door a plugin can park on, so a card opens there, not here.
+// The drawer is the Kanban page's own state, so after the jump the card is clicked where it is drawn:
+// its footer shows the short id (best effort; the card must sit on the board the page shows).
 function openCard(item) {
   host.navigate('/kanban')
+
+  const short = item.task_id.replace(/^t_/, '').slice(0, 6)
+  let tries = 0
+  const timer = setInterval(() => {
+    const footer = [...document.querySelectorAll('span.font-mono')].find(el => el.textContent === short)
+    const card = footer && footer.closest('[draggable="true"]')
+
+    if (card) {
+      card.click()
+    }
+
+    if (card || ++tries > 20) {
+      clearInterval(timer)
+    }
+  }, 150)
 }
 
 function moveCard(item, to) {
@@ -399,7 +416,7 @@ function ActiveItem({ item }) {
         'div',
         { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
         h('span', { style: { fontWeight: 600 } }, item.title),
-        h(Badge, { variant: item.status === 'running' ? 'warn' : 'default' }, item.status),
+        h(Badge, { variant: item.status === 'running' || item.status === 'blocked' ? 'warn' : 'default' }, item.status),
         h('span', { style: muted }, item.board)
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
@@ -407,7 +424,7 @@ function ActiveItem({ item }) {
     item.last_chat
       ? h(
           'div',
-          { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
+          { style: { ...muted, fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
           item.last_chat
         )
       : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
@@ -437,6 +454,12 @@ function Page() {
 
   const open = waiting(s)
   const kept = s.needs.filter(item => s.kept.includes(keepKey(item)))
+  const asking = new Set(s.needs.map(item => item.task_id)) // already shown under "Needs you"
+  const active = s.active.filter(item => item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id)))
+  const toggleBlocked = () => {
+    ctx.storage.set('showBlocked', !s.showBlocked)
+    update({ showBlocked: !s.showBlocked })
+  }
 
   return h(
     'div',
@@ -465,10 +488,11 @@ function Page() {
     s.summary &&
       h(
         Section,
-        { title: 'Active', count: s.active.length },
-        s.active.length === 0
-          ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running or ready card on the boards you opted in.' })
-          : s.active.map(item => h(ActiveItem, { key: item.task_id, item }))
+        { title: 'Active', count: active.length },
+        h(Button, { variant: 'text', size: 'inline', onClick: toggleBlocked }, s.showBlocked ? 'Hide blocked' : 'Show blocked'),
+        active.length === 0
+          ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running, ready or blocked card on the boards you opted in.' })
+          : active.map(item => h(ActiveItem, { key: item.task_id, item }))
       ),
     s.summary &&
       h(
@@ -562,7 +586,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24) })
+    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24), showBlocked: ctx.storage.get('showBlocked', true) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },

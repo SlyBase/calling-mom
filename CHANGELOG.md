@@ -6,6 +6,9 @@ versioning: [SemVer](https://semver.org/).
 ## [1.6.0] - 2026-11-07
 
 ### Added
+- **Desktop: blocked cards show under Active, with a Hide/Show switch** (`desktop/plugin.js`, `dashboard/plugin_api.py`). `GET /active` now lists blocked cards too; a card that already waits under "Needs you" is not shown twice. The switch is kept in the app's storage (default: shown).
+- **Desktop: "Open card" also opens the card's detail drawer** (`desktop/plugin.js`). After the jump to Kanban the card is clicked where it is drawn (best effort: it must be on the board the page shows).
+- **Desktop: the last worker message of an Active card is grey**, to tell it from the title (`desktop/plugin.js`).
 - **Desktop: the page shows the version under the title** (`desktop/plugin.js`, `dashboard/plugin_api.py`). The tagline is gone; the line reads `v1.6.0`, or `Desktop v… · Backend v…` when the app's copy and the gateway differ, so a stale Desktop half is visible at once, with a note next to the version. `GET /summary` gains `version` (from `plugin.yaml`); a test keeps `plugin.js` and `plugin.yaml` equal.
 - **Desktop: right-click menu of an Active card has "Copy task id"** (`desktop/plugin.js`).
 - **Mom rates her own answer: confidence 1-10** (`__init__.py`). The Mom-first prompt of the advisor gate and every prompt of the question flow end with a request for one line, `CONFIDENCE: <1-10> | <reason>`. Below `calling_mom.mom.escalate_below` (default 4) Olymp is asked, with no new way past his per-card and per-day limits and never for a brief-only question; from `calling_mom.mom.brief_short_from` (default 7) a brief for the human is cut to 160 characters a line. A missing, garbled or out-of-range value changes nothing; the `ESCALATE:` prefix still works. The line is never posted to the card. The `advisor` and `question` log rows carry `confidence`. TECHNICAL.md gets a References section with the SMART paper (arXiv:2611.08196v1).

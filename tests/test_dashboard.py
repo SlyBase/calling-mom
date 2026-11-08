@@ -542,8 +542,8 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         self.assertEqual((item["board"], item["task_id"], item["title"], item["status"]), ("t-board", tid, "ship the parser", "running"))
         self.assertNotIn("last_comment", item)
 
-    def test_only_running_and_ready_cards_are_active(self):
-        for status, active in (("running", True), ("ready", True), ("blocked", False), ("todo", False), ("done", False)):
+    def test_only_running_ready_and_blocked_cards_are_active(self):
+        for status, active in (("running", True), ("ready", True), ("blocked", True), ("todo", False), ("done", False)):
             tid = self.card()
             self.set_status(tid, status)
             self.assertEqual(bool(self.active(tid)), active, status)

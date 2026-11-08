@@ -62,7 +62,7 @@ def _titles():
 
 
 def _active():
-    """Running/ready cards on the opted-in boards, with the worker's last chat message (null when there is none), newest last-activity first."""
+    """Running/ready/blocked cards on the opted-in boards, with the worker's last chat message (null when there is none), newest last-activity first."""
     items = []
     for board in mom()._core.list_board_slugs():
         if mom()._opted_in(board):
@@ -84,11 +84,11 @@ def _last_chat(board, task):
 
 
 def _active_tasks(board):
-    """The running/ready cards of one board, each with the worker's last chat message; the last-activity stamp comes from the card and its comments."""
+    """The running/ready/blocked cards of one board, each with the worker's last chat message; the last-activity stamp comes from the card and its comments."""
     with mom()._connect(board) as conn:
         out = []
         for t in mom().kb.list_tasks(conn):
-            if t.status in ("running", "ready"):
+            if t.status in ("running", "ready", "blocked"):
                 comments = mom().kb.list_comments(conn, t.id)
                 out.append({
                     "board": board, "task_id": t.id, "title": t.title, "status": t.status,
