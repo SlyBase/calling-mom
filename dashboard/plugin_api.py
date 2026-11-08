@@ -105,12 +105,9 @@ def _board(board):
 
 def _question(board, task):
     """The reason of the card's last block, i.e. what the worker asked (empty when unknown)."""
-    try:
-        with mom()._connect(board) as conn:
-            blocks = [e for e in mom().kb.list_events(conn, task.id) if e.kind == "blocked"]
-        return str((blocks[-1].payload or {}).get("reason") or "") if blocks else ""
-    except Exception:  # a display must never break the page
-        return ""
+    with mom()._connect(board) as conn:
+        blocks = [e for e in mom().kb.list_events(conn, task.id) if e.kind == "blocked"]
+    return str((blocks[-1].payload or {}).get("reason") or "") if blocks else ""
 
 
 def _waiting(board, cards, state, now):
