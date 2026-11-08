@@ -99,40 +99,12 @@ def _active_tasks(board):
 
 def _board(board):
     """The cards of one board, read-only: ``[(task, comments)]``; comments only for blocked cards."""
-    with mom()._connect(board) as conn:
-        return [(t, mom().kb.list_comments(conn, t.id) if t.status == "blocked" else []) for t in mom().kb.list_tasks(conn)]
-
-
-def _question(board, task):
-    """The reason of the card's last block, i.e. what the worker asked (empty when unknown)."""
-    with mom()._connect(board) as conn:
-        blocks = [e for e in mom().kb.list_events(conn, task.id) if e.kind == "blocked"]
-    return str((blocks[-1].payload or {}).get("reason") or "") if blocks else ""
+    return mom().blocked_cards(board)
 
 
 def _waiting(board, cards, state, now):
-    """The cards of a board that wait for a person: a `[for you]` brief nobody answered yet, a pre-flight hold nobody
-    allowed, or the worker's own question (``needs_input``) when no brief was ever written for it."""
-    answered, allowed = state.get("answered") or {}, state.get("allowances") or {}
-    items = []
-    for task, comments in cards:
-        if task.status != "blocked":
-            continue
-        briefs = [c for c in comments if (c.body or "").startswith(mom()._FOR_YOU)]
-        brief = briefs[-1] if briefs and answered.get(task.id) != briefs[-1].id else None
-        holds = [h for h in mom().holds_for(task.id) if h["cmd_hash"] not in (allowed.get(task.id) or {})]
-        asks = not (briefs or mom().holds_for(task.id)) and task.block_kind == "needs_input"  # a brief that was answered means: handled
-        if asks:
-            question = _question(board, task)
-            asks = bool(question) and not question.startswith("Goal-mode")
-        if brief or holds or asks:
-            since = min(([brief.created_at] if brief else []) + [h.get("ts", now) for h in holds] + ([task.last_heartbeat_at or task.created_at or now] if asks else []))
-            items.append({"board": board, "task_id": task.id, "title": task.title,
-                          "brief": brief.body.removeprefix(mom()._FOR_YOU).strip() if brief else (question if asks else None),
-                          "holds": [{"reason": h.get("reason"), "alternative": h.get("alternative")} for h in holds],
-                          "can_accept": bool(brief and mom()._recommendation(comments)),
-                          "age_s": max(0, int(now - since))})
-    return items
+    """The cards of a board that wait for a person (the plugin's ``waiting``: a brief, a hold or a worker question)."""
+    return mom().waiting(board, cards, state, now)
 
 
 def _stalled(board, cards, now):

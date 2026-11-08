@@ -7,6 +7,8 @@ place, `hermes calling-mom doctor` names it, and the plugin degrades instead of 
 ``ERROR`` is None when everything the plugin needs is importable. When it is set, ``register`` installs no
 hooks. The helpers below are best effort and return safe values.
 """
+import json
+
 try:
     from agent.redact import redact_for_egress
     from hermes_cli import kanban_db as kb
@@ -195,3 +197,12 @@ def hermes_version() -> str:
         return str(__version__)
     except Exception:
         return "?"
+
+
+def send_message(target, text) -> dict:
+    """One message through Hermes' own delivery: the function behind ``hermes send`` (target ``telegram`` = the home
+    channel, ``telegram:<chat>`` = one chat). Returns Hermes' result (``success`` or ``error``). Raises when the import fails.
+
+    ``send_message`` is deliberately not a registered tool, so ``ctx.dispatch_tool`` cannot reach it (docs/UPSTREAM.md)."""
+    from tools.send_message_tool import send_message_tool
+    return json.loads(send_message_tool({"action": "send", "target": target, "message": text}))

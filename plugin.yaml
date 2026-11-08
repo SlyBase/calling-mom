@@ -12,6 +12,7 @@ description: >
   doctor commands: hermes calling-mom.
 provides_tools:
   - second_opinion
+  - calling_mom_answer
 provides_hooks:
   - kanban_task_claimed
   - kanban_task_blocked
