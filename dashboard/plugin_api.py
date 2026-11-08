@@ -93,9 +93,15 @@ def _active_tasks(board):
         for t in mom().kb.list_tasks(conn):
             if t.status in ("running", "ready", "blocked"):
                 comments = mom().kb.list_comments(conn, t.id)
+                last = max(comments, key=lambda c: c.created_at) if comments else None
                 out.append({
                     "board": board, "task_id": t.id, "title": t.title, "status": t.status,
                     "last_chat": _last_chat(board, t),
+                    "last_comment": {
+                        "author": last.author,
+                        "body": (last.body or "")[:200],
+                        "created_at": last.created_at,
+                    } if last else None,
                     "_last_activity": max([t.created_at or 0] + [c.created_at for c in comments])})
         return out
 
