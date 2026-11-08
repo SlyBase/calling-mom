@@ -5,7 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
-const VERSION = '1.6.0' // must equal plugin.yaml (a test checks it): the page shows which copy runs
+const VERSION = '1.6.1' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
