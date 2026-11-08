@@ -289,9 +289,16 @@ class NeedsYouTest(DashboardFixture, unittest.TestCase):
         with_conn(lambda c: kb.add_comment(c, tid, "worker", "[for you] Question: what? (a brief by hand)"))
         self.assertFalse(self.get("/needs-you")[0]["can_accept"])
 
+    def test_a_workers_own_question_waits_for_a_person(self):
+        tid = self.card()
+        with_conn(lambda c: kb.block_task(c, tid, reason="Ship it? yes or no", kind="needs_input"))
+        (item,) = self.get("/needs-you")
+        self.assertEqual((item["task_id"], item["brief"], item["can_accept"]), (tid, "Ship it? yes or no", False))
+        self.assertTrue(plugin.answer_card("t-board", tid, "yes", by="desktop")["ok"])
+
     def test_cards_that_are_not_waiting_for_a_person_are_left_out(self):
         plain = self.card()
-        with_conn(lambda c: kb.block_task(c, plain, reason="x", kind="needs_input"))              # blocked, no brief, no hold
+        with_conn(lambda c: kb.block_task(c, plain, reason="x", kind="capability"))               # blocked, no brief, no hold, no question
         running = self.card()
         with_conn(lambda c: kb.add_comment(c, running, "worker", "[for you] Question: old brief"))  # brief, but not blocked
         self.assertEqual(self.get("/needs-you"), [])
@@ -542,8 +549,8 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         self.assertEqual((item["board"], item["task_id"], item["title"], item["status"]), ("t-board", tid, "ship the parser", "running"))
         self.assertNotIn("last_comment", item)
 
-    def test_only_running_and_ready_cards_are_active(self):
-        for status, active in (("running", True), ("ready", True), ("blocked", False), ("todo", False), ("done", False)):
+    def test_only_running_ready_and_blocked_cards_are_active(self):
+        for status, active in (("running", True), ("ready", True), ("blocked", True), ("todo", False), ("done", False)):
             tid = self.card()
             self.set_status(tid, status)
             self.assertEqual(bool(self.active(tid)), active, status)

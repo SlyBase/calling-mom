@@ -5,7 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
-const VERSION = '1.6.0' // must equal plugin.yaml (a test checks it): the page shows which copy runs
+const VERSION = '1.6.1' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
@@ -18,7 +18,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [] }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [], showBlocked: true, boards: [] }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -60,8 +60,25 @@ function setHours(hours) {
 
 // The card's board door: the Kanban page opens its own drawer, and the drawer has no URL
 // door a plugin can park on, so a card opens there, not here.
+// The drawer is the Kanban page's own state, so after the jump the card is clicked where it is drawn:
+// its footer shows the short id (best effort; the card must sit on the board the page shows).
 function openCard(item) {
   host.navigate('/kanban')
+
+  const short = item.task_id.replace(/^t_/, '').slice(0, 6)
+  let tries = 0
+  const timer = setInterval(() => {
+    const footer = [...document.querySelectorAll('span.font-mono')].find(el => el.textContent === short)
+    const card = footer && footer.closest('[draggable="true"]')
+
+    if (card) {
+      card.click()
+    }
+
+    if (card || ++tries > 20) {
+      clearInterval(timer)
+    }
+  }, 150)
 }
 
 function moveCard(item, to) {
@@ -284,9 +301,12 @@ function Item({ item }) {
   const button = (key, label, props) => h(Button, { key, size: 'sm', disabled: busy, ...props }, label)
   const holds = item.holds.length > 0
 
-  return h(
+  // a click on the card opens it; a click on a control inside (button, field, code) does not
+  const onCardClick = e => !e.target.closest('button, textarea, code, a') && openCard(item)
+
+  return withMenu(item, h(
     'div',
-    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 8 } },
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 8, cursor: 'pointer' }, onClick: onCardClick },
     h(
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
@@ -338,10 +358,10 @@ function Item({ item }) {
               holds && button('keep', 'Keep blocked', { variant: 'ghost', onClick: keep })
             ].filter(Boolean))
       )
-  )
+  ))
 }
 
-function Section({ title, count, children, defaultOpen = true }) {
+function Section({ title, count, action, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen)   // a state per section; the header toggles it
   return h(
     'section',
@@ -354,7 +374,8 @@ function Section({ title, count, children, defaultOpen = true }) {
       },
       h(Codicon, { name: open ? 'chevron-down' : 'chevron-right', style: { ...muted } }),
       title,
-      count ? h(Badge, { variant: 'default', style: { marginLeft: 8 } }, count) : null
+      count ? h(Badge, { variant: 'default', style: { marginLeft: 8 } }, count) : null,
+      action ? h('span', { style: { marginLeft: 'auto' }, onClick: e => e.stopPropagation() }, action) : null
     ),
     open ? children : null
   )
@@ -386,32 +407,20 @@ function copyTaskId(item) {
     .catch(error => host.notify({ kind: 'error', message: message(error) }))
 }
 
-function ActiveItem({ item }) {
+// A status tag's color: blocked red, running green, ready blue, review violet, the rest grey.
+const STATUS_TONE = { blocked: '#ef4444', running: '#22c55e', ready: '#3b82f6', review: '#8b5cf6', todo: '#9ca3af' }
+
+function StatusBadge({ status }) {
+  const tone = STATUS_TONE[status] || '#9ca3af'
+
+  return h(Badge, { variant: 'default', style: { color: tone, backgroundColor: `color-mix(in srgb, ${tone} 16%, transparent)` } }, status)
+}
+
+// The right-click menu of a card, shared by Active and Needs you.
+function withMenu(item, card) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const moves = MOVES[item.status] || []
-  const card = h(
-    'div',
-    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6, cursor: 'pointer' }, onClick: () => openCard(item) },
-    h(
-      'div',
-      { style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' } },
-      h(
-        'div',
-        { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
-        h('span', { style: { fontWeight: 600 } }, item.title),
-        h(Badge, { variant: item.status === 'running' ? 'warn' : 'default' }, item.status),
-        h('span', { style: muted }, item.board)
-      ),
-      h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
-    ),
-    item.last_chat
-      ? h(
-          'div',
-          { style: { fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          item.last_chat
-        )
-      : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
-  )
+  const moves = MOVES[item.status || (item.stalled ? 'running' : 'blocked')] || []
+
   return ContextMenu
     ? h(
         ContextMenu,
@@ -429,6 +438,33 @@ function ActiveItem({ item }) {
     : card
 }
 
+function ActiveItem({ item }) {
+  const card = h(
+    'div',
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6, cursor: 'pointer' }, onClick: () => openCard(item) },
+    h(
+      'div',
+      { style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' } },
+      h(
+        'div',
+        { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
+        h('span', { style: { fontWeight: 600 } }, item.title),
+        h(StatusBadge, { status: item.status }),
+        h('span', { style: muted }, item.board)
+      ),
+      h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
+    ),
+    item.last_chat
+      ? h(
+          'div',
+          { style: { ...muted, fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
+          item.last_chat
+        )
+      : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
+  )
+  return withMenu(item, card)
+}
+
 function Page() {
   const s = useStore()
   const [showKept, setShowKept] = useState(false)
@@ -437,6 +473,20 @@ function Page() {
 
   const open = waiting(s)
   const kept = s.needs.filter(item => s.kept.includes(keepKey(item)))
+  const asking = new Set(s.needs.map(item => item.task_id)) // already shown under "Needs you"
+  const boardNames = [...new Set(s.active.map(item => item.board))].sort()
+  const picked = s.boards.filter(name => boardNames.includes(name))   // empty = all boards
+  const active = s.active.filter(item => (item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id))) && (!picked.length || picked.includes(item.board)))
+  const pickBoard = name => {
+    const boards = name === null ? [] : picked.includes(name) ? picked.filter(b => b !== name) : [...picked, name]
+
+    ctx.storage.set('boards', boards)
+    update({ boards })
+  }
+  const toggleBlocked = () => {
+    ctx.storage.set('showBlocked', !s.showBlocked)
+    update({ showBlocked: !s.showBlocked })
+  }
 
   return h(
     'div',
@@ -465,10 +515,13 @@ function Page() {
     s.summary &&
       h(
         Section,
-        { title: 'Active', count: s.active.length },
-        s.active.length === 0
-          ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running or ready card on the boards you opted in.' })
-          : s.active.map(item => h(ActiveItem, { key: item.task_id, item }))
+        { title: 'Active', count: active.length, action: h('span', { style: { display: 'flex', gap: 4, alignItems: 'center' } },
+          boardNames.length > 1 && h(Button, { size: 'sm', variant: picked.length ? 'ghost' : 'default', onClick: () => pickBoard(null) }, 'All'),
+          boardNames.length > 1 && boardNames.map(name => h(Button, { key: name, size: 'sm', variant: picked.includes(name) ? 'default' : 'ghost', onClick: () => pickBoard(name) }, name)),
+          h(Button, { variant: 'text', size: 'inline', onClick: toggleBlocked }, s.showBlocked ? 'Hide blocked' : 'Show blocked')) },
+        active.length === 0
+          ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running, ready or blocked card on the boards you opted in.' })
+          : active.map(item => h(ActiveItem, { key: item.task_id, item }))
       ),
     s.summary &&
       h(
@@ -562,7 +615,7 @@ export default {
   name: 'Calling Mom',
   register(context) {
     ctx = context
-    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24) })
+    update({ kept: ctx.storage.get('kept', []), hours: ctx.storage.get('hours', 24), showBlocked: ctx.storage.get('showBlocked', true), boards: ctx.storage.get('boards', []) })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(Page) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PATH, label: 'Calling Mom', codicon: 'call-outgoing' } },

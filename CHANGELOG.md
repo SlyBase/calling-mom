@@ -3,6 +3,16 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.6.1] - 2026-11-08
+
+### Added
+- **Desktop: the cards under "Needs you" open on click and have the same right-click menu as the Active cards** (`desktop/plugin.js`). A click on a button, field or code inside the card does not open it.
+- **Desktop: a worker's own question shows under "Needs you"** (`dashboard/plugin_api.py`, `__init__.py`). A blocked card with `block_kind: needs_input` and no brief or hold (Mom is off for the board, or her call failed) now waits for you, with the block reason as text; "Answer..." works on it. A card whose brief was answered, a Goal-mode block and a held command are unchanged.
+- **Desktop: board filter and status colors under Active** (`desktop/plugin.js`). "All" plus one toggle per board (multi-select, kept in app storage) sit left of Hide/Show blocked, which now ends flush with the cards. Status tags: blocked red, running green, ready blue, review violet, others grey.
+- **Desktop: blocked cards show under Active, with a Hide/Show switch** (`desktop/plugin.js`, `dashboard/plugin_api.py`). `GET /active` now lists blocked cards too; a card that already waits under "Needs you" is not shown twice. The switch is kept in the app's storage (default: shown).
+- **Desktop: "Open card" also opens the card's detail drawer** (`desktop/plugin.js`). After the jump to Kanban the card is clicked where it is drawn (best effort: it must be on the board the page shows).
+- **Desktop: the last worker message of an Active card is grey**, to tell it from the title (`desktop/plugin.js`).
+
 ## [1.6.0] - 2026-11-07
 
 ### Added
