@@ -1105,3 +1105,150 @@ class PaceCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhoneCliTest(unittest.TestCase):
+    """1.7.0: setup offers the phone target, status and doctor show it."""
+    MOM = (SUB, "claude-sonnet-5-5")
+
+    def test_without_a_choice_the_target_is_left_alone(self):
+        self.assertNotIn("calling_mom.notify.target", cli.updates(self.MOM, None, ["coding"], {}))
+
+    def test_the_choice_is_written_and_summarised(self):
+        for target, line in (("telegram", "phone   : telegram"), ("", "phone   : off")):
+            upd, summary = cli._result({}, self.MOM, None, ["coding"], notify=target)
+            self.assertEqual(upd["calling_mom.notify.target"], target)
+            self.assertIn(line, summary)
+
+    def test_the_interactive_question_is_asked_last_and_enter_means_no(self):
+        s = Script(*ChatWaitsSetupTest.ANSWERS)
+        upd, _ = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIn("phone", s.text)
+        self.assertEqual(upd["calling_mom.notify.target"], "")
+
+    def test_telegram_is_one_pick_and_a_typed_target_another(self):
+        for tail, want in ((("2",), "telegram"), (("o", "signal:+4912345"), "signal:+4912345")):
+            s = Script(*ChatWaitsSetupTest.ANSWERS, "", "", *tail)  # then the chat-waits and fallback questions: enter = no
+            upd, _ = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+            self.assertEqual(upd["calling_mom.notify.target"], want)
+
+    def test_a_target_that_is_set_stays_the_default(self):
+        cfg = {"calling_mom": {"notify": {"target": "discord:42"}}}
+        s = Script("", "", "", "", "", "", "", "")
+        upd, _ = cli.setup(cfg, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertEqual(upd["calling_mom.notify.target"], "discord:42")
+
+    def test_the_flag_answers_for_you_and_none_clears_it(self):
+        saved = {}
+        e = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=Script().ask,
+                    say=Script().say, cron=lambda: None, sweeps=lambda: [], interactive=False)
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", notify="telegram:42", cron=False)
+        self.assertEqual(saved["calling_mom"]["notify"], {"target": "telegram:42"})
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", notify="none", cron=False)
+        self.assertEqual(saved["calling_mom"]["notify"], {"target": ""})
+        saved.clear()
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", cron=False)
+        self.assertNotIn("notify", saved["calling_mom"])
+
+    def test_the_parser_knows_the_flag(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        cli.setup_parser(parser)
+        self.assertEqual(parser.parse_args(["setup", "--notify", "telegram"]).notify, "telegram")
+        self.assertIsNone(parser.parse_args(["setup"]).notify)
+
+    def test_status_names_the_target_or_says_off(self):
+        self.assertIn("phone   : telegram", "\n".join(cli.status_lines({**StatusTest.CFG, "notify": {"target": "telegram"}}, {})))
+        self.assertIn("phone   : off", "\n".join(cli.status_lines(StatusTest.CFG, {})))
+
+    def test_doctor_is_silent_while_the_phone_is_off(self):
+        self.assertNotIn("phone", DoctorTest.by_name(None, DoctorTest.run_doctor(DoctorTest, DoctorTest.cfg(DoctorTest))))
+
+    def run_doctor(self, last):
+        cfg = {**DoctorTest.cfg(DoctorTest), "notify": {"target": "telegram"}}
+        return DoctorTest.by_name(None, cli.run_checks(cfg, DoctorTest.LLM, lambda p, m: None, "0.22.5", True, DoctorTest.ONE, False, phone=last))
+
+    def test_doctor_says_what_the_last_send_did(self):
+        self.assertEqual(self.run_doctor(None)["phone"], ("ok", "telegram: nothing sent yet"))
+        status, detail = self.run_doctor({"ts": 1794158400, "ok": True, "target": "telegram", "error": None})["phone"]
+        self.assertEqual(status, "ok")
+        self.assertIn("last send ok", detail)
+        status, detail = self.run_doctor({"ts": 1794158400, "ok": False, "target": "telegram", "error": "RuntimeError"})["phone"]
+        self.assertEqual(status, "warn")
+        self.assertIn("RuntimeError", detail)
+
+    def test_the_doctor_command_reads_the_last_send_from_the_env(self):
+        s = Script()
+        env = cli.Env(load=lambda: {"calling_mom": {"notify": {"target": "telegram"}}}, save=lambda c: None, providers=lambda: [], boards=lambda: [],
+                      spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=s.ask, say=s.say,
+                      cron=lambda: None, sweeps=lambda: [], phone=lambda: {"ts": 1794158400, "ok": True, "target": "telegram", "error": None})
+        cli.cmd_doctor(env)
+        self.assertIn("last send ok", s.text)
+
+
+class FailClosedCliTest(unittest.TestCase):
+    """1.7.0: setup offers the pre-flight mode, status and doctor show it."""
+    MOM = (SUB, "claude-sonnet-5-5")
+    KEY = "calling_mom.preflight.fail_closed"
+
+    def test_without_a_choice_the_mode_is_left_alone(self):
+        self.assertNotIn(self.KEY, cli.updates(self.MOM, None, ["coding"], {}))
+
+    def test_the_choice_is_written_and_summarised(self):
+        for on, line in ((True, "pre-flight: fail-closed"), (False, "pre-flight: fail-open")):
+            upd, summary = cli._result({}, self.MOM, None, ["coding"], fail_closed=on)
+            self.assertIs(upd[self.KEY], on)
+            self.assertTrue(any(s.startswith(line) for s in summary), summary)
+
+    def test_the_interactive_question_comes_last_recommends_on_for_shared_remotes_and_enter_keeps_off(self):
+        s = Script(*ChatWaitsSetupTest.ANSWERS)
+        upd, _ = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIn("shared remote", s.text)
+        self.assertIs(upd[self.KEY], False)
+
+    def test_yes_switches_it_on_and_a_mode_that_is_set_stays_the_default(self):
+        s = Script(*ChatWaitsSetupTest.ANSWERS, "", "", "", "2")      # chat waits, fallback, phone: enter; then fail-closed: yes
+        upd, _ = cli.setup({}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIs(upd[self.KEY], True)
+        s = Script("", "", "", "", "", "", "", "", "")
+        upd, _ = cli.setup({"calling_mom": {"preflight": {"fail_closed": True}}}, LISTING, ["default", "coding"], s.ask, s.say)
+        self.assertIs(upd[self.KEY], True)
+
+    def test_the_flag_answers_for_you(self):
+        saved = {}
+        e = cli.Env(load=lambda: {}, save=lambda c: saved.update(c), providers=lambda: LISTING, boards=lambda: ["default"],
+                    spent=lambda: {}, probe=lambda p, m: None, version="0.22.5", internals=True, ask=Script().ask,
+                    say=Script().say, cron=lambda: None, sweeps=lambda: [], interactive=False)
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", fail_closed=True, cron=False)
+        self.assertIs(saved["calling_mom"]["preflight"]["fail_closed"], True)
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", fail_closed=False, cron=False)
+        self.assertIs(saved["calling_mom"]["preflight"]["fail_closed"], False)
+        saved.clear()
+        cli.cmd_setup(e, mom="openrouter/x/y", boards="default", cron=False)
+        self.assertNotIn("preflight", saved["calling_mom"])
+
+    def test_the_parser_knows_the_flag(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        cli.setup_parser(parser)
+        self.assertIs(parser.parse_args(["setup", "--fail-closed"]).fail_closed, True)
+        self.assertIs(parser.parse_args(["setup", "--no-fail-closed"]).fail_closed, False)
+        self.assertIsNone(parser.parse_args(["setup"]).fail_closed)
+
+    def test_status_names_the_mode(self):
+        on = "\n".join(cli.status_lines({**StatusTest.CFG, "preflight": {"fail_closed": True}}, {}))
+        self.assertIn("pre-flight: fail-closed", on)
+        self.assertIn("pre-flight: fail-open", "\n".join(cli.status_lines(StatusTest.CFG, {})))
+
+    def test_doctor_shows_the_mode(self):
+        def check(extra):
+            cfg = {**DoctorTest.cfg(DoctorTest), **extra}
+            return DoctorTest.by_name(None, cli.run_checks(cfg, DoctorTest.LLM, lambda p, m: None, "0.22.5", True, DoctorTest.ONE, False))["pre-flight"]
+        status, detail = check({"preflight": {"fail_closed": True}})
+        self.assertEqual(status, "ok")
+        self.assertTrue(detail.startswith("fail-closed"), detail)
+        status, detail = check({})
+        self.assertEqual(status, "ok")
+        self.assertTrue(detail.startswith("fail-open"), detail)
+        self.assertIn("--fail-closed", detail)

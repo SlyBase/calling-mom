@@ -94,7 +94,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
     def test_an_empty_log_counts_zero_everywhere(self):
         out = self.get("/summary")
         self.assertEqual((out["worker"]["tool_calls"], out["worker"]["signals"]), (0, 0))
-        self.assertEqual(out["mom"], {"calls": 0, "answered": 0, "checked": 0, "holds": 0, "verified": 0, "verify_failed": 0})
+        self.assertEqual(out["mom"], {"calls": 0, "answered": 0, "checked": 0, "holds": 0, "closed": 0, "verified": 0, "verify_failed": 0})
         self.assertEqual((out["advice"]["calls"], out["you"]["outside"]["comments"], out["you"]["chat_waits"]["count"]), (0, 0, 0))
         self.assertEqual(out["olymp"]["calls"], 0)
         self.assertEqual((out["you"]["briefs"], out["you"]["answered"]), (0, 0))
@@ -110,6 +110,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.put("preflight", task="t_a", verdict="hold")
         self.put("preflight", task="t_a", verdict="held_again")                      # no model call
         self.put("preflight", task="t_a", verdict="allowed", reason="cap")           # no model call
+        self.put("preflight", task="t_a", verdict="closed", reason="timeout")        # fail-closed: counted on its own
         self.put("question", task="t_a", outcome="answered", by="mom")
         self.put("question", task="t_a", outcome="human", by="mom")
         self.put("question", task="t_a", outcome="answered", by="olymp")             # Mom escalated, Olymp answered
@@ -124,7 +125,7 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         out = self.get("/summary")
         self.assertEqual((out["worker"]["tool_calls"], out["worker"]["signals"]), (3, 3))
         # Mom: 3 advice (the Olymp one was asked of her first) + 2 pre-flight + 3 questions
-        self.assertEqual(out["mom"], {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "verified": 1, "verify_failed": 2})
+        self.assertEqual(out["mom"], {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "closed": 1, "verified": 1, "verify_failed": 2})
         self.assertEqual(out["olymp"]["calls"], 2)
         self.assertEqual((out["you"]["briefs"], out["you"]["answered"]), (1, 2))
 
@@ -226,6 +227,11 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.assertEqual(recent[0], {"ts": t0 + 1002, "kind": "question", "task": "t_q", "board": "t-board", "detail": "human", "by": "mom", "title": None})
         self.assertEqual(set(recent[1]), {"ts", "kind", "task", "board", "detail", "by", "title"})
 
+    def test_the_summary_names_the_preflight_mode(self):
+        self.assertEqual(self.get("/summary")["preflight"], {"fail_closed": False})
+        plugin.DEFAULTS["preflight"]["fail_closed"] = True
+        self.assertEqual(self.get("/summary")["preflight"], {"fail_closed": True})
+
     def test_each_kind_has_a_detail_and_a_name(self):
         t0 = int(time.time()) - 5000
         self.put("advisor", ts=t0, task="t_1", category="loop", olymp=True)
@@ -234,9 +240,11 @@ class SummaryTest(DashboardFixture, unittest.TestCase):
         self.put("human_answer", ts=t0 + 3, task="t_4", via="desktop")
         self.put("escalated", ts=t0 + 4, task="t_5", reason="blocked")
         self.put("verify", ts=t0 + 5, task="t_6", state="stale")
+        self.put("preflight", ts=t0 + 6, task="t_7", verdict="closed", reason="timeout")
         rows = {r["task"]: (r["kind"], r["detail"], r["by"]) for r in self.get("/summary", days=90)["recent"]}
         self.assertEqual(rows, {"t_1": ("advisor", "loop", "olymp"), "t_2": ("preflight", "hold", None), "t_3": ("verify", "fail", None),
-                                "t_4": ("human_answer", "desktop", None), "t_5": ("escalated", "blocked", None)})
+                                "t_4": ("human_answer", "desktop", None), "t_5": ("escalated", "blocked", None),
+                                "t_7": ("preflight", "closed", None)})
 
 
 class NeedsYouTest(DashboardFixture, unittest.TestCase):
@@ -541,13 +549,16 @@ class ActiveTest(DashboardFixture, unittest.TestCase):
         """The /active item for one card (the fixture's base card is also running, so filter by id)."""
         return [i for i in self.get("/active") if i["task_id"] == tid]
 
-    def test_a_running_card_shows_its_title_board_and_status_and_no_comment(self):
+    def test_a_running_card_shows_its_title_board_and_status_and_its_last_comment(self):
         tid = self.card(title="ship the parser")
         self.set_status(tid, "running")
         with_conn(lambda c: kb.add_comment(c, tid, "worker", "Parser done, running tests."))
         (item,) = self.active(tid)
         self.assertEqual((item["board"], item["task_id"], item["title"], item["status"]), ("t-board", tid, "ship the parser", "running"))
-        self.assertNotIn("last_comment", item)
+        self.assertIsInstance(item["last_comment"], dict)
+        self.assertEqual(item["last_comment"]["author"], "worker")
+        self.assertEqual(item["last_comment"]["body"], "Parser done, running tests.")
+        self.assertIsNotNone(item["last_comment"]["created_at"])
 
     def test_only_running_ready_and_blocked_cards_are_active(self):
         for status, active in (("running", True), ("ready", True), ("blocked", True), ("todo", False), ("done", False)):
@@ -748,3 +759,268 @@ class MoveTest(DashboardFixture, unittest.TestCase):
         res = self.move(child, "done")
         self.assertEqual(res.status_code, 409)
         self.assertTrue(res.json()["detail"])
+
+    def test_a_card_parks_in_scheduled_from_todo_ready_running_and_blocked(self):
+        for status in ("todo", "ready", "running", "blocked"):
+            with self.subTest(status):
+                tid = self.card()
+                self.set_status(tid, status)
+                res = self.move(tid, "scheduled")
+                self.assertEqual((res.status_code, res.json()["status"]), (200, "scheduled"))
+                self.assertEqual(self.status(tid), "scheduled")
+
+    def test_a_card_that_is_not_open_cannot_be_parked(self):
+        for status in ("done", "review", "archived", "scheduled"):
+            with self.subTest(status):
+                tid = self.card()
+                self.set_status(tid, status)
+                self.assertEqual(self.move(tid, "scheduled").status_code, 409)
+                self.assertEqual(self.status(tid), status)
+
+    def test_a_running_card_parked_loses_its_claim_so_no_worker_owns_it(self):
+        tid = self.card()
+        with_conn(lambda c: kb.claim_task(c, tid))
+        self.assertEqual(self.move(tid, "scheduled").status_code, 200)
+        task = with_conn(lambda c: kb.get_task(c, tid))
+        self.assertEqual((task.status, task.claim_lock, task.worker_pid), ("scheduled", None, None))
+
+    def test_a_parked_card_resumes_via_unblock_task_and_is_dispatchable_again(self):
+        tid = self.card()
+        self.set_status(tid, "scheduled")
+        res = self.move(tid, "unblocked")
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "ready"))
+
+    def test_a_parked_card_can_be_archived_but_not_completed(self):
+        tid = self.card()
+        self.set_status(tid, "scheduled")
+        self.assertEqual(self.move(tid, "done").status_code, 409)
+        self.assertEqual(self.move(tid, "archived").status_code, 200)
+
+
+class LaterTest(DashboardFixture, unittest.TestCase):
+    """Decide later: POST /later parks a card (a waiting one is only hidden), GET /later lists them, POST /resume brings them back."""
+
+    def later(self, tid, board="t-board"):
+        return self.client.post("/later", json={"board": board, "task_id": tid})
+
+    def resume(self, tid, board="t-board"):
+        return self.client.post("/resume", json={"board": board, "task_id": tid})
+
+    def set_status(self, tid, status):
+        with_conn(lambda c: c.execute("UPDATE tasks SET status = ? WHERE id = ? AND claim_lock IS NULL", (status, tid)).connection.commit())
+
+    def ids(self, path):
+        return [i["task_id"] for i in self.get(path)]
+
+    def test_a_card_that_waits_on_nobody_is_parked_in_scheduled_and_listed_later(self):
+        tid = self.card()
+        res = self.later(tid)
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "status": "scheduled"}))
+        self.assertEqual(self.status(tid), "scheduled")
+        (item,) = [i for i in self.get("/later") if i["task_id"] == tid]
+        self.assertEqual((item["board"], item["title"], item["status"], item["brief"]), ("t-board", "fix the parser", "scheduled", None))
+
+    def test_a_stalled_running_card_is_parked_the_same_way(self):
+        tid = self.card()
+        with_conn(lambda c: kb.claim_task(c, tid))
+        self.assertEqual(self.later(tid).status_code, 200)
+        self.assertEqual(self.status(tid), "scheduled")
+
+    def test_a_parked_card_resumes_to_ready_and_leaves_the_list(self):
+        tid = self.card()
+        self.later(tid)
+        res = self.resume(tid)
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "status": "ready"}))
+        self.assertNotIn(tid, self.ids("/later"))
+
+    def test_a_waiting_card_stays_blocked_and_recorded_but_leaves_needs_you(self):
+        tid = self.brief_card()
+        events = len(with_conn(lambda c: kb.list_events(c, tid)))
+        res = self.later(tid)
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "status": "blocked"}))
+        self.assertEqual(self.status(tid), "blocked")                         # no worker, nothing to dispatch: it is blocked already
+        self.assertEqual(len(with_conn(lambda c: kb.list_events(c, tid))), events)   # and no kanban write at all
+        self.assertEqual(self.get("/needs-you"), [])
+        self.assertEqual(self.get("/summary")["you"]["waiting"], 0)
+        self.assertNotIn("for you", self.get("/cards").get(tid, []))
+        (item,) = self.get("/later")
+        self.assertEqual((item["task_id"], item["status"], item["brief"]), (tid, "blocked", base.BRIEF_COMMENT.removeprefix("[for you] ")))
+
+    def test_a_resumed_waiting_card_is_in_needs_you_again_with_its_old_wait(self):
+        tid = self.brief_card()
+        (before,) = self.get("/needs-you")
+        self.later(tid)
+        res = self.resume(tid)
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "blocked"))
+        (after,) = self.get("/needs-you")
+        self.assertEqual((after["task_id"], after["brief"], after["sig"]), (tid, before["brief"], before["sig"]))
+        self.assertEqual(self.get("/later"), [])
+
+    def test_a_held_command_is_parked_and_resumed_like_a_brief(self):
+        tid = self.hold_card()
+        self.assertEqual(self.later(tid).json()["status"], "blocked")
+        self.assertEqual(self.get("/needs-you"), [])
+        self.assertEqual(self.get("/later")[0]["holds"], [{"reason": "it rewrites shared history", "alternative": "push a branch"}])
+        self.resume(tid)
+        self.assertEqual(self.ids("/needs-you"), [tid])
+
+    def test_a_new_question_on_a_parked_card_is_not_hidden(self):
+        tid = self.brief_card()
+        self.later(tid)
+        with_conn(lambda c: kb.add_comment(c, tid, "calling-mom", base.BRIEF_COMMENT.replace("auth provider do we use", "plan do we buy")))
+        self.assertEqual(self.ids("/needs-you"), [tid])
+        self.assertEqual(self.get("/later"), [])
+
+    def test_a_card_answered_while_parked_is_not_listed_later(self):
+        tid = self.brief_card()
+        self.later(tid)
+        self.assertEqual(self.client.post("/answer", json={"board": "t-board", "task_id": tid, "text": "Auth0"}).status_code, 200)
+        self.assertEqual(self.get("/later"), [])
+
+    def test_only_boards_that_opted_in_are_listed(self):
+        tid = self.card()
+        self.later(tid)
+        plugin.DEFAULTS["advisor"]["boards"] = []
+        plugin.DEFAULTS["answer"]["boards"] = []
+        self.assertEqual(self.get("/later"), [])
+
+    def test_the_oldest_parked_card_comes_first(self):
+        first, second = self.card(), self.card()
+        self.later(second)
+        self.later(first)
+        with_conn(lambda c: c.execute("UPDATE task_events SET created_at = created_at - 100 WHERE task_id = ? AND kind = 'scheduled'", (second,)).connection.commit())
+        self.assertEqual([i for i in self.ids("/later") if i in (first, second)], [second, first])
+
+    def test_a_card_that_cannot_be_parked_or_resumed_is_a_409_and_unchanged(self):
+        for status in ("done", "review", "archived", "scheduled"):
+            with self.subTest(f"park {status}"):
+                tid = self.card()
+                self.set_status(tid, status)
+                self.assertEqual(self.later(tid).status_code, 409)
+                self.assertEqual(self.status(tid), status)
+        for status in ("ready", "running", "done"):
+            with self.subTest(f"resume {status}"):
+                tid = self.card()
+                self.set_status(tid, status)
+                self.assertEqual(self.resume(tid).status_code, 409)
+                self.assertEqual(self.status(tid), status)
+
+    def test_a_board_or_card_that_does_not_exist_is_a_404(self):
+        tid = self.card()
+        for call in (self.later, self.resume):
+            with self.subTest(call.__name__):
+                self.assertEqual(call(tid, board="nowhere").json()["detail"], "no board 'nowhere'")
+                self.assertEqual(call("t_missing").json()["detail"], "no card 't_missing'")
+
+    def test_the_body_must_have_the_right_types(self):
+        for path in ("/later", "/resume"):
+            for body in ({"task_id": "t_x"}, {"board": "t-board"}, {"board": "t-board", "task_id": 5}):
+                with self.subTest(path=path, body=body):
+                    self.assertEqual(self.client.post(path, json=body).status_code, 422)
+
+
+class NewCardTest(DashboardFixture, unittest.TestCase):
+    """GET /new-card (what the form offers) and POST /card (create through the PUBLIC ``kanban_create`` tool)."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        self._core = {n: getattr(plugin._core, n, None) for n in ("dispatch_tool", "profile_names", "profile_exists")}
+        plugin._core.dispatch_tool = self.dispatch
+        plugin._core.profile_names = lambda: ["default", "daidalos"]
+        plugin._core.profile_exists = lambda name: name in ("default", "daidalos")
+        self.reply = json.dumps({"ok": True, "task_id": "t_new1", "status": "ready"})
+        self.addCleanup(lambda: [setattr(plugin._core, n, v) for n, v in self._core.items()])
+
+    def dispatch(self, name, args):
+        self.calls.append((name, args))
+        return self.reply
+
+    def create(self, **body):
+        body = {"board": "t-board", "title": "Fix the parser", "assignee": "daidalos", **body}
+        return self.client.post("/card", json=body)
+
+    def test_the_form_offers_the_opted_in_boards_the_profiles_and_the_default_board(self):
+        out = self.get("/new-card")
+        self.assertEqual((out["boards"], out["default_board"], out["profiles"]), (["t-board"], "t-board", ["default", "daidalos"]))
+        self.assertEqual((out["flags"]["crit"], out["flags"]["review"]), ("[crit]", "[review]"))
+
+    def test_a_board_that_did_not_opt_in_is_not_offered(self):
+        plugin.DEFAULTS["answer"].update(boards=["somewhere-else"])
+        plugin.DEFAULTS["advisor"].update(boards=[])
+        self.assertEqual(self.get("/new-card")["boards"], [])
+        self.assertIsNone(self.get("/new-card")["default_board"])
+
+    def test_a_star_opts_every_board_in(self):
+        plugin._core.list_board_slugs = lambda: ["t-board", "other"]
+        plugin.DEFAULTS["answer"].update(boards=["*"])
+        self.assertEqual(self.get("/new-card")["boards"], ["t-board", "other"])
+
+    def test_the_card_is_created_through_the_public_kanban_create_tool(self):
+        res = self.create(body="Please do it.", priority=3, key="abc")
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "task_id": "t_new1", "board": "t-board", "status": "ready"}))
+        self.assertEqual(self.calls, [("kanban_create", {"title": "Fix the parser", "body": "Please do it.", "assignee": "daidalos",
+                                                      "board": "t-board", "priority": 3, "idempotency_key": "abc"})])
+
+    def test_a_card_without_body_priority_or_key_sends_only_what_was_typed(self):
+        self.create()
+        (_, args), = self.calls
+        self.assertEqual(args, {"title": "Fix the parser", "assignee": "daidalos", "board": "t-board", "priority": 0})
+
+    def test_the_flags_become_the_plain_prefixes_and_the_verify_line_the_plugin_reads(self):
+        self.create(body="Do it.", crit=True, review=True, verify="pytest -q")
+        (_, args), = self.calls
+        self.assertEqual((args["title"], args["body"]), ("[crit] [review] Fix the parser", "Do it.\nverify: pytest -q"))
+        self.assertEqual(plugin._VERIFY_LINE.search(args["body"]).group(1), "pytest -q")
+
+    def test_a_verify_line_alone_is_the_whole_body(self):
+        self.create(verify="make test")
+        self.assertEqual(self.calls[0][1]["body"], "verify: make test")
+
+    def test_the_markers_follow_the_settings_and_are_never_doubled(self):
+        plugin.DEFAULTS["marker"] = "[risky]"
+        self.addCleanup(plugin.DEFAULTS.__setitem__, "marker", "[crit]")
+        self.create(title="[risky] Fix the parser", crit=True)
+        self.assertEqual(self.calls[0][1]["title"], "[risky] Fix the parser")
+
+    def test_the_input_is_refused_before_anything_is_created(self):
+        plugin._core.list_board_slugs = lambda: ["t-board", "closed"]
+        plugin.DEFAULTS["answer"].update(boards=["t-board"])
+        plugin.DEFAULTS["advisor"].update(boards=[])
+        for why, body, status in (
+            ("blank title", {"title": "  "}, 400),
+            ("title too long", {"title": "x" * 201}, 422),
+            ("body too long", {"body": "x" * 8001}, 422),
+            ("verify too long", {"verify": "x" * 301}, 422),
+            ("verify on two lines", {"verify": "true\nrm x"}, 400),
+            ("blank verify is no verify line", {"verify": "  "}, None),
+            ("priority too high", {"priority": 101}, 422),
+            ("priority negative", {"priority": -1}, 422),
+            ("key too long", {"key": "k" * 65}, 422),
+            ("assignee too long", {"assignee": "a" * 65}, 422),
+            ("board that does not exist", {"board": "nowhere"}, 404),
+            ("board that did not opt in", {"board": "closed"}, 403),
+            ("profile that does not exist", {"assignee": "ghost"}, 400),
+            ("no assignee", {"assignee": ""}, 400),
+        ):
+            with self.subTest(why):
+                before = len(self.calls)
+                res = self.create(**body)
+                self.assertEqual(res.status_code, status or 200, res.text)
+                self.assertEqual(len(self.calls), before + (0 if status else 1))
+
+    def test_a_tool_error_is_a_502_with_its_text(self):
+        self.reply = json.dumps({"error": "kanban_create: board locked"})
+        res = self.create()
+        self.assertEqual((res.status_code, res.json()["detail"]), (502, "kanban_create: board locked"))
+
+    def test_an_unreadable_reply_is_a_502(self):
+        self.reply = "not json"
+        self.assertEqual(self.create().status_code, 502)
+        self.reply = json.dumps({"ok": True})                    # no id: nothing was created as far as we can tell
+        self.assertEqual(self.create().status_code, 502)
+
+    def test_a_dispatch_that_raises_is_a_502(self):
+        def boom(name, args): raise RuntimeError("no registry")
+        plugin._core.dispatch_tool = boom
+        self.assertEqual(self.create().status_code, 502)

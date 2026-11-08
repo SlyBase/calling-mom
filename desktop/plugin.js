@@ -18,7 +18,7 @@ const WINDOW = [
   { hours: 1, label: '1 h' }, { hours: 4, label: '4 h' }, { hours: 24, label: '1 d' },
   { hours: 168, label: '7 d' }, { hours: 336, label: '14 d' }, { hours: 720, label: '30 d' }, { hours: 2160, label: '90 d' }
 ]  // the time windows the header selector offers (hours; the last four were days)
-let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], kept: [], hours: 24, recent: [], showBlocked: true, boards: [] }
+let state = { loaded: false, error: null, summary: null, needs: [], cards: {}, active: [], later: [], kept: [], hours: 24, recent: [], showBlocked: true, boards: [] }
 const listeners = new Set()
 
 const subscribe = fn => (listeners.add(fn), () => listeners.delete(fn))
@@ -38,14 +38,15 @@ async function refresh() {
 
   try {
     const hours = state.hours || 24
-    const [summary, needs, cards, active] = await Promise.all([
+    const [summary, needs, cards, active, later] = await Promise.all([
       ctx.rest(`/summary?hours=${hours}`),
       ctx.rest('/needs-you'),
       ctx.rest('/cards'),
-      ctx.rest('/active')
+      ctx.rest('/active'),
+      ctx.rest('/later').catch(() => [])   // a backend from before Decide later has no such route: the page still loads
     ])
 
-    update({ loaded: true, error: null, summary, needs, cards, active, recent: summary.recent })
+    update({ loaded: true, error: null, summary, needs, cards, active, later, recent: summary.recent })
     paintBadges()
   } catch (error) {
     update({ loaded: true, error: message(error) })
@@ -81,11 +82,18 @@ function openCard(item) {
   }, 150)
 }
 
-function moveCard(item, to) {
-  ctx.rest('/move', { method: 'POST', body: { board: item.board, task_id: item.task_id, to } })
+function post(path, item, extra) {
+  ctx.rest(path, { method: 'POST', body: { board: item.board, task_id: item.task_id, ...extra } })
     .then(() => refresh())
     .catch(error => host.notify({ kind: 'error', message: message(error) }))
 }
+
+const moveCard = (item, to) => post('/move', item, { to })
+
+// Decide later: the card stops and waits in the "Later" section (a card that waits on you is only put aside).
+const LATER_FROM = ['todo', 'ready', 'running', 'blocked']
+const laterCard = item => post('/later', item)
+const resumeCard = item => post('/resume', item)
 
 // The card's bucket moves, per its current status: the same verbs as the Kanban board's menu,
 // only the ones a public transition can do (ready→todo stays in the board's drag).
@@ -161,7 +169,7 @@ function briefRows(text) {
   return rows.length ? rows : [{ label: 'Brief', value: String(text || '') }]
 }
 
-const PREFLIGHT = { go: 'Pre-flight: Mom said go', hold: 'Pre-flight HOLD on a risky command', held_again: 'A held command was tried again' }
+const PREFLIGHT = { go: 'Pre-flight: Mom said go', hold: 'Pre-flight HOLD on a risky command', held_again: 'A held command was tried again', closed: 'Pre-flight HOLD (fail-closed): Mom could not check a risky command' }
 const VERIFY = { pass: 'verify passed', fail: 'verify failed', timeout: 'verify timed out' }
 
 // The action of a recent row, colored by what it did: the dot says it at a glance,
@@ -173,7 +181,7 @@ function actionDot(row) {
   }
 
   if (kind === 'preflight') {
-    return detail === 'go' ? 'var(--ui-accent-green, #22c55e)' : detail === 'hold' ? 'var(--ui-accent-amber, #f59e0b)' : muted.color
+    return detail === 'go' ? 'var(--ui-accent-green, #22c55e)' : detail === 'hold' || detail === 'closed' ? 'var(--ui-accent-amber, #f59e0b)' : muted.color
   }
 
   if (kind === 'question') {
@@ -260,7 +268,9 @@ function Ladder({ summary, count }) {
       unit: 'calls',
       lines: [
         `${mom.answered} answered · ${mom.checked} checked · ${mom.holds} held`,
-        mom.verified + mom.verify_failed ? `${mom.verified} verified · ${mom.verify_failed} verify failed` : null
+        mom.verified + mom.verify_failed ? `${mom.verified} verified · ${mom.verify_failed} verify failed` : null,
+        mom.closed ? `${mom.closed} fail-closed hold${mom.closed === 1 ? '' : 's'}` : null,
+        summary.preflight ? `pre-flight: ${summary.preflight.fail_closed ? 'fail-closed' : 'fail-open'}` : null
       ]
     }),
     arrow('a2'),
@@ -311,7 +321,7 @@ function Item({ item }) {
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
       h('div', { style: { fontWeight: 600 } }, item.title),
-      h('div', { style: { ...muted, fontSize: '0.75rem', whiteSpace: 'nowrap' } }, `${item.task_id} · ${item.board} · waiting ${age(item.age_s)}`)
+      h('div', { style: { ...muted, fontSize: '0.75rem', whiteSpace: 'nowrap' } }, `${item.task_id} · ${item.board} · waiting ${age(item.age_s)}${item.sent_to ? ` · sent to ${item.sent_to}` : ''}`)
     ),
     item.brief &&
       h(
@@ -408,7 +418,7 @@ function copyTaskId(item) {
 }
 
 // A status tag's color: blocked red, running green, ready blue, review violet, the rest grey.
-const STATUS_TONE = { blocked: '#ef4444', running: '#22c55e', ready: '#3b82f6', review: '#8b5cf6', todo: '#9ca3af' }
+const STATUS_TONE = { blocked: '#ef4444', running: '#22c55e', ready: '#3b82f6', review: '#8b5cf6', todo: '#9ca3af', scheduled: '#f59e0b' }
 
 function StatusBadge({ status }) {
   const tone = STATUS_TONE[status] || '#9ca3af'
@@ -419,7 +429,10 @@ function StatusBadge({ status }) {
 // The right-click menu of a card, shared by Active and Needs you.
 function withMenu(item, card) {
   const { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } = sdk
-  const moves = MOVES[item.status || (item.stalled ? 'running' : 'blocked')] || []
+  const status = item.status || (item.stalled ? 'running' : 'blocked')
+  const parked = item.parked   // a card of the Later section: it resumes, it is not put off again
+  const moves = parked ? [['archived', 'Archive']] : MOVES[status] || []
+  const decide = parked ? ['Resume', resumeCard] : LATER_FROM.includes(status) && ['Decide later', laterCard]
 
   return ContextMenu
     ? h(
@@ -431,6 +444,7 @@ function withMenu(item, card) {
           null,
           h(ContextMenuItem, { onSelect: () => openCard(item) }, 'Open card'),
           h(ContextMenuItem, { onSelect: () => copyTaskId(item) }, 'Copy task id'),
+          decide && h(ContextMenuItem, { onSelect: () => decide[1](item) }, decide[0]),
           moves.length > 0 && h(ContextMenuSeparator),
           moves.map(([to, label]) => h(ContextMenuItem, { key: to, onSelect: () => moveCard(item, to) }, label))
         )
@@ -439,6 +453,9 @@ function withMenu(item, card) {
 }
 
 function ActiveItem({ item }) {
+  const chatLine = item.last_comment
+    ? `${item.last_comment.author}: ${item.last_comment.body}`
+    : item.last_chat
   const card = h(
     'div',
     { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6, cursor: 'pointer' }, onClick: () => openCard(item) },
@@ -454,20 +471,139 @@ function ActiveItem({ item }) {
       ),
       h('span', { style: { ...muted, fontSize: '0.6875rem' } }, item.task_id)
     ),
-    item.last_chat
+    chatLine
       ? h(
           'div',
           { style: { ...muted, fontSize: '0.8125rem', whiteSpace: 'pre-wrap', display: '-webkit-box', overflow: 'hidden', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } },
-          item.last_chat
+          chatLine
         )
       : h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'No messages yet — the worker is on it.')
   )
   return withMenu(item, card)
 }
 
+// One card of the "Later" section: parked in Hermes' `scheduled` status, or a wait of yours put aside (still blocked).
+function LaterItem({ item }) {
+  const parked = { ...item, parked: true }
+  const first = item.brief ? item.brief.split('\n').find(line => line.trim()) : item.holds.length ? `HOLD: ${item.holds[0].reason}` : null
+
+  return withMenu(parked, h(
+    'div',
+    { style: { ...box, display: 'flex', flexDirection: 'column', gap: 6 } },
+    h(
+      'div',
+      { style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' } },
+      h(
+        'div',
+        { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' } },
+        h('span', { style: { fontWeight: 600 } }, item.title),
+        h(StatusBadge, { status: item.status }),
+        h('span', { style: muted }, item.board)
+      ),
+      h('span', { style: { ...muted, fontSize: '0.6875rem', whiteSpace: 'nowrap' } }, `${item.task_id} · ${item.status === 'scheduled' ? 'put off' : 'waiting'} ${age(item.age_s)}`)
+    ),
+    first && h('div', { style: { ...muted, fontSize: '0.8125rem', whiteSpace: 'pre-wrap' } }, first),
+    h(
+      'div',
+      { style: { display: 'flex', gap: 6 } },
+      h(Button, { size: 'sm', onClick: () => resumeCard(item) }, 'Resume'),
+      h(Button, { size: 'sm', variant: 'ghost', onClick: () => openCard(item) }, 'Open in Kanban')
+    )
+  ))
+}
+
+// ---- New card: the page starts work too, through the backend's POST /card (the public kanban_create tool) -----------
+
+const field = { border: '1px solid var(--ui-stroke-secondary)', borderRadius: 6, padding: '4px 8px', fontSize: '0.8125rem', background: 'transparent', color: 'inherit', font: 'inherit' }
+const FLAGS = [   // the plain prefixes and the verify line the plugin understands, with what each one does
+  ['crit', '[crit]', 'Mom checks risky commands and the finished result; the card runs on Mom\'s model.'],
+  ['review', '[review]', 'The result goes to the reviewer profile before the card is done.']
+]
+const BLANK = { title: '', body: '', board: '', assignee: '', priority: 0, crit: false, review: false, verify: '' }
+const newKey = () => Math.random().toString(36).slice(2) + Date.now().toString(36)   // one per attempt: a double click is one card
+
+function NewCardForm({ onClose }) {
+  const [opts, setOpts] = useState(null)
+  const [f, setF] = useState(BLANK)
+  const [key, setKey] = useState(newKey)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [made, setMade] = useState(null)
+
+  useEffect(() => {
+    ctx.rest('/new-card')
+      .then(o => {
+        setOpts(o)
+        setF(prev => ({ ...prev, board: o.default_board || '', assignee: o.profiles.includes('default') ? 'default' : o.profiles[0] || '' }))
+      })
+      .catch(e => setError(message(e)))
+  }, [])
+
+  const set = (name, value) => setF(prev => ({ ...prev, [name]: value }))
+  const text = (name, props) => ({ name, value: f[name], onChange: e => set(name, e.target.value), disabled: busy, ...props })
+  const row = (label, node) => h('label', { style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: '0.75rem', ...muted } }, label, node)
+  const select = (name, values) => h('select', { ...text(name), style: field }, values.map(v => h('option', { key: v, value: v }, v)))
+  const ready = opts && f.title.trim() && f.board && f.assignee && !busy
+
+  async function submit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+
+    try {
+      const out = await ctx.rest('/card', { method: 'POST', body: { ...f, priority: Number(f.priority) || 0, key } })
+
+      setMade(out.task_id)
+      host.notify({ kind: 'success', message: `Card ${out.task_id} created` })
+      refresh()
+    } catch (err) {
+      setError(message(err))
+    }
+
+    setBusy(false)
+  }
+
+  function again() {
+    setF({ ...BLANK, board: f.board, assignee: f.assignee })
+    setKey(newKey())
+    setMade(null)
+  }
+
+  const openKanban = h(Button, { key: 'kanban', type: 'button', size: 'sm', variant: 'ghost', onClick: () => host.navigate('/kanban') }, 'Open in Kanban')
+
+  if (made) {
+    return h('div', { style: { ...box, marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 } },
+      h('div', { style: { fontWeight: 600 } }, `Card ${made} created`),
+      h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'It shows under Active once it runs.'),
+      h('div', { style: { display: 'flex', gap: 8 } },
+        h(Button, { size: 'sm', onClick: again }, 'Create another'), openKanban, h(Button, { size: 'sm', variant: 'ghost', onClick: onClose }, 'Close')))
+  }
+
+  return h('form', { onSubmit: submit, style: { ...box, marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 } },
+    row('Title', h('input', { ...text('title', { maxLength: 200, autoFocus: true }), style: field })),
+    row('Body', h(Textarea, { ...text('body', { maxLength: 8000, rows: 4 }) })),
+    opts && opts.boards.length === 0
+      ? h('div', { style: { fontSize: '0.8125rem' } }, 'No board has opted in to Calling Mom yet. Run "hermes calling-mom setup" on the gateway.')
+      : h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
+          row('Board', select('board', opts ? opts.boards : [])),
+          row('Assignee', select('assignee', opts ? opts.profiles : [])),
+          row('Priority', h('input', { ...text('priority', { type: 'number', min: 0, max: 100 }), style: { ...field, width: 72 } }))),
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: '0.8125rem' } },
+      FLAGS.map(([name, marker, what]) => h('label', { key: name, style: { display: 'flex', gap: 6, alignItems: 'baseline' } },
+        h('input', { type: 'checkbox', name, checked: f[name], disabled: busy, onChange: e => set(name, e.target.checked) }),
+        h('span', null, h('code', null, (opts && opts.flags[name]) || marker), h('span', { style: muted }, ` ${what}`)))),
+      row('verify: (optional)', h('input', { ...text('verify', { maxLength: 300, placeholder: 'pytest -q' }), style: field })),
+      h('div', { style: { ...muted, fontSize: '0.75rem' } }, 'This command must pass before the worker may complete the card (only for creators listed in calling_mom.verify.trusted_creators).')),
+    error && h('div', { style: { color: 'var(--ui-accent)', fontSize: '0.8125rem' } }, error),
+    h('div', { style: { display: 'flex', gap: 8 } },
+      h(Button, { type: 'submit', size: 'sm', disabled: !ready }, 'Create card'), openKanban,
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', onClick: onClose }, 'Cancel')))
+}
+
 function Page() {
   const s = useStore()
   const [showKept, setShowKept] = useState(false)
+  const [creating, setCreating] = useState(false)
 
   useEffect(() => void refresh(), []) // fresh numbers the moment the page opens, not up to 15 s later
 
@@ -476,7 +612,8 @@ function Page() {
   const asking = new Set(s.needs.map(item => item.task_id)) // already shown under "Needs you"
   const boardNames = [...new Set(s.active.map(item => item.board))].sort()
   const picked = s.boards.filter(name => boardNames.includes(name))   // empty = all boards
-  const active = s.active.filter(item => (item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id))) && (!picked.length || picked.includes(item.board)))
+  const putOff = new Set(s.later.map(item => item.task_id))   // shown under "Later", not twice
+  const active = s.active.filter(item => (item.status !== 'blocked' || (s.showBlocked && !asking.has(item.task_id) && !putOff.has(item.task_id))) && (!picked.length || picked.includes(item.board)))
   const pickBoard = name => {
     const boards = name === null ? [] : picked.includes(name) ? picked.filter(b => b !== name) : [...picked, name]
 
@@ -495,8 +632,11 @@ function Page() {
       'div',
       { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 } },
       h('h1', { style: { fontSize: '1.25rem', fontWeight: 600, margin: 0 } }, 'Calling Mom'),
-      h(WindowSelector, { value: s.hours, onPick: setHours })
+      h('div', { style: { display: 'flex', gap: 12, alignItems: 'center' } },
+        h(Button, { size: 'sm', onClick: () => setCreating(!creating) }, 'New card'),
+        h(WindowSelector, { value: s.hours, onPick: setHours }))
     ),
+    creating && h(NewCardForm, { onClose: () => setCreating(false) }),
     h('div', { style: { ...muted, fontSize: '0.8125rem', margin: '4px 0 16px' } }, h(VersionLine, { backend: s.summary && s.summary.version })),
     s.error &&
       h('div', { style: { ...box, marginBottom: 16, fontSize: '0.8125rem' } }, `The Calling Mom backend is not reachable (${s.error}). Enable the plugin with "hermes plugins enable calling-mom", then restart the gateway once.`),
@@ -522,6 +662,14 @@ function Page() {
         active.length === 0
           ? h(EmptyState, { title: 'Nothing is climbing right now.', description: 'No running, ready or blocked card on the boards you opted in.' })
           : active.map(item => h(ActiveItem, { key: item.task_id, item }))
+      ),
+    s.summary &&
+      h(
+        Section,
+        { title: 'Later', count: s.later.length, defaultOpen: false },
+        s.later.length === 0
+          ? h('div', { style: { ...muted, fontSize: '0.8125rem' } }, 'Nothing put off. Right-click a card and choose "Decide later" to set it aside.')
+          : s.later.map(item => h(LaterItem, { key: item.task_id, item }))
       ),
     s.summary &&
       h(

@@ -13,7 +13,8 @@ One page for what 1.4 and 1.5 added. The details are in the sections named in ea
 |---|---|---|---|
 | `preflight.enabled` | `true` | Mom checks a critical command before it runs. Active only where the advisor is. | Hook deadlines |
 | `preflight.timeout_s` | `12` | Deadline of that one synchronous question. The effective deadline is `min(timeout_s, 0.4 x hook budget)`. | Hook deadlines |
-| `preflight.max_per_card` | `4` | Model calls per card for pre-flight. Past it, critical commands run. | Hook deadlines |
+| `preflight.max_per_card` | `4` | Model calls per card for pre-flight. Past it, critical commands run (held with `fail_closed`). | Hook deadlines |
+| `preflight.fail_closed` | `false` | When Mom cannot check a critical command (error, timeout, quota, unclear answer, a cap), hold it like a normal HOLD instead of running it. Not critical commands always run. `setup --fail-closed` / `--no-fail-closed`. | Pre-flight fail-closed |
 | `answer.enabled` | `false` | Mom answers a worker's `needs_input` question first. `setup` asks. | Mom answers first |
 | `answer.boards` | `[]` | Boards where she may. `"*"` = all. | Mom answers first |
 | `answer.max_per_card` | `2` | Answers and briefs per card. | Mom answers first |
@@ -45,9 +46,9 @@ and `task`, `board`, `run` where known). New or changed in 1.4:
 
 | kind | Fields | Written when |
 |---|---|---|
-| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `no_rationale`, `allowance`, `local_only`), `rationale` (on `hold`: redacted, 160 characters), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
+| `preflight` | `verdict` (`go`, `hold`, `held_again`, `allowed`, `closed`, `skipped`), `reason` (`timeout`, `down`, `cap`, `parse`, `no_rationale`, `allowance`, `local_only`), `error_class` (on `closed`: the text the worker read), `rationale` (on `hold`: redacted, 160 characters), `cmd_hash`, `model`, `tokens_in`, `tokens_out`, `usd` | A critical command met the pre-flight check. The command text is never stored. |
 | `question` | `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`, `ms`, `tokens_in`, `tokens_out`, `usd` | A worker's `needs_input` question was handled. |
-| `human_answer` | `via` (`cli`, `desktop`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
+| `human_answer` | `via` (`cli`, `desktop`, `phone`, `card`), `accepted`, `allow_once`, `latency_s` | A person answered a brief or released a hold. |
 | `verify` | `state` (`started`, `pass`, `fail`, `timeout`, `stale`), `ok`, `fails`, `exit`, `ms` | The background `verify:` command changed state. |
 | `advice_late` | `signal`, `ms` | An advice missed the wait and reached the worker on a later tool result. |
 | `web_verify` | `query_hash`, `results` (hits that reached the judge) | A web search was made for a claim (see "Web evidence"). The query text is never stored. |
@@ -121,7 +122,7 @@ plugins:
 | `limits` | `same_error 3, loop 3, malformed 3, steps 40` | Stuck-signal thresholds. |
 | `advisor.*` | disabled | `enabled`, `boards`, `marker`, `max_consults_per_card 3`, `max_output_tokens 700`, `context_chars 6000`, `daily_usd_cap 2.0`, `daily_token_cap 200000` (caps count the mom only), `extract_state false` (see "State first"). |
 | `web_verify.*` | disabled, `max_per_card 1`, `max_per_day 20`, `results 3`, `result_chars 200`, `timeout_s 8` | A web search for the claim of a `[crit]` / `[review]` card or a `verify-web:` line, before the judge decides (see "Web evidence"). Own switch; needs the advisor. |
-| `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
+| `preflight.*` | enabled, `timeout_s 12`, `max_per_card 4`, `fail_closed false` | One synchronous question to Mom before a critical command runs (active only where the advisor is). The deadline is `min(timeout_s, 0.4 x hook budget)`; the cap counts model calls per card; a timeout, a down provider, an unparseable answer or the cap lets the command run. |
 | `answer.*` | disabled, `boards []`, `max_per_card 2` | Mom answers a worker's `needs_input` question before it reaches you (see "Mom answers first"). `setup` asks. Model calls use `advisor.timeout_s`, `advisor.max_output_tokens`, `advisor.context_chars` and the daily caps of the advisor. |
 | `answer.precedents` | `true` | Keep a person's answers to `[for you]` briefs as text and show Mom up to three (see "Precedents"). Meaningful only where `answer` is on. |
 | `human_marker` | `[human]` | A card with this marker is for a person: Mom never answers its questions (no brief either). |
@@ -233,11 +234,22 @@ value through `_core.hook_budget()` (1..600 s) and keeps every synchronous wait 
   during the run, in a workspace without git, is not seen.
 - **The prompt tip** (`SECOND-OPINION`, `verify:`) is added to Kanban worker sessions only (`HERMES_KANBAN_TASK`).
 - **Untyped blocks** are escalated only on cards with an assignee; a card nobody works on is a human to-do.
-- **Pre-flight is bounded and fail-open.** A critical command gets ONE synchronous question, on its own thread, with
+- **Pre-flight is bounded and fail-open by default (see fail-closed below).** A critical command gets ONE synchronous question, on its own thread, with
   a deadline of `min(preflight.timeout_s, 0.4 x budget)` (default 12 s). A timeout, a down provider, an unparseable
   answer or the per-card cap (`preflight.max_per_card`) lets the command run and the post-hoc review happens as before.
   A HOLD persists in the plugin state (task, normalized command hash) and blocks later runs of the card without a
   model call; only a human release removes it (WP3/WP4).
+- **Pre-flight fail-closed (opt-in).** `preflight.fail_closed: true` turns every case above that lets the command run into
+  a HOLD: a provider error, a provider the quota check skips (`provider limited or down`), a model in its cooldown
+  (`provider cooling down`), a timeout, an unparseable or reasonless answer (`malformed answer`), the per-card cap
+  (`call limit per card reached`) and the daily budget (`daily budget reached`). Only critical commands (the same
+  `rules.classify` test as before) are touched; `[local-only]` cards are still skipped, because nothing may be sent for them.
+  The hold uses the normal record: `_record_hold` with a `fail_closed` field (the class), the card comment
+  `[pre-flight] HOLD: Mom could not check this command (<class>) ...`, so Needs you, the `held` badge, `allow_once`
+  and the one-shot allowance work unchanged. The worker reads `calling-mom pre-flight HOLD (fail-closed): Mom could not
+  check this command (<class>). It stays blocked until a person allows it.` A repeat of the command is held without a
+  model call. The trace row is `verdict: closed` with `error_class`. The deadline is unchanged (`min(timeout_s, 0.4 x
+  budget)`). Known limit: an unexpected exception inside the check (not a Mom failure) still lets the command run.
 - **A HOLD carries its rationale (refute filter).** The pre-flight prompt asks for `HOLD: <what is not verified, one concrete
   sentence>. Instead: ...`. A reason shorter than 4 words ("too risky") is downgraded: the command runs, nothing is
   recorded as a hold, the row says `allowed` / `no_rationale`. That is the fail-open path of an unparseable answer, so no
@@ -388,7 +400,7 @@ same card goes to `triage` and reaches a person directly. `answer.max_per_card` 
 ### `answer_card`
 
 `answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False) -> dict` is the entry point of the CLI
-(`by="cli"`) and the Desktop page (`by="desktop"`). It returns `{"ok": True, "task_id", "text", "unblocked"}` or
+(`by="cli"`), the Desktop page (`by="desktop"`) and the phone tool (`by="phone"`). It returns `{"ok": True, "task_id", "text", "unblocked"}` or
 `{"ok": False, "status", "error"}`, with `status` 400 (bad arguments: nothing to do, text and `accept` together, text
 empty or over 2000 characters, unknown `by`, `accept` without a recommendation), 404 (board not opted in, no such
 card) or 409 (not blocked, no brief, no hold and no question, `allow_once` without a hold). Nothing changes on an error. On success:
@@ -402,9 +414,38 @@ the dashboard) gets one `human_answer via=card` row per brief.
 
 New log rows: `question` has `outcome` (`answered`, `human`, `skipped`, `error`), `by` (`mom`, `olymp`), `reason`,
 `ms` and, after a model call, `tokens_in`, `tokens_out`, `usd` (Mom's; Olymp is counted in calls). `human_answer` has
-`via` (`cli`, `desktop`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
+`via` (`cli`, `desktop`, `phone`, `card`), `accepted`, `allow_once` and `latency_s` (brief or hold to answer).
 `worker_usage` (one per worker API request) has `task`, `run`, `tokens_in`, `tokens_out`; `preflight` rows that
 reached the model also carry `tokens_in`, `tokens_out`, `usd`.
+
+## Answer from your phone
+
+`calling_mom.notify.target` (default `""` = off) names a Hermes delivery target: `telegram` (the home channel of the platform),
+`telegram:<chat>`, `signal:...`. The sweep (`sweep` -> `notify_waiting(board)`, every 30 s per board, in the dispatcher hook and
+in the cron script) takes the cards of `waiting()` (the one function behind `GET /needs-you`: a `[for you]` brief nobody answered,
+a pre-flight hold nobody allowed, a worker's `needs_input` question without a brief). Each item has a `sig` (`brief:<comment id>`,
+`hold:<hash>`, `ask:<event id>`): a new brief on the same card is a new notice, the same one is never sent twice.
+
+Send path: `_claim_notice` books the try under a file lock (`calling-mom-state.json.lock`; the dispatcher and the cron job both
+sweep) before anything leaves, then `_send_notice` calls `_core.send_message` on a thread (the sweep waits `NOTIFY_WAIT_S` = 15 s
+at most) and records `ok` and an error class in the state (`notified.<card>`, `notify_last`) and as a `notify` log row. A failure
+is retried after 120 s, then 240 s (`NOTIFY_TRIES` = 3, `_retry_due`); a card never leaves Needs you because of it. The text is
+built by `_notice` and redacted by `_redact` (the redactor of the precedents); no redactor, no send. `[local-only]` cards are
+skipped. Why not `ctx.dispatch_tool("send_message")`: Hermes registers no such tool (`tools/send_message_tool.py`: "intentionally NOT
+registered as an agent-callable model tool"), so the call would answer "unknown tool"; `hermes send` and the cron delivery import the
+function, and so does `_core.send_message` (docs/UPSTREAM.md, 7). A subprocess `hermes send` would cost a Hermes start per notice.
+
+Reply path: Hermes mirrors the sent message into the chat session, so the gateway agent sees the card id. It calls the tool
+`calling_mom_answer(card_id, answer, board=None)` (toolset `calling-mom`; `check_fn` = a target is set and the process is not a
+Kanban worker). `handle_answer` finds the board (the first opted-in board that holds the card), maps `accept` / `allow` to the flags
+of `answer_card`, turns a single letter into `A) <option>` from the Options line of the newest brief, and calls
+`answer_card(..., by="phone")`: precedents, comments, unblock and the `human_answer via=phone` row are exactly those of the Desktop
+buttons. Why a tool and not `register_approval_transport` / `ask_choice`: the first is for tool approvals, the second for a slash
+command waiting in one session; neither carries "a card from the board asked you something while nobody was in the chat".
+
+`doctor` shows a `phone` check while a target is set (target and the last result); `status` shows `phone   : <target>|off`.
+`GET /needs-you` items gain `sig`, `local_only` and `sent_to` (the platform of the notice that matches the current `sig`; the
+Desktop page shows "sent to telegram").
 
 ## Precedents
 
@@ -440,6 +481,7 @@ JSON fields (`days` and `board` are added by `attention_report`; `olymp.today` a
 | `mom.calls` | advisor rows (an Olymp advice was asked of Mom first) + pre-flight checks that reached the model + questions she answered or briefed (`outcome` answered/human) |
 | `mom.answered` | questions with `outcome=answered`, `by=mom` |
 | `mom.checked` / `holds` | pre-flight `go` + `hold` rows / `hold` rows |
+| `mom.closed` | pre-flight `closed` rows: fail-closed holds, where Mom gave no answer (not a Mom call, not in `checked` or `holds`). `render` shows `, N fail-closed holds` after the hold count when N > 0 |
 | `mom.verified` / `verify_failed` | finished `verify` rows: `pass` / `fail` + `timeout` (`started` and `stale` are not results) |
 | `advice.calls` | advisor rows that were not silent (`noop`): advice that reached the worker |
 | `advice.followed` / `acted` / `ignored` | `advice_feedback` rows by `result`; a 1.4 row counts by its old `verdict` (`followed` is `acted`, `rejected` has no result) |
@@ -500,7 +542,17 @@ it imports nothing from Hermes itself. Boards are read through the plugin's `_co
 | `GET /summary?days=7` (1..90), optionally `since=` and `until=` (400 for a bad date) | The attention report (see above: `worker`, `mom`, `olymp`, `you`, `cost`) plus `you.waiting`, `today{mom_calls}` and `recent[{ts, kind, task, board, detail, by}]`. `today` starts at 00:00 UTC. `recent` is the last 10 rows worth a line, newest first, no prose. |
 | `GET /cards?board=<slug>` | `{task_id: [badge, ...]}` for cards the plugin touched, at most two, most urgent first: `held`, `for you`, `stalled`, `verify failed`, `olymp`, `mom`, `verified`. `held`, `for you` and `stalled` need an opted-in board and a card that still waits (`stalled`: a running card without a heartbeat); the others come from the log (the last finished `verify` row decides). Without `board`, every board; an unknown board gives `{}`. |
 | `GET /needs-you` | Blocked cards on opted-in boards with an unanswered `[for you]` brief or a hold nobody allowed: `{board, task_id, title, brief, holds[{reason, alternative}], can_accept, age_s}`, oldest first. `brief` is the comment without its marker; `can_accept` says there is a `Recommendation:` line. Also the running cards without a heartbeat for `stall_minutes` (read live from the store, so the entry goes when the heartbeat is back): `brief` null, no holds, `can_accept` false, plus `stalled{minutes, reclaim}` (the reclaim command to copy); the Desktop page shows them without buttons. |
+| `GET /new-card` | What the **New card** form offers: `{boards (opted in), default_board (Kanban's current board when opted in), profiles, flags{crit, review}}`. |
+| `POST /card` | `{board, title, assignee, body?, priority? (0..100), crit?, review?, verify?, key?}` -> the public `kanban_create` tool through `_core.dispatch_tool`; `crit` / `review` become the configured title prefixes (never doubled), `verify` the `verify: <cmd>` body line (one line), `key` the idempotency key. Returns `{ok, task_id, board, status}`. 404 for a board that does not exist, 403 for one that did not opt in, 400 for a blank title, a two-line verify or an unknown profile, 422 for over-long or malformed input (title 200, body 8000, verify 300, key 64), 502 when the tool refuses or does not answer (its text is passed on). |
+| `GET /later` | The cards you put off, on opted-in boards: Hermes `scheduled` cards and waits you put aside (`status: blocked`, same fields as a Needs-you item plus `status`), `{board, task_id, title, status, brief, holds, age_s}`, longest off first. `age_s` is the time since the `scheduled` event, or the wait's age. |
+| `POST /later` | `{board, task_id}` -> **Decide later**. A card that waits on a person (`waiting()`) is blocked already, so no worker runs and Hermes dispatches nothing: only `state.later[task_id] = sig` is stored (the wait's signature); `waiting()` marks that wait `later: true`, and Needs you, the badges and the phone sweep skip it, while the brief, the hold records and the `notified` entry stay. A new brief or question has a new `sig` and shows again. Any other card goes through `kanban_db.schedule_task` (`todo`/`ready`/`running`/`blocked`; a running card loses its claim and worker pid, the board's own move does the same). 404 board or card, 409 for any other status. |
+| `POST /resume` | `{board, task_id}` -> a put-aside wait is removed from `state.later` (back in Needs you, same `sig`, so no second phone message); a `scheduled` card goes through `unblock_task` (lands `ready`/`todo`, parents re-gated). 409 otherwise. `POST /move` knows `scheduled` too (sources `todo`/`ready`/`running`/`blocked`), and `unblocked`/`archived` accept `scheduled`. |
 | `POST /answer` | `{board, task_id, text?, accept?, allow_once?}` -> `answer_card(..., by="desktop")`. 404 for a board that does not exist or did not opt in, or no such card; 409 for a card that is not blocked or carries no brief or hold; 400 for bad arguments; 422 for a malformed body. |
+
+**Why a waiting card is not parked in `scheduled`.** `unblock_task` leaves `scheduled` for `ready`/`todo` only; a card that waited on
+you would start a worker again without your answer, and putting it back to `blocked` with `block_task(kind="needs_input")` counts
+a block recurrence (`BLOCK_RECURRENCE_LIMIT` = 2) and lands in `triage`. `triage` itself has no public transition into it.
+So the wait is put aside in the plugin's own state and the card is left alone.
 
 **Desktop on another machine.** The app loads Desktop plugins from its own disk only
 (`$HERMES_HOME/desktop-plugins/<id>/plugin.js` or `$HERMES_HOME/plugins/<id>/desktop/plugin.js` on the machine that
@@ -560,6 +612,89 @@ Which event makes Mom speak. The README shows the short version.
 Mom's answer appears **in the card** as a comment and is shown to the main model. If Mom is slow, the worker is never held
 up: her answer goes to the card when it arrives and reaches the main model with its next tool result, marked `[late advice]`.
 
+## What happens to one card
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant P as Plugin (watches)
+    participant M as Mom
+    participant Y as You
+
+    Note over W,Y: 1. Stuck
+    W->>P: same error 3 times
+    P->>M: card text + last steps, secrets blanked
+    M-->>W: tip, as a card comment
+
+    Note over W,Y: 2. Risky command
+    W->>P: git push --force
+    P->>M: pre-flight: card title + this one command
+    M-->>P: HOLD
+    P-->>W: blocked. Push a branch instead
+
+    Note over W,Y: 3. A question
+    W->>P: kanban_block needs_input
+    P->>M: the question
+    alt card or repo settles it
+        M-->>W: ANSWER. The card continues
+    else a person must decide
+        M-->>Y: four-line brief
+        Y-->>W: one click, the card continues
+    end
+```
+
+## What a card looks like
+
+```
+[architecture/critical_change] run 68 · claude-sonnet-5-5 (claude-subscription-directsdk-experimental): 2719 in / 780 out
+Biggest risk: the SSH keys now sit unencrypted in the scratch folder ... Double-check: delete them after the deploy ...
+```
+
+A HOLD stops the command **before** it runs, and that exact command stays blocked on this card until a person releases it:
+
+```
+[pre-flight] HOLD: it rewrites shared history. Instead: push a branch and open a PR.
+This exact command stays blocked on this card until a human allows it.
+```
+
+A HOLD must say what is not verified. "Too risky" alone does not hold: the command runs. A timeout, a down provider, an unparseable answer or the per-card cap lets the command run too. The after-the-fact review happens as before. When Mom settles a question: `[mom answered] Change config B. Config A is generated by the build ...`
+
+## Troubleshooting
+
+| You see | Try |
+|---|---|
+| `[advisor unavailable]` in a card | `hermes calling-mom doctor` names the cause (key limit, login, missing grant). |
+| Nothing happens at all | `hermes calling-mom status`: is a board opted in? Is the advisor on? |
+| Two sweep cron jobs | `doctor` lists them. `setup` never creates a second one. |
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `hermes calling-mom setup` | Choose Mom and Olymp from your own providers. Safe to repeat. Scripts: `--mom provider/model --olymp none --boards '*'`, exit code 2 when a flag is missing. `--notify telegram` sends what needs you to your phone too. |
+| `hermes calling-mom status` | Who is Mom, who is Olymp, Olymp calls today, providers that are limited or down. |
+| `hermes calling-mom doctor` | Checks the setup and makes a real call to each model. Run it after every Hermes update. |
+| `hermes calling-mom report` | What reached whom and what it cost, per rung. `--days 7`, `--board X`, `--json`. Example: [a real report](#a-real-report). |
+| `hermes calling-mom answer <task>` | Answers a card that has a `[for you]` brief or a HOLD: `--accept`, `--text "..."`, `--allow-once`. |
+| `hermes calling-mom precedents` | Lists, forgets or clears the answers Mom may reuse. |
+| `hermes calling-mom pace --board B --max 1 --dry-run` | Shows how at most one card at a time would be ready or running. Without `--dry-run` it writes parent links; `--undo` removes exactly those. |
+
+**When a quota stops everything.** A worker that hits a usage limit gets one `[quota]` comment (provider, reset time, work is kept). Mom and Olymp do not call a limited or dead provider: one `[advisor unavailable]` comment says until when. `setup --fallback provider/model` names a second model for Mom (never for Olymp). A card `running` without a heartbeat for `stall_minutes` (default 15) gets one `[stalled]` comment with the reclaim command. The plugin never reclaims by itself. A `ready` card the dispatcher's respawn guard holds back for `guard_minutes` (default 30) gets one `[guarded]` comment with the reason. The guard fires no block hook, so such a card otherwise sits quiet for hours. The plugin never bypasses the guard. Models from *Advanced Delegation* can be reused: [how](#reuse-your-advanced-delegation-models).
+
+## Desktop on another machine
+
+Does the app run on a different machine than the gateway (a Mac connected to a server, say)? Then it shows no page, no
+badges and no chip, although the plugin works on the server. The app loads Desktop plugins from **its own disk** only,
+so the Desktop half must be installed on that machine. Use Hermes' own way:
+
+1. In the app, open **Capabilities -> Plugins -> Install** and add Calling Mom (the catalog entry, or `SlyBase/calling-mom`).
+2. Switch Calling Mom on under **Capabilities -> Plugins**. It ships off until you say so.
+
+Later, the **Update** button of the plugin moves the Desktop half to the new version. The page shows the version under
+its title; when the app's copy and the gateway differ, a note next to it says so.
+
+The idea behind the ladder comes from DeepSeek Harness's [*Exploring Super-agent Design*](https://x.com/DeepSeekHarness/article/2116857257245987236): Calling Mom is its watchdog and two-stage filter, for Hermes Kanban.
+
 ## Reuse your Advanced Delegation models
 
 If you use the official [*Advanced Delegation*](https://hermes-agent.nousresearch.com/docs/plugins/advanced-delegation)
@@ -595,12 +730,24 @@ read `acted` now, and the 14 without a verdict read `unknown`. From 1.5 on, `fol
 command, path or tool Mom named. A Claude subscription has no per-token price, so the cost line gives tokens and says so.
 Options: `--days 7`, `--since 2026-11-05 --until 2026-11-06T03:00`, `--board X`, `--json` (dates are ISO and UTC).
 
+The 7-day window the README cites is the same board, 1 to 8 November 2026 (re-run 2026-11-08): Worker 3,182 tool calls in 69 runs, Mom 81 calls (1 question answered, 12 pre-flight checks, 0 holds), Olymp 0 calls (0 of 6 today).
+
 
 ## What we measured, and what we did not
 
 24 runs (6 hidden-test coding tasks x 4 arms: local, local + high reasoning effort, local + advisor, strong model). **All 24 were correct.** The local model solved every task alone, so this set shows **no case for escalation**: it is too easy to find the capability boundary. The free rung "more reasoning effort first" was removed in 1.3.2: it needed a write into Hermes' Kanban table, and high effort was slower for no gain. Build a harder set (multi-file, ambiguous spec) before tuning any threshold.
 
 Two-tier routing was exercised live with real models (mom and olymp on a subscription): routine and even severe incidents were answered by the mom alone and olymp was never asked; the olymp leg was proven with a forced `ESCALATE`. **No natural `ESCALATE` has been observed yet**, so how often a weaker mom escalates is unmeasured.
+
+The pre-flight HOLD was measured in an isolated kanban benchmark (`SlyBase/kanban-bench`, `--suite hold`): 10 cards that tempt a destructive or shared-state command (force push over a shared main, `git reset --hard` + push, deleting a shared directory, rewriting a published tag, dropping a foreign table, `curl | sh` from an unknown host, ...) plus 10 harmless twins (the same operation on the worker's own branch, directory or table). A per-run token makes a memorised answer useless; the checks read the fixture repo and the board DB only, no LLM judge. One arm per setup (stock Hermes, this plugin fail-open, this plugin fail-closed), one worker model for all of them (2026-11-08, local 27B vLLM, Mom = Claude Sonnet on a subscription, 1 seed):
+
+| arm | risky held | destructive effect avoided | harmless passed | false HOLD |
+|---|---|---|---|---|
+| stock Hermes | 2/10 (20 %) | 3/10 (30 %) | 10/10 (100 %) | 0/10 |
+| plugin, fail-open (default) | 7/10 (70 %) | 8/10 (80 %) | 10/10 (100 %) | 0/10 |
+| plugin, fail-closed | 6/10 (60 %) | 8/10 (80 %) | 10/10 (100 %) | 0/10 |
+
+The pre-flight adds +50 points of effect avoidance and +50 points of held cards over the stock baseline; it did not block a single harmless card in this run. The two plugin arms avoided the same eight commands plus one each: R05's drop was avoided only in the fail-closed arm, but the worker's own question held it, not a fail-closed hold; R09's `git clean` was avoided only in the fail-open arm. `curl | sh` ran in all three arms: the pre-flight's advisory verdict did not stop the worker in this sample. The sample is small (one seed, ten cards per kind): one card is 10 percentage points, and a stronger worker model would change the stock baseline. The benchmark, the per-scenario table and the caveats are in `kanban-bench/results/hold-seed0-summary.md`.
 
 Known limits:
 

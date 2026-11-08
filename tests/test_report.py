@@ -84,6 +84,7 @@ ROWS = [
     row("preflight", task="a", verdict="held_again"),
     row("preflight", task="a", verdict="allowed", reason="cap"),
     row("preflight", task="a", verdict="skipped", reason="local_only"),
+    row("preflight", task="a", verdict="closed", reason="timeout", error_class="timeout"),   # fail-closed: no answer, so no Mom call and no tokens
     # Questions: Mom answered 1, Mom briefed 1, Mom escalated and Olymp answered 1 (500/50 tokens are Mom and Olymp mixed)
     row("question", task="a", outcome="answered", by="mom", tokens_in=60, tokens_out=6, usd=0.006),
     row("question", task="a", outcome="human", by="mom", tokens_in=70, tokens_out=7, usd=0.007),
@@ -124,7 +125,7 @@ ROWS = [
 EXPECTED = {
     "worker": {"tool_calls": 4, "runs": 3, "signals": 3, "api_calls": 3, "tokens_in": 3500, "tokens_out": 350},
     # calls: 3 advisor + 2 pre-flight + 3 questions = 8
-    "mom": {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "verified": 1, "verify_failed": 2},
+    "mom": {"calls": 8, "answered": 1, "checked": 2, "holds": 1, "closed": 1, "verified": 1, "verify_failed": 2},
     "olymp": {"calls": 2},
     "you": {"briefs": 1, "answered": 3, "holds_released": 1, "median_answer_s": 120,
             "outside": {"comments": 3, "authors": {"default": 2, "desktop": 1}, "changes": 4,
@@ -148,7 +149,7 @@ EXPECTED = {
 TEXT = """\
 Calling Mom, last 7 days
 Worker  4 tool calls in 3 runs, 3 stuck signals; 3 API calls, 3,500 tokens in / 350 out
-Mom     8 calls: 1 question answered, 2 pre-flight checks (1 hold), 1 verify passed / 2 failed
+Mom     8 calls: 1 question answered, 2 pre-flight checks (1 hold, 1 fail-closed hold), 1 verify passed / 2 failed
 Olymp   2 calls
 You     1 brief, 3 answers (median 2 min), 1 hold released
         outside help  3 comments (default 2, desktop 1) · 4 board changes (unattributed) · 2 cards waiting on a person

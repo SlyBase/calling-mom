@@ -156,6 +156,7 @@ def build(rows, since=0, board=None, tasks=(), until=None) -> dict:
         "mom": {"calls": len(advice) + len(checks) + len(questions),
                 "answered": sum(1 for r in questions if r["outcome"] == "answered" and r.get("by") == "mom"),
                 "checked": len(checks), "holds": sum(1 for r in checks if r["verdict"] == "hold"),
+                "closed": len(of("preflight", verdict=("closed",))),  # fail-closed holds: Mom could not check, so no call is counted
                 "verified": sum(1 for r in verify if r["state"] == "pass"),
                 "verify_failed": sum(1 for r in verify if r["state"] != "pass")},
         "olymp": {"calls": olymp_calls},
@@ -219,13 +220,14 @@ def render(r) -> str:
     olymp = _n(o["calls"], "call") + (f", {o['today']} of {o['cap']} today" if "cap" in o else "")
     tokens = f"{c['mom_tokens_in']:,} in / {c['mom_tokens_out']:,} out tokens"
     price = f"${c['mom_usd']:.4f} ({tokens})" if c["mom_usd"] else f"{tokens} on a subscription (no per-token price)"  # no price is not free
+    closed = f", {_n(m['closed'], 'fail-closed hold')}" if m["closed"] else ""
     wait = f" (median {duration(y['median_answer_s'])})" if y["median_answer_s"] is not None else ""
     lines = [
         head,
         f"Worker  {_n(w['tool_calls'], 'tool call')} in {_n(w['runs'], 'run')}, {_n(w['signals'], 'stuck signal')}; "
         f"{_n(w['api_calls'], 'API call')}, {w['tokens_in']:,} tokens in / {w['tokens_out']:,} out",
         f"Mom     {_n(m['calls'], 'call')}: {_n(m['answered'], 'question')} answered, {_n(m['checked'], 'pre-flight check')} "
-        f"({_n(m['holds'], 'hold')}), {m['verified']} verify passed / {m['verify_failed']} failed",
+        f"({_n(m['holds'], 'hold')}{closed}), {m['verified']} verify passed / {m['verify_failed']} failed",
         f"Olymp   {olymp}",
         f"You     {_n(y['briefs'], 'brief')}, {_n(y['answered'], 'answer')}{wait}, {_n(y['holds_released'], 'hold')} released",
         f"        outside help  {_outside_line(y['outside'])}",

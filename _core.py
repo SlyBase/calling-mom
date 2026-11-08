@@ -7,6 +7,8 @@ place, `hermes calling-mom doctor` names it, and the plugin degrades instead of 
 ``ERROR`` is None when everything the plugin needs is importable. When it is set, ``register`` installs no
 hooks. The helpers below are best effort and return safe values.
 """
+import json
+
 try:
     from agent.redact import redact_for_egress
     from hermes_cli import kanban_db as kb
@@ -123,6 +125,24 @@ def profile_exists(name) -> bool:
         return False  # unknown profile: the caller skips the step that needs it
 
 
+def profile_names() -> list:
+    """The names of the installed Hermes profiles (the Desktop form's assignee list); empty when Hermes cannot say."""
+    try:
+        from hermes_cli.profiles import list_profiles
+        return [p.name for p in list_profiles(lazy_skill_count=True)]
+    except Exception:
+        return []
+
+
+def dispatch_tool(name, args) -> str:
+    """Run a PUBLIC Hermes tool through the registry and return its JSON reply: what ``ctx.dispatch_tool`` does, for the
+    dashboard routes, which get no ``ctx`` (docs/UPSTREAM.md). The registry turns every handler error into an ``error`` reply."""
+    from tools.registry import discover_builtin_tools, registry
+    if registry.get_entry(name) is None:  # a dashboard process may not have imported the built-in tools yet
+        discover_builtin_tools()
+    return registry.dispatch(name, args)
+
+
 def profile_home(name):
     """The home directory of a Hermes profile: its ``state.db`` holds the sessions."""
     from hermes_cli.profiles import get_profile_dir
@@ -195,3 +215,12 @@ def hermes_version() -> str:
         return str(__version__)
     except Exception:
         return "?"
+
+
+def send_message(target, text) -> dict:
+    """One message through Hermes' own delivery: the function behind ``hermes send`` (target ``telegram`` = the home
+    channel, ``telegram:<chat>`` = one chat). Returns Hermes' result (``success`` or ``error``). Raises when the import fails.
+
+    ``send_message`` is deliberately not a registered tool, so ``ctx.dispatch_tool`` cannot reach it (docs/UPSTREAM.md)."""
+    from tools.send_message_tool import send_message_tool
+    return json.loads(send_message_tool({"action": "send", "target": target, "message": text}))

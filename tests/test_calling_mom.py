@@ -1248,7 +1248,7 @@ class PromptTest(AdvisorTest):
     def test_tool_has_its_own_toolset_and_is_hidden_outside_workers(self):
         from types import SimpleNamespace as NS
         seen = {}
-        plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: seen.update(kw), llm=self.llm))
+        plugin.register(NS(register_hook=lambda *a, **k: None, register_tool=lambda **kw: seen.update(kw) if kw["name"] == "second_opinion" else None, llm=self.llm))
         # "kanban" is a static list in toolsets.py: a tool registered there never reaches the model.
         self.assertEqual(seen["toolset"], "calling-mom")
         self.assertTrue(seen["check_fn"]())
@@ -3330,7 +3330,7 @@ class AnswerCardTest(QuestionFixture, unittest.TestCase):
             ("blank text", dict(text="   "), 400, "1 to 2000"),
             ("text too long", dict(text="x" * 2001), 400, "1 to 2000"),
             ("text is not a string", dict(text=5), 400, "1 to 2000"),
-            ("unknown who", dict(text="x", by="mom"), 400, "'cli' or 'desktop'"),
+            ("unknown who", dict(text="x", by="mom"), 400, "'phone'"),
             ("unknown board", dict(text="x", board="nowhere"), 404, "did not opt in"),
             ("unknown card", dict(text="x", tid="t_missing"), 404, "no card"),
             ("not blocked", dict(text="x", tid=gone), 409, "not blocked"),
@@ -3399,3 +3399,170 @@ class AnswerCardTest(QuestionFixture, unittest.TestCase):
     def test_a_claim_of_a_card_that_does_not_exist_is_ignored(self):
         plugin.on_claimed(task_id="t_missing", board=None)
         self.assertEqual(self.human_rows(), [])
+
+
+class FailClosedPreflightTest(AdvisorFixture, unittest.TestCase):
+    """1.7.0: with ``preflight.fail_closed`` a critical command stays held when Mom cannot check it; off, it runs (as before)."""
+
+    CMD = "git push --force origin main"
+    TEXT = "calling-mom pre-flight HOLD (fail-closed): Mom could not check this command ({}). It stays blocked until a person allows it."
+
+    def setUp(self):
+        super().setUp()
+        self._state = os.environ.get("CALLING_MOM_STATE")
+        os.environ["CALLING_MOM_STATE"] = str(Path(tempfile.mkdtemp()) / "state.json")
+        self.llm = FakeLlm(text="GO", cost=0.001)
+        plugin._ctx.llm = self.llm
+        plugin.DEFAULTS["preflight"]["fail_closed"] = True
+
+    def tearDown(self):
+        super().tearDown()
+        if self._state is None:
+            os.environ.pop("CALLING_MOM_STATE", None)
+        else:
+            os.environ["CALLING_MOM_STATE"] = self._state
+
+    def run_cmd(self, command=None):
+        return plugin.on_pre_tool(tool_name="terminal", args={"command": command or self.CMD})
+
+    def rows(self):
+        path = Path(os.environ["CALLING_MOM_LOG"])
+        rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in rows if r.get("kind") == "preflight"]
+
+    def comments(self):
+        return [c.body for c in with_conn(lambda c: kb.list_comments(c, self.tid))]
+
+    # --- each failure kind: (how Mom fails, the error class the worker reads, the legacy fail-open reason) ------------
+
+    def slow(self):
+        class Slow(FakeLlm):
+            def complete(self, messages, **kw):
+                time.sleep(2)
+                return super().complete(messages, **kw)
+        plugin._ctx.llm = Slow()
+        plugin.DEFAULTS["preflight"]["timeout_s"] = 0.2
+
+    def kinds(self):
+        def boom():
+            self.llm.boom = True
+
+        def cooling():
+            self.llm.boom = True
+            self.run_cmd("git push --force origin first")          # the first failure starts the cooldown; that one is held too
+
+        def limited():
+            plugin._set_health(plugin.settings()["provider"], plugin.settings()["model"], "rate_limit", time.time() + 3600, "call")
+
+        def card_cap():
+            plugin.DEFAULTS["preflight"]["max_per_card"] = 0
+
+        def daily_cap():
+            plugin.DEFAULTS["advisor"]["daily_usd_cap"] = 0.0
+
+        return [
+            ("timeout", self.slow, "timeout", "timeout"),
+            ("provider error", boom, "provider error", "down"),
+            ("cooling down", cooling, "provider cooling down", "down"),
+            ("quota", limited, "provider limited or down", "down"),
+            ("malformed answer", lambda: self.hold_with("I am not sure, maybe?"), "malformed answer", "parse"),
+            ("empty answer", lambda: self.hold_with(""), "malformed answer", "parse"),
+            ("hold without a reason", lambda: self.hold_with("HOLD: too risky. Instead: x."), "malformed answer", "no_rationale"),
+            ("per-card cap", card_cap, "call limit per card reached", "cap"),
+            ("daily budget", daily_cap, "daily budget reached", "cap"),
+        ]
+
+    def hold_with(self, text):
+        self.llm.text = text
+        self.llm._res.text = text
+
+    def test_every_failure_kind_holds_the_command_when_the_switch_is_on(self):
+        for name, arrange, label, reason in self.kinds():
+            with self.subTest(kind=name):
+                self.tearDown(); self.setUp()
+                arrange()
+                out = self.run_cmd()
+                self.assertEqual(out["action"], "block")
+                self.assertTrue(out["message"].startswith(self.TEXT.format(label)), out["message"])
+                hold = plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD))
+                self.assertEqual(hold["fail_closed"], label)
+                row = self.rows()[-1]
+                self.assertEqual((row["verdict"], row["reason"], row["error_class"]), ("closed", reason, label))
+                self.assertTrue(any(c.startswith("[pre-flight] HOLD: Mom could not check this command") for c in self.comments()))
+
+    def test_every_failure_kind_runs_the_command_when_the_switch_is_off(self):
+        for name, arrange, _, reason in self.kinds():
+            with self.subTest(kind=name):
+                self.tearDown(); self.setUp()
+                plugin.DEFAULTS["preflight"]["fail_closed"] = False
+                arrange()
+                self.assertIsNone(self.run_cmd())
+                self.assertIsNone(plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD)))
+                self.assertEqual((self.rows()[-1]["verdict"], self.rows()[-1]["reason"]), ("allowed", reason))
+
+    def test_the_switch_is_off_by_default(self):
+        plugin.DEFAULTS.clear(); plugin.DEFAULTS.update(self.saved)
+        self.assertIs(plugin.settings()["preflight"]["fail_closed"], False)
+
+    def test_a_command_that_is_not_critical_stays_fail_open(self):
+        self.llm.boom = True
+        self.assertIsNone(self.run_cmd("ls -la"))
+        self.assertEqual((self.llm.calls, self.rows()), ([], []))
+
+    def test_a_card_that_is_local_only_asks_nobody_and_is_not_held(self):
+        tid = with_conn(lambda c: kb.create_task(c, title="[local-only] secret infra", assignee="worker"))
+        os.environ["HERMES_KANBAN_TASK"] = tid
+        self.llm.boom = True
+        self.assertIsNone(self.run_cmd())
+        self.assertEqual(self.llm.calls, [])
+        self.assertIsNone(plugin.active_hold(tid, plugin.cmd_hash(self.CMD)))
+
+    def test_go_still_runs_and_a_real_hold_keeps_its_own_text(self):
+        self.assertIsNone(self.run_cmd())
+        self.hold_with("HOLD: it rewrites shared history. Instead: push a branch.")
+        out = self.run_cmd("git push --force origin other")
+        self.assertTrue(out["message"].startswith("calling-mom pre-flight HOLD: it rewrites"))
+        self.assertNotIn("fail_closed", plugin.active_hold(self.tid, plugin.cmd_hash("git push --force origin other")))
+        self.assertEqual([r["verdict"] for r in self.rows()], ["go", "hold"])
+
+    def test_the_held_command_is_not_asked_again_and_other_commands_are_still_asked(self):
+        self.llm.boom = True
+        self.run_cmd()
+        plugin._down.clear()
+        self.llm.boom = False
+        out = self.run_cmd()                                    # same command: held again, no model call
+        self.assertTrue(out["message"].startswith(self.TEXT.format("provider error")))
+        self.assertEqual(len(self.llm.calls), 1)
+        self.assertIsNone(self.run_cmd("git push --force origin other"))    # Mom is back: she is asked and says GO
+        self.assertEqual([r["verdict"] for r in self.rows()], ["closed", "held_again", "go"])
+
+    def test_the_deadline_is_still_40_percent_of_the_hook_budget(self):
+        self.slow()
+        plugin.DEFAULTS["preflight"]["timeout_s"] = 12
+        real = plugin._core.hook_budget
+        plugin._core.hook_budget = lambda: 2.0
+        try:
+            t0 = time.monotonic()
+            out = self.run_cmd()
+        finally:
+            plugin._core.hook_budget = real
+        self.assertLess(time.monotonic() - t0, 1.2)
+        self.assertEqual(out["action"], "block")
+
+    # --- the person: same Needs-you path and same release as a normal HOLD ---------------------------------------------
+
+    def test_the_card_waits_in_needs_you_with_the_hold_and_can_be_released(self):
+        self.llm.boom = True
+        self.run_cmd()
+        with_conn(lambda c: kb.block_task(c, self.tid, reason="held", kind="capability"))
+        items = [i for i in plugin.waiting("t-board", plugin.blocked_cards("t-board"), plugin._load_holds(), time.time())
+                 if i["task_id"] == self.tid]                   # the test board is shared with other tests
+        self.assertEqual(len(items), 1)
+        self.assertIn("Mom could not check this command (provider error)", items[0]["holds"][0]["reason"])
+        out = plugin.answer_card("t-board", self.tid, None, by="cli", allow_once=True)
+        self.assertTrue(out["ok"])
+        plugin._down.clear()
+        self.llm.calls.clear()
+        self.assertIsNone(self.run_cmd())                       # the worker's retry runs once, without a model call
+        self.assertEqual(self.llm.calls, [])
+        self.assertIsNone(plugin.active_hold(self.tid, plugin.cmd_hash(self.CMD)))

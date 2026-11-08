@@ -21,12 +21,12 @@ HERE = Path(__file__).resolve().parent
 CANONICAL = HERE
 DEPLOYED = Path(os.environ["CALLING_MOM_DEPLOYED"]) if os.environ.get("CALLING_MOM_DEPLOYED") else None
 MODULES = ["test_signals", "test_calling_mom", "test_metrics", "test_matrix", "test_cli", "test_rules", "test_core", "test_dashboard", "test_report", "test_precedents", "test_demo",
-           "test_touches", "test_feedback", "test_count", "test_quota", "test_quota_flow"]
+           "test_touches", "test_feedback", "test_count", "test_quota", "test_quota_flow", "test_notify"]
 PAYLOAD = ["__init__.py", "_core.py", "tests/test_core.py", "cli.py", "rules.py", "tests/test_rules.py", "metrics.py", "signals.py", "plugin.yaml",
            "tests/test_signals.py", "tests/test_calling_mom.py", "tests/test_metrics.py", "tests/test_matrix.py", "tests/test_cli.py",
            "linecov.py", "check.py", "README.md", "CHANGELOG.md", "scripts/sweep.py", "scripts/demo.py", "tests/test_demo.py",
            "tests/test_dashboard.py", "tests/test_report.py", "report.py", "precedents.py", "tests/test_precedents.py", "dashboard/plugin_api.py", "dashboard/manifest.json", "desktop/plugin.js",
-           "touches.py", "tests/test_touches.py", "feedback.py", "tests/test_feedback.py", "tests/test_count.py", "quota.py", "tests/test_quota.py", "tests/test_quota_flow.py"]
+           "touches.py", "tests/test_touches.py", "feedback.py", "tests/test_feedback.py", "tests/test_count.py", "quota.py", "tests/test_quota.py", "tests/test_quota_flow.py", "tests/test_notify.py"]
 
 
 def measure(minimum):
