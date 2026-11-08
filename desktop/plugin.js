@@ -161,7 +161,7 @@ function briefRows(text) {
   return rows.length ? rows : [{ label: 'Brief', value: String(text || '') }]
 }
 
-const PREFLIGHT = { go: 'Pre-flight: Mom said go', hold: 'Pre-flight HOLD on a risky command', held_again: 'A held command was tried again' }
+const PREFLIGHT = { go: 'Pre-flight: Mom said go', hold: 'Pre-flight HOLD on a risky command', held_again: 'A held command was tried again', closed: 'Pre-flight HOLD (fail-closed): Mom could not check a risky command' }
 const VERIFY = { pass: 'verify passed', fail: 'verify failed', timeout: 'verify timed out' }
 
 // The action of a recent row, colored by what it did: the dot says it at a glance,
@@ -173,7 +173,7 @@ function actionDot(row) {
   }
 
   if (kind === 'preflight') {
-    return detail === 'go' ? 'var(--ui-accent-green, #22c55e)' : detail === 'hold' ? 'var(--ui-accent-amber, #f59e0b)' : muted.color
+    return detail === 'go' ? 'var(--ui-accent-green, #22c55e)' : detail === 'hold' || detail === 'closed' ? 'var(--ui-accent-amber, #f59e0b)' : muted.color
   }
 
   if (kind === 'question') {
@@ -260,7 +260,9 @@ function Ladder({ summary, count }) {
       unit: 'calls',
       lines: [
         `${mom.answered} answered · ${mom.checked} checked · ${mom.holds} held`,
-        mom.verified + mom.verify_failed ? `${mom.verified} verified · ${mom.verify_failed} verify failed` : null
+        mom.verified + mom.verify_failed ? `${mom.verified} verified · ${mom.verify_failed} verify failed` : null,
+        mom.closed ? `${mom.closed} fail-closed hold${mom.closed === 1 ? '' : 's'}` : null,
+        summary.preflight ? `pre-flight: ${summary.preflight.fail_closed ? 'fail-closed' : 'fail-open'}` : null
       ]
     }),
     arrow('a2'),
