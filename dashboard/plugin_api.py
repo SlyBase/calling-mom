@@ -4,6 +4,7 @@ Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanb
 through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``), POST /card creates a card through
 Hermes' public ``kanban_create`` tool.
 """
+import contextlib
 import importlib.util
 import json
 import re
@@ -125,7 +126,7 @@ def _needs_you():
     for b in mom()._core.list_board_slugs():
         if mom()._opted_in(b):
             cards_ = _board(b)
-            items += _waiting(b, cards_, state, now) + _stalled(b, cards_, now)
+            items += [i for i in _waiting(b, cards_, state, now) if not i["later"]] + _stalled(b, cards_, now)
     return sorted(items, key=lambda i: -i["age_s"])
 
 
@@ -156,7 +157,7 @@ def cards(board: str | None = None):
     for slug in slugs:
         cards_ = _board(slug)
         opted = mom()._opted_in(slug)
-        waiting = {i["task_id"]: i for i in _waiting(slug, cards_, state, now)} if opted else {}
+        waiting = {i["task_id"]: i for i in _waiting(slug, cards_, state, now) if not i["later"]} if opted else {}
         stalled = {i["task_id"] for i in _stalled(slug, cards_, now)} if opted else set()
         for task, _ in cards_:
             names = set(activity.get(task.id, ())) | ({"stalled"} if task.id in stalled else set())
@@ -211,9 +212,12 @@ class Answer(BaseModel):
     allow_once: bool = False
 
 
-class Move(BaseModel):
+class Ref(BaseModel):
     board: str
     task_id: str
+
+
+class Move(Ref):
     to: str
 
 
@@ -226,8 +230,9 @@ _MOVE_SOURCES = {
     "blocked": {"running", "ready"},
     "review": {"running", "ready"},
     "done": {"running", "ready", "blocked", "review"},
-    "unblocked": {"blocked"},
-    "archived": {"triage", "todo", "ready", "running", "blocked", "review", "done"},
+    "scheduled": {"todo", "ready", "running", "blocked"},
+    "unblocked": {"blocked", "scheduled"},
+    "archived": {"triage", "todo", "ready", "running", "blocked", "review", "done", "scheduled"},
 }
 
 
@@ -238,26 +243,84 @@ def _move_verbs(conn, task_id):
         "blocked": lambda: kb.block_task(conn, task_id, reason="moved from the Calling Mom page", kind="needs_input"),
         "review": lambda: kb.request_review(conn, task_id, force=True),
         "done": lambda: kb.complete_task(conn, task_id, result="completed from the Calling Mom page", force=True),
+        "scheduled": lambda: kb.schedule_task(conn, task_id, reason="decide later (Calling Mom page)"),
         "unblocked": lambda: kb.unblock_task(conn, task_id),
         "archived": lambda: kb.archive_task(conn, task_id),
     }
 
 
-@router.post("/move")
-def move(body: Move):
-    """A card click in the context menu: one bucket move, via the status's transition verb."""
+@contextlib.contextmanager
+def _card_conn(body):
+    """``(conn, task)`` of the card a body names; 404 for a board or card that does not exist (a name is never turned into a path)."""
     if body.board not in mom()._core.list_board_slugs():
         raise HTTPException(404, f"no board {body.board!r}")
     with mom()._connect(body.board) as conn:
         task = mom().kb.get_task(conn, body.task_id)
         if task is None:
             raise HTTPException(404, f"no card {body.task_id!r}")
-        verb = _move_verbs(conn, body.task_id)
-        if task.status not in _MOVE_SOURCES.get(body.to, ()):
-            raise HTTPException(409, f"cannot move {task.status!r} to {body.to!r}")
-        if not verb[body.to]():
-            raise HTTPException(409, f"cannot move {task.status!r} to {body.to!r}")
-        return {"ok": True, "status": mom().kb.get_task(conn, body.task_id).status}
+        yield conn, task
+
+
+def _transition(conn, task, to):
+    """Move a card with the verb of ``to``: 409 when its status is no source of it or the verb refuses."""
+    if task.status not in _MOVE_SOURCES.get(to, ()) or not _move_verbs(conn, task.id)[to]():
+        raise HTTPException(409, f"cannot move {task.status!r} to {to!r}")
+    return {"ok": True, "status": mom().kb.get_task(conn, task.id).status}
+
+
+@router.post("/move")
+def move(body: Move):
+    """A card click in the context menu: one bucket move, via the status's transition verb."""
+    with _card_conn(body) as (conn, task):
+        return _transition(conn, task, body.to)
+
+
+def _wait(board, task_id):
+    """The Needs-you item of a card that waits on a person (a brief, a hold or a worker question), or None."""
+    return next((i for i in _waiting(board, _board(board), mom()._load_holds(), time.time()) if i["task_id"] == task_id), None)
+
+
+@router.post("/later")
+def later(body: Ref):
+    """Decide later. A card that waits on a person is blocked already (no worker, nothing to dispatch): its wait is only
+    put aside in the plugin's state, brief and hold stay recorded. Any other card is parked in Hermes' ``scheduled`` status."""
+    with _card_conn(body) as (conn, task):
+        wait = _wait(body.board, task.id)
+        if wait and not wait["later"]:
+            mom().set_later(task.id, wait["sig"])
+            return {"ok": True, "status": task.status}
+        return _transition(conn, task, "scheduled")
+
+
+@router.post("/resume")
+def resume(body: Ref):
+    """Undo Decide later: a put-aside wait is in Needs you again, a ``scheduled`` card goes through ``unblock_task`` (parents re-gated)."""
+    with _card_conn(body) as (conn, task):
+        if task.status == "scheduled":
+            return _transition(conn, task, "unblocked")
+        if task.status == "blocked" and (mom()._load_holds().get("later") or {}).get(task.id):
+            mom().set_later(task.id, None)
+            return {"ok": True, "status": task.status}
+        raise HTTPException(409, f"card is {task.status!r}, not put off")
+
+
+def _later():
+    """The cards a person put off on the opted-in boards: parked (``scheduled``) and put-aside waits, longest off first."""
+    items, state, now = [], mom()._load_holds(), time.time()
+    for board in _boards():
+        items += [{**i, "status": "blocked"} for i in _waiting(board, _board(board), state, now) if i["later"]]
+        with mom()._connect(board) as conn:
+            for t in mom().kb.list_tasks(conn):
+                if t.status == "scheduled":
+                    parked = max([e.created_at for e in mom().kb.list_events(conn, t.id) if e.kind == "scheduled"] or [t.created_at or now])
+                    items.append({"board": board, "task_id": t.id, "title": t.title, "status": "scheduled", "brief": None, "holds": [],
+                                  "age_s": max(0, int(now - parked))})
+    return sorted(items, key=lambda i: -i["age_s"])
+
+
+@router.get("/later")
+def later_list():
+    return _later()
 
 
 @router.post("/answer")

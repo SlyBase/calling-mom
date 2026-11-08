@@ -43,6 +43,29 @@ class NotifyFixture(dash.DashboardFixture):
         with_conn(lambda c: kb.add_comment(c, tid, "calling-mom", dash.base.BRIEF_COMMENT.replace("auth provider do we use", "plan do we buy")))
 
 
+class DecideLaterTest(NotifyFixture, unittest.TestCase):
+    def later(self, tid, what="later"):
+        return self.client.post(f"/{what}", json={"board": "t-board", "task_id": tid})
+
+    def test_a_card_decided_later_is_not_sent_and_goes_out_once_after_the_resume(self):
+        tid = self.brief_card()
+        self.later(tid)
+        self.notify()
+        self.assertEqual(self.sent, [])
+        self.later(tid, "resume")
+        self.notify(5)
+        self.notify(10)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_resumed_card_that_was_sent_before_is_not_sent_again(self):
+        tid = self.brief_card()
+        self.notify()
+        self.later(tid)
+        self.later(tid, "resume")
+        self.notify(5)
+        self.assertEqual(len(self.sent), 1)
+
+
 class DeliveryTest(NotifyFixture, unittest.TestCase):
     def test_it_is_off_until_a_target_is_set(self):
         plugin.DEFAULTS["notify"]["target"] = ""

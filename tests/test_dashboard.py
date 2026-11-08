@@ -757,6 +757,164 @@ class MoveTest(DashboardFixture, unittest.TestCase):
         self.assertEqual(res.status_code, 409)
         self.assertTrue(res.json()["detail"])
 
+    def test_a_card_parks_in_scheduled_from_todo_ready_running_and_blocked(self):
+        for status in ("todo", "ready", "running", "blocked"):
+            with self.subTest(status):
+                tid = self.card()
+                self.set_status(tid, status)
+                res = self.move(tid, "scheduled")
+                self.assertEqual((res.status_code, res.json()["status"]), (200, "scheduled"))
+                self.assertEqual(self.status(tid), "scheduled")
+
+    def test_a_card_that_is_not_open_cannot_be_parked(self):
+        for status in ("done", "review", "archived", "scheduled"):
+            with self.subTest(status):
+                tid = self.card()
+                self.set_status(tid, status)
+                self.assertEqual(self.move(tid, "scheduled").status_code, 409)
+                self.assertEqual(self.status(tid), status)
+
+    def test_a_running_card_parked_loses_its_claim_so_no_worker_owns_it(self):
+        tid = self.card()
+        with_conn(lambda c: kb.claim_task(c, tid))
+        self.assertEqual(self.move(tid, "scheduled").status_code, 200)
+        task = with_conn(lambda c: kb.get_task(c, tid))
+        self.assertEqual((task.status, task.claim_lock, task.worker_pid), ("scheduled", None, None))
+
+    def test_a_parked_card_resumes_via_unblock_task_and_is_dispatchable_again(self):
+        tid = self.card()
+        self.set_status(tid, "scheduled")
+        res = self.move(tid, "unblocked")
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "ready"))
+
+    def test_a_parked_card_can_be_archived_but_not_completed(self):
+        tid = self.card()
+        self.set_status(tid, "scheduled")
+        self.assertEqual(self.move(tid, "done").status_code, 409)
+        self.assertEqual(self.move(tid, "archived").status_code, 200)
+
+
+class LaterTest(DashboardFixture, unittest.TestCase):
+    """Decide later: POST /later parks a card (a waiting one is only hidden), GET /later lists them, POST /resume brings them back."""
+
+    def later(self, tid, board="t-board"):
+        return self.client.post("/later", json={"board": board, "task_id": tid})
+
+    def resume(self, tid, board="t-board"):
+        return self.client.post("/resume", json={"board": board, "task_id": tid})
+
+    def set_status(self, tid, status):
+        with_conn(lambda c: c.execute("UPDATE tasks SET status = ? WHERE id = ? AND claim_lock IS NULL", (status, tid)).connection.commit())
+
+    def ids(self, path):
+        return [i["task_id"] for i in self.get(path)]
+
+    def test_a_card_that_waits_on_nobody_is_parked_in_scheduled_and_listed_later(self):
+        tid = self.card()
+        res = self.later(tid)
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "status": "scheduled"}))
+        self.assertEqual(self.status(tid), "scheduled")
+        (item,) = [i for i in self.get("/later") if i["task_id"] == tid]
+        self.assertEqual((item["board"], item["title"], item["status"], item["brief"]), ("t-board", "fix the parser", "scheduled", None))
+
+    def test_a_stalled_running_card_is_parked_the_same_way(self):
+        tid = self.card()
+        with_conn(lambda c: kb.claim_task(c, tid))
+        self.assertEqual(self.later(tid).status_code, 200)
+        self.assertEqual(self.status(tid), "scheduled")
+
+    def test_a_parked_card_resumes_to_ready_and_leaves_the_list(self):
+        tid = self.card()
+        self.later(tid)
+        res = self.resume(tid)
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "status": "ready"}))
+        self.assertNotIn(tid, self.ids("/later"))
+
+    def test_a_waiting_card_stays_blocked_and_recorded_but_leaves_needs_you(self):
+        tid = self.brief_card()
+        events = len(with_conn(lambda c: kb.list_events(c, tid)))
+        res = self.later(tid)
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "status": "blocked"}))
+        self.assertEqual(self.status(tid), "blocked")                         # no worker, nothing to dispatch: it is blocked already
+        self.assertEqual(len(with_conn(lambda c: kb.list_events(c, tid))), events)   # and no kanban write at all
+        self.assertEqual(self.get("/needs-you"), [])
+        self.assertEqual(self.get("/summary")["you"]["waiting"], 0)
+        self.assertNotIn("for you", self.get("/cards").get(tid, []))
+        (item,) = self.get("/later")
+        self.assertEqual((item["task_id"], item["status"], item["brief"]), (tid, "blocked", base.BRIEF_COMMENT.removeprefix("[for you] ")))
+
+    def test_a_resumed_waiting_card_is_in_needs_you_again_with_its_old_wait(self):
+        tid = self.brief_card()
+        (before,) = self.get("/needs-you")
+        self.later(tid)
+        res = self.resume(tid)
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "blocked"))
+        (after,) = self.get("/needs-you")
+        self.assertEqual((after["task_id"], after["brief"], after["sig"]), (tid, before["brief"], before["sig"]))
+        self.assertEqual(self.get("/later"), [])
+
+    def test_a_held_command_is_parked_and_resumed_like_a_brief(self):
+        tid = self.hold_card()
+        self.assertEqual(self.later(tid).json()["status"], "blocked")
+        self.assertEqual(self.get("/needs-you"), [])
+        self.assertEqual(self.get("/later")[0]["holds"], [{"reason": "it rewrites shared history", "alternative": "push a branch"}])
+        self.resume(tid)
+        self.assertEqual(self.ids("/needs-you"), [tid])
+
+    def test_a_new_question_on_a_parked_card_is_not_hidden(self):
+        tid = self.brief_card()
+        self.later(tid)
+        with_conn(lambda c: kb.add_comment(c, tid, "calling-mom", base.BRIEF_COMMENT.replace("auth provider do we use", "plan do we buy")))
+        self.assertEqual(self.ids("/needs-you"), [tid])
+        self.assertEqual(self.get("/later"), [])
+
+    def test_a_card_answered_while_parked_is_not_listed_later(self):
+        tid = self.brief_card()
+        self.later(tid)
+        self.assertEqual(self.client.post("/answer", json={"board": "t-board", "task_id": tid, "text": "Auth0"}).status_code, 200)
+        self.assertEqual(self.get("/later"), [])
+
+    def test_only_boards_that_opted_in_are_listed(self):
+        tid = self.card()
+        self.later(tid)
+        plugin.DEFAULTS["advisor"]["boards"] = []
+        plugin.DEFAULTS["answer"]["boards"] = []
+        self.assertEqual(self.get("/later"), [])
+
+    def test_the_oldest_parked_card_comes_first(self):
+        first, second = self.card(), self.card()
+        self.later(second)
+        self.later(first)
+        with_conn(lambda c: c.execute("UPDATE task_events SET created_at = created_at - 100 WHERE task_id = ? AND kind = 'scheduled'", (second,)).connection.commit())
+        self.assertEqual([i for i in self.ids("/later") if i in (first, second)], [second, first])
+
+    def test_a_card_that_cannot_be_parked_or_resumed_is_a_409_and_unchanged(self):
+        for status in ("done", "review", "archived", "scheduled"):
+            with self.subTest(f"park {status}"):
+                tid = self.card()
+                self.set_status(tid, status)
+                self.assertEqual(self.later(tid).status_code, 409)
+                self.assertEqual(self.status(tid), status)
+        for status in ("ready", "running", "done"):
+            with self.subTest(f"resume {status}"):
+                tid = self.card()
+                self.set_status(tid, status)
+                self.assertEqual(self.resume(tid).status_code, 409)
+                self.assertEqual(self.status(tid), status)
+
+    def test_a_board_or_card_that_does_not_exist_is_a_404(self):
+        tid = self.card()
+        for call in (self.later, self.resume):
+            with self.subTest(call.__name__):
+                self.assertEqual(call(tid, board="nowhere").json()["detail"], "no board 'nowhere'")
+                self.assertEqual(call("t_missing").json()["detail"], "no card 't_missing'")
+
+    def test_the_body_must_have_the_right_types(self):
+        for path in ("/later", "/resume"):
+            for body in ({"task_id": "t_x"}, {"board": "t-board"}, {"board": "t-board", "task_id": 5}):
+                with self.subTest(path=path, body=body):
+                    self.assertEqual(self.client.post(path, json=body).status_code, 422)
+
 
 class NewCardTest(DashboardFixture, unittest.TestCase):
     """GET /new-card (what the form offers) and POST /card (create through the PUBLIC ``kanban_create`` tool)."""

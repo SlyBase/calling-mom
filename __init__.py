@@ -1903,6 +1903,19 @@ def answer_card(board, task_id, text=None, *, by, accept=False, allow_once=False
     return {"ok": True, "task_id": task_id, "text": text, "unblocked": bool(released)}
 
 
+def set_later(task_id, sig) -> None:
+    """Decide later for a card that waits on a person: hide the wait ``sig`` from Needs you and the phone (``sig=None``:
+    show it again). Only the plugin's state file changes: the card is blocked already, so no worker runs and Hermes has
+    nothing to dispatch. A new brief or question has a new ``sig`` and shows up on its own."""
+    with _state_lock():
+        data = _load_holds()
+        if sig:
+            data.setdefault("later", {})[task_id] = sig
+        else:
+            (data.get("later") or {}).pop(task_id, None)
+        _write_state(data)
+
+
 def _last_block(board, task) -> tuple:
     """``(reason, event id)`` of the card's last block, i.e. what the worker asked (``("", None)`` when unknown)."""
     with _connect(board) as conn:
@@ -1920,8 +1933,8 @@ def waiting(board, cards, state, now) -> list:
     """The cards of a board that wait for a person: a `[for you]` brief nobody answered yet, a pre-flight hold nobody
     allowed, or the worker's own question (``needs_input``) when no brief was ever written for it. ``sig`` names WHAT
     they wait on (a new brief or question on the same card gets a new one); ``sent_to`` is the platform the phone
-    notice for exactly this ``sig`` reached, or None."""
-    answered, allowed, notified = state.get("answered") or {}, state.get("allowances") or {}, state.get("notified") or {}
+    notice for exactly this ``sig`` reached, or None. ``later``: the person put this very wait aside (see ``set_later``)."""
+    answered, allowed, notified, later = state.get("answered") or {}, state.get("allowances") or {}, state.get("notified") or {}, state.get("later") or {}
     items = []
     for task, comments in cards:
         if task.status != "blocked":
@@ -1941,7 +1954,7 @@ def waiting(board, cards, state, now) -> list:
                           "brief": brief.body.removeprefix(_FOR_YOU).strip() if brief else (question if asks else None),
                           "holds": [{"reason": h.get("reason"), "alternative": h.get("alternative")} for h in holds],
                           "can_accept": bool(brief and _recommendation(comments)),
-                          "sig": sig, "local_only": _is_local_only(task),
+                          "sig": sig, "local_only": _is_local_only(task), "later": later.get(task.id) == sig,
                           "sent_to": sent.get("platform") if sent.get("ok") and sent.get("sig") == sig else None,
                           "age_s": max(0, int(now - since))})
     return items
@@ -2038,7 +2051,7 @@ def notify_waiting(board, now=None) -> int:
     now = time.time() if now is None else now
     started = 0
     for item in waiting(board, blocked_cards(board), _load_holds(), now):
-        if item["local_only"] or not _claim_notice(item["task_id"], item["sig"], target, now):
+        if item["local_only"] or item["later"] or not _claim_notice(item["task_id"], item["sig"], target, now):
             continue
         _send_notice(item["task_id"], board, item["sig"], target, _redact(_notice(item, board)))
         started += 1
