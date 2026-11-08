@@ -1,15 +1,17 @@
 """Backend of the Calling Mom Desktop half: routes under /api/plugins/calling-mom/.
 
-Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanban boards; the only write is
-POST /answer, which goes through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``).
+Runs in the gateway process. Reads the plugin's own log and, read-only, the Kanban boards. Two writes: POST /answer goes
+through the plugin's ``answer_card`` (the same door as ``hermes calling-mom answer``), POST /card creates a card through
+Hermes' public ``kanban_create`` tool.
 """
 import importlib.util
+import json
 import re
 import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 DAY = 86400
@@ -267,3 +269,62 @@ def answer(body: Answer):
     if not out["ok"]:
         raise HTTPException(out["status"], out["error"])
     return out
+
+
+def _boards():
+    """The boards the person opted in (``answer.boards`` / ``advisor.boards``; ``*`` = all): the only ones a card may be created on."""
+    return [b for b in mom()._core.list_board_slugs() if mom()._opted_in(b)]
+
+
+@router.get("/new-card")
+def new_card_options():
+    """What the page's New card form offers: opted-in boards, installed profiles, the plain flags the plugin understands."""
+    boards, cfg = _boards(), mom().settings()
+    current = mom()._core.kb.get_current_board() if boards else None
+    return {"boards": boards, "default_board": current if current in boards else (boards[0] if boards else None),
+            "profiles": mom()._core.profile_names(), "flags": {"crit": cfg["marker"], "review": cfg["review"]["marker"]}}
+
+
+class NewCard(BaseModel):
+    board: str = Field(max_length=64)
+    title: str = Field(max_length=200)
+    body: str = Field("", max_length=8000)
+    assignee: str = Field(max_length=64)
+    priority: int = Field(0, ge=0, le=100)
+    crit: bool = False
+    review: bool = False
+    verify: str = Field("", max_length=300)
+    key: str | None = Field(None, max_length=64)  # the form's id for this attempt: a double click creates one card
+
+
+@router.post("/card")
+def create_card(body: NewCard):
+    """A person's New card: the card is made by the PUBLIC ``kanban_create`` tool (never a raw write), on an opted-in
+    board, for an installed profile. ``crit`` / ``review`` become the plain title prefixes and ``verify`` the ``verify:`` line."""
+    title, text, verify = body.title.strip(), body.body.strip(), body.verify.strip()
+    if not title:
+        raise HTTPException(400, "give the card a title")
+    if "\n" in verify:
+        raise HTTPException(400, "verify is one command on one line")
+    if body.board not in mom()._core.list_board_slugs():
+        raise HTTPException(404, f"no board {body.board!r}")
+    if body.board not in _boards():
+        raise HTTPException(403, f"board {body.board!r} did not opt in to Calling Mom")
+    if not mom()._core.profile_exists(body.assignee):
+        raise HTTPException(400, f"no profile {body.assignee!r}")
+    cfg = mom().settings()
+    for on, marker in ((body.review, cfg["review"]["marker"]), (body.crit, cfg["marker"])):  # [crit] ends up first
+        if on and marker and marker not in title:
+            title = f"{marker} {title}"
+    if verify:
+        text = f"{text}\nverify: {verify}".strip()
+    args = {"title": title, "assignee": body.assignee, "board": body.board, "priority": body.priority,
+            **({"body": text} if text else {}), **({"idempotency_key": body.key} if body.key else {})}
+    try:
+        out = json.loads(mom()._core.dispatch_tool("kanban_create", args))
+        task_id = out["task_id"] if out.get("ok") else None
+    except Exception as exc:  # no registry, a reply that is no JSON: nothing is known to be created
+        raise HTTPException(502, f"kanban_create did not answer ({type(exc).__name__})")
+    if task_id is None:
+        raise HTTPException(502, str(out.get("error") or "kanban_create refused the card")[:300])
+    return {"ok": True, "task_id": task_id, "board": body.board, "status": out.get("status")}

@@ -2,6 +2,7 @@
 import ast
 import builtins
 import importlib.util
+import json
 import logging
 import sys
 import tempfile
@@ -80,6 +81,7 @@ class MissingInternalsTest(unittest.TestCase):
         core = load()
         self.assertEqual(core.load_config(), {})
         self.assertFalse(core.profile_exists("anyone"))
+        self.assertEqual(core.profile_names(), [])
         self.assertEqual(core.list_providers({}), [])
         self.assertEqual(core.list_board_slugs(), [])
         self.assertFalse(core.has_menu())
@@ -241,6 +243,14 @@ class HelpersTest(unittest.TestCase):
         self.assertIsInstance(core.list_providers({}), list)
         self.assertIsInstance(core.list_board_slugs(), list)
         self.assertTrue(core.hermes_version())
+        self.assertIn("default", core.profile_names())
+
+    def test_dispatch_tool_runs_a_public_tool_through_the_registry(self):
+        core = load()
+        self.assertIn("Unknown tool", json.loads(core.dispatch_tool("no_such_tool", {}))["error"])
+        out = json.loads(core.dispatch_tool("kanban_create", {"title": "from the core", "assignee": "w"}))
+        task = test_calling_mom.with_conn(lambda c: test_calling_mom.kb.get_task(c, out["task_id"]))
+        self.assertEqual((out["ok"], task.title, task.assignee), (True, "from the core", "w"))
 
     def test_menu_is_available_and_callable(self):
         core = load()

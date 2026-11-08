@@ -756,3 +756,110 @@ class MoveTest(DashboardFixture, unittest.TestCase):
         res = self.move(child, "done")
         self.assertEqual(res.status_code, 409)
         self.assertTrue(res.json()["detail"])
+
+
+class NewCardTest(DashboardFixture, unittest.TestCase):
+    """GET /new-card (what the form offers) and POST /card (create through the PUBLIC ``kanban_create`` tool)."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        self._core = {n: getattr(plugin._core, n, None) for n in ("dispatch_tool", "profile_names", "profile_exists")}
+        plugin._core.dispatch_tool = self.dispatch
+        plugin._core.profile_names = lambda: ["default", "daidalos"]
+        plugin._core.profile_exists = lambda name: name in ("default", "daidalos")
+        self.reply = json.dumps({"ok": True, "task_id": "t_new1", "status": "ready"})
+        self.addCleanup(lambda: [setattr(plugin._core, n, v) for n, v in self._core.items()])
+
+    def dispatch(self, name, args):
+        self.calls.append((name, args))
+        return self.reply
+
+    def create(self, **body):
+        body = {"board": "t-board", "title": "Fix the parser", "assignee": "daidalos", **body}
+        return self.client.post("/card", json=body)
+
+    def test_the_form_offers_the_opted_in_boards_the_profiles_and_the_default_board(self):
+        out = self.get("/new-card")
+        self.assertEqual((out["boards"], out["default_board"], out["profiles"]), (["t-board"], "t-board", ["default", "daidalos"]))
+        self.assertEqual((out["flags"]["crit"], out["flags"]["review"]), ("[crit]", "[review]"))
+
+    def test_a_board_that_did_not_opt_in_is_not_offered(self):
+        plugin.DEFAULTS["answer"].update(boards=["somewhere-else"])
+        plugin.DEFAULTS["advisor"].update(boards=[])
+        self.assertEqual(self.get("/new-card")["boards"], [])
+        self.assertIsNone(self.get("/new-card")["default_board"])
+
+    def test_a_star_opts_every_board_in(self):
+        plugin._core.list_board_slugs = lambda: ["t-board", "other"]
+        plugin.DEFAULTS["answer"].update(boards=["*"])
+        self.assertEqual(self.get("/new-card")["boards"], ["t-board", "other"])
+
+    def test_the_card_is_created_through_the_public_kanban_create_tool(self):
+        res = self.create(body="Please do it.", priority=3, key="abc")
+        self.assertEqual((res.status_code, res.json()), (200, {"ok": True, "task_id": "t_new1", "board": "t-board", "status": "ready"}))
+        self.assertEqual(self.calls, [("kanban_create", {"title": "Fix the parser", "body": "Please do it.", "assignee": "daidalos",
+                                                      "board": "t-board", "priority": 3, "idempotency_key": "abc"})])
+
+    def test_a_card_without_body_priority_or_key_sends_only_what_was_typed(self):
+        self.create()
+        (_, args), = self.calls
+        self.assertEqual(args, {"title": "Fix the parser", "assignee": "daidalos", "board": "t-board", "priority": 0})
+
+    def test_the_flags_become_the_plain_prefixes_and_the_verify_line_the_plugin_reads(self):
+        self.create(body="Do it.", crit=True, review=True, verify="pytest -q")
+        (_, args), = self.calls
+        self.assertEqual((args["title"], args["body"]), ("[crit] [review] Fix the parser", "Do it.\nverify: pytest -q"))
+        self.assertEqual(plugin._VERIFY_LINE.search(args["body"]).group(1), "pytest -q")
+
+    def test_a_verify_line_alone_is_the_whole_body(self):
+        self.create(verify="make test")
+        self.assertEqual(self.calls[0][1]["body"], "verify: make test")
+
+    def test_the_markers_follow_the_settings_and_are_never_doubled(self):
+        plugin.DEFAULTS["marker"] = "[risky]"
+        self.addCleanup(plugin.DEFAULTS.__setitem__, "marker", "[crit]")
+        self.create(title="[risky] Fix the parser", crit=True)
+        self.assertEqual(self.calls[0][1]["title"], "[risky] Fix the parser")
+
+    def test_the_input_is_refused_before_anything_is_created(self):
+        plugin._core.list_board_slugs = lambda: ["t-board", "closed"]
+        plugin.DEFAULTS["answer"].update(boards=["t-board"])
+        plugin.DEFAULTS["advisor"].update(boards=[])
+        for why, body, status in (
+            ("blank title", {"title": "  "}, 400),
+            ("title too long", {"title": "x" * 201}, 422),
+            ("body too long", {"body": "x" * 8001}, 422),
+            ("verify too long", {"verify": "x" * 301}, 422),
+            ("verify on two lines", {"verify": "true\nrm x"}, 400),
+            ("blank verify is no verify line", {"verify": "  "}, None),
+            ("priority too high", {"priority": 101}, 422),
+            ("priority negative", {"priority": -1}, 422),
+            ("key too long", {"key": "k" * 65}, 422),
+            ("assignee too long", {"assignee": "a" * 65}, 422),
+            ("board that does not exist", {"board": "nowhere"}, 404),
+            ("board that did not opt in", {"board": "closed"}, 403),
+            ("profile that does not exist", {"assignee": "ghost"}, 400),
+            ("no assignee", {"assignee": ""}, 400),
+        ):
+            with self.subTest(why):
+                before = len(self.calls)
+                res = self.create(**body)
+                self.assertEqual(res.status_code, status or 200, res.text)
+                self.assertEqual(len(self.calls), before + (0 if status else 1))
+
+    def test_a_tool_error_is_a_502_with_its_text(self):
+        self.reply = json.dumps({"error": "kanban_create: board locked"})
+        res = self.create()
+        self.assertEqual((res.status_code, res.json()["detail"]), (502, "kanban_create: board locked"))
+
+    def test_an_unreadable_reply_is_a_502(self):
+        self.reply = "not json"
+        self.assertEqual(self.create().status_code, 502)
+        self.reply = json.dumps({"ok": True})                    # no id: nothing was created as far as we can tell
+        self.assertEqual(self.create().status_code, 502)
+
+    def test_a_dispatch_that_raises_is_a_502(self):
+        def boom(name, args): raise RuntimeError("no registry")
+        plugin._core.dispatch_tool = boom
+        self.assertEqual(self.create().status_code, 502)

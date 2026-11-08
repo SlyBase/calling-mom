@@ -125,6 +125,24 @@ def profile_exists(name) -> bool:
         return False  # unknown profile: the caller skips the step that needs it
 
 
+def profile_names() -> list:
+    """The names of the installed Hermes profiles (the Desktop form's assignee list); empty when Hermes cannot say."""
+    try:
+        from hermes_cli.profiles import list_profiles
+        return [p.name for p in list_profiles(lazy_skill_count=True)]
+    except Exception:
+        return []
+
+
+def dispatch_tool(name, args) -> str:
+    """Run a PUBLIC Hermes tool through the registry and return its JSON reply: what ``ctx.dispatch_tool`` does, for the
+    dashboard routes, which get no ``ctx`` (docs/UPSTREAM.md). The registry turns every handler error into an ``error`` reply."""
+    from tools.registry import discover_builtin_tools, registry
+    if registry.get_entry(name) is None:  # a dashboard process may not have imported the built-in tools yet
+        discover_builtin_tools()
+    return registry.dispatch(name, args)
+
+
 def profile_home(name):
     """The home directory of a Hermes profile: its ``state.db`` holds the sessions."""
     from hermes_cli.profiles import get_profile_dir
