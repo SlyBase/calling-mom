@@ -8,6 +8,8 @@ place, `hermes calling-mom doctor` names it, and the plugin degrades instead of 
 hooks. The helpers below are best effort and return safe values.
 """
 import json
+import shutil
+import subprocess
 
 try:
     from agent.redact import redact_for_egress
@@ -217,10 +219,28 @@ def hermes_version() -> str:
         return "?"
 
 
-def send_message(target, text) -> dict:
-    """One message through Hermes' own delivery: the function behind ``hermes send`` (target ``telegram`` = the home
-    channel, ``telegram:<chat>`` = one chat). Returns Hermes' result (``success`` or ``error``). Raises when the import fails.
+SEND_TIMEOUT_S = 90  # one CLI send: the CLI bootstraps secrets and loads Hermes, so it is slower than a bare HTTP post
 
-    ``send_message`` is deliberately not a registered tool, so ``ctx.dispatch_tool`` cannot reach it (docs/UPSTREAM.md)."""
-    from tools.send_message_tool import send_message_tool
-    return json.loads(send_message_tool({"action": "send", "target": target, "message": text}))
+
+def _cli_json(text: str) -> dict:
+    """The JSON object in ``hermes send``'s output: the CLI may print a bootstrap line before it."""
+    for i, char in enumerate(text):
+        if char == "{":
+            try:
+                return json.loads(text[i:])
+            except ValueError:
+                continue
+    raise ValueError("hermes send printed no JSON result")
+
+
+def send_message(target, text) -> dict:
+    """One message through Hermes' public ``hermes send`` CLI (the documented door for scripts and cron jobs):
+    target ``telegram`` = the home channel, ``telegram:<chat>`` = one chat. Returns Hermes' result (``success`` or
+    ``error``). Raises when the CLI cannot run or prints no JSON.
+
+    The CLI is a separate process, so nothing of Hermes' internals is imported here (docs/UPSTREAM.md)."""
+    argv = [shutil.which("hermes") or "hermes", "send", "--to", target, "--json", text]
+    out = subprocess.run(argv, capture_output=True, text=True, timeout=SEND_TIMEOUT_S)
+    if out.returncode != 0:
+        raise RuntimeError(f"hermes send exited {out.returncode}")
+    return _cli_json(out.stdout)

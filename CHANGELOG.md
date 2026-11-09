@@ -3,6 +3,16 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.7.2] - 2026-11-09
+
+### Fixed
+- **Desktop: no more reading the app's own markup** (`desktop/plugin.js`). `openCard` polled `document.querySelectorAll('span.font-mono')`, walked to `.closest('[draggable="true"]')` and clicked the tile to open the Kanban drawer. A desktop plugin must go through the SDK only: core markup changes without notice and the click breaks silently. The card's door is now `host.navigate('/kanban')` plus a toast that names the card id (and the short id shown under the title, so the card can be found on the board). An SDK verb to open a card drawer is asked for upstream (`docs/UPSTREAM.md` 8). No other DOM access is left; the page's poller still checks `document.hidden`, which is a browser API, not app markup.
+- **Desktop: the New card form names the real cause of a 404** (`desktop/plugin.js`). A 404 on `POST /card` is not the form: the gateway still runs a Calling Mom from before that route, because a plugin's routes are imported when the gateway starts. The form now says so and asks for a gateway restart instead of showing the bare status. This is what a webapp shows while the native app (which loads a fresh copy) works.
+
+### Changed
+- **Phone notices go through the public `hermes send` CLI** (`_core.py`, `tests/test_notify.py`). `_core.send_message` no longer imports `tools.send_message_tool`; it runs `hermes send --to <target> --json <text>` as a subprocess (`SEND_TIMEOUT_S` = 90 s) and parses the JSON result, so the plugin has one private import less. The call is slower than the old in-process function (one Hermes start per notice), so it still runs on its own thread with the 15 s wait; a failed run is a failed notice and is retried like before. `docs/UPSTREAM.md` (7), `docs/TECHNICAL.md` and `SECURITY.md` updated.
+- **`calling_mom_answer` answers only in the session that got the notice** (`__init__.py`, `tests/test_notify.py`, `docs/TECHNICAL.md`). The tool now takes the `session_id` it is called from and refuses every other one: the session must be on the notify target's platform and, when the target names a chat (`telegram:<chat>`), in that chat. A reply from another chat gets a plain error and the card keeps waiting. Closes the hole that any chat allowed to talk to the gateway agent could answer a card, `allow` for a held command included.
+
 ## [1.7.1] - 2026-11-08
 
 ### Added

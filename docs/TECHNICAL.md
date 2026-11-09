@@ -432,8 +432,9 @@ at most) and records `ok` and an error class in the state (`notified.<card>`, `n
 is retried after 120 s, then 240 s (`NOTIFY_TRIES` = 3, `_retry_due`); a card never leaves Needs you because of it. The text is
 built by `_notice` and redacted by `_redact` (the redactor of the precedents); no redactor, no send. `[local-only]` cards are
 skipped. Why not `ctx.dispatch_tool("send_message")`: Hermes registers no such tool (`tools/send_message_tool.py`: "intentionally NOT
-registered as an agent-callable model tool"), so the call would answer "unknown tool"; `hermes send` and the cron delivery import the
-function, and so does `_core.send_message` (docs/UPSTREAM.md, 7). A subprocess `hermes send` would cost a Hermes start per notice.
+registered as an agent-callable model tool"), so the call would answer "unknown tool". The plugin runs the public `hermes send` CLI as a
+subprocess instead (`_core.send_message`, `hermes send --to <target> --json`, timeout 90 s): one Hermes start per notice, paid on the
+notice's own thread, which is the cheaper bill next to a private import (docs/UPSTREAM.md, 7).
 
 Reply path: Hermes mirrors the sent message into the chat session, so the gateway agent sees the card id. It calls the tool
 `calling_mom_answer(card_id, answer, board=None)` (toolset `calling-mom`; `check_fn` = a target is set and the process is not a
@@ -441,7 +442,9 @@ Kanban worker). `handle_answer` finds the board (the first opted-in board that h
 of `answer_card`, turns a single letter into `A) <option>` from the Options line of the newest brief, and calls
 `answer_card(..., by="phone")`: precedents, comments, unblock and the `human_answer via=phone` row are exactly those of the Desktop
 buttons. Why a tool and not `register_approval_transport` / `ask_choice`: the first is for tool approvals, the second for a slash
-command waiting in one session; neither carries "a card from the board asked you something while nobody was in the chat".
+command waiting in one session; neither carries "a card from the board asked you something while nobody was in the chat". The tool
+takes the session it is called from (`session_id`) and answers only there: the notify target's platform, and its chat when the target
+names one (`telegram:<chat>`); a reply from any other chat is refused and the card stays waiting. Without a target nothing is offered.
 
 `doctor` shows a `phone` check while a target is set (target and the last result); `status` shows `phone   : <target>|off`.
 `GET /needs-you` items gain `sig`, `local_only` and `sent_to` (the platform of the notice that matches the current `sig`; the

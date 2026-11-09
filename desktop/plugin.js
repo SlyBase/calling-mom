@@ -5,7 +5,7 @@ import { createElement as h, useEffect, useState, useSyncExternalStore } from 'r
 
 const { host, Button, Badge, Codicon, EmptyState, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } = sdk
 
-const VERSION = '1.7.1' // must equal plugin.yaml (a test checks it): the page shows which copy runs
+const VERSION = '1.7.2' // must equal plugin.yaml (a test checks it): the page shows which copy runs
 const PATH = '/calling-mom'
 const POLL_MS = 15000
 
@@ -59,27 +59,12 @@ function setHours(hours) {
   refresh()
 }
 
-// The card's board door: the Kanban page opens its own drawer, and the drawer has no URL
-// door a plugin can park on, so a card opens there, not here.
-// The drawer is the Kanban page's own state, so after the jump the card is clicked where it is drawn:
-// its footer shows the short id (best effort; the card must sit on the board the page shows).
+// The card's board door: the Kanban page opens its own drawer, and the drawer has no URL door a plugin can park on.
+// The plugin SDK has no "open card" verb yet (asked for upstream, docs/UPSTREAM.md 8), and the app's own markup is no
+// door: core DOM changes without notice. So the jump goes to the board and the id is shown, and the person opens it there.
 function openCard(item) {
   host.navigate('/kanban')
-
-  const short = item.task_id.replace(/^t_/, '').slice(0, 6)
-  let tries = 0
-  const timer = setInterval(() => {
-    const footer = [...document.querySelectorAll('span.font-mono')].find(el => el.textContent === short)
-    const card = footer && footer.closest('[draggable="true"]')
-
-    if (card) {
-      card.click()
-    }
-
-    if (card || ++tries > 20) {
-      clearInterval(timer)
-    }
-  }, 150)
+  host.notify({ kind: 'info', message: `Card ${item.task_id} is on the board: open it there, its short id ${item.task_id.replace(/^t_/, '').slice(0, 6)} is under the title` })
 }
 
 function post(path, item, extra) {
@@ -561,7 +546,11 @@ function NewCardForm({ onClose }) {
       host.notify({ kind: 'success', message: `Card ${out.task_id} created` })
       refresh()
     } catch (err) {
-      setError(message(err))
+      // A 404 here is not the form's fault: the gateway still runs a Calling Mom from before POST /card existed
+      // (its plugin routes are imported at startup), so the card cannot be made until it restarts.
+      setError(/404|not found/i.test(message(err))
+        ? 'The gateway still runs an older Calling Mom (no POST /card): restart the gateway, then reload this page.'
+        : message(err))
     }
 
     setBusy(false)
