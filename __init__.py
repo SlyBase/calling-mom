@@ -2080,12 +2080,27 @@ def _option_text(board, card_id, letter) -> str:
     return f"{letter}) {found[letter].strip(' ,;')}" if letter in found else letter
 
 
-def handle_answer(args, **_):
+def _target_session(session_id) -> bool:
+    """Whether this session is the one Calling Mom sends its notices to: the notify target's platform, and its chat
+    when the target names one (``telegram:42``). A bare platform target allows any chat on that platform; no session
+    id at all (a caller that passes none) is refused."""
+    target = str(settings()["notify"].get("target") or "").strip().lower()
+    if not target or not session_id:
+        return False
+    platform, _, chat = target.partition(":")
+    parts = [part.strip().lower() for part in str(session_id).split(":")]
+    return platform in parts and (not chat or chat in parts)
+
+
+def handle_answer(args, session_id=None, **_):
     """Tool ``calling_mom_answer``: the person replied on their phone. Goes through ``answer_card`` like the Desktop buttons.
-    A single letter stands for that option of Mom's brief; ``accept`` takes her recommendation; ``allow`` runs a held command once."""
+    A single letter stands for that option of Mom's brief; ``accept`` takes her recommendation; ``allow`` runs a held command once.
+    Only the session the notice went to may answer: any other chat can talk to the agent, but not for a card."""
     card, text = str((args or {}).get("card_id") or "").strip(), str((args or {}).get("answer") or "").strip()
     if not (card and text):
         return json.dumps({"ok": False, "error": "needs card_id and answer"})
+    if not _target_session(session_id):
+        return json.dumps({"ok": False, "error": "calling_mom_answer answers only in the session Calling Mom sends its notices to"})
     try:
         board = str(args.get("board") or "").strip() or _find_board(card)
         if board is None:
@@ -2109,7 +2124,8 @@ _ANSWER_TOOL = {
     "name": "calling_mom_answer",
     "description": "The person replied on their phone to a 'Calling Mom: needs you' message (it names a card id). Pass the card id "
                    "and their reply: a letter (A, B) for one of the options in the message, 'accept' for Mom's recommendation, "
-                   "'allow' to let the held command run once, or their own words. Use it only for such a reply.",
+                   "'allow' to let the held command run once, or their own words. Use it only for such a reply, and only in the "
+                   "chat that received the message.",
     "parameters": {
         "type": "object",
         "properties": {

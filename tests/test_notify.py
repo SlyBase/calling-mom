@@ -196,7 +196,20 @@ class FailureTest(NotifyFixture, unittest.TestCase):
 
 class ReplyTest(NotifyFixture, unittest.TestCase):
     def reply(self, **args):
-        return json.loads(plugin.handle_answer(args))
+        return json.loads(plugin.handle_answer(args, session_id="agent:main:telegram:-100123"))
+
+    def test_only_the_session_the_notice_went_to_may_answer(self):
+        tid = self.brief_card()
+        other = json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="agent:main:discord:9"))
+        self.assertIn("only in the session", other["error"])
+        self.assertFalse(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}))["ok"])
+        self.assertEqual(self.status(tid), "blocked")  # neither one answered the card
+
+    def test_a_target_that_names_one_chat_binds_the_answer_to_it(self):
+        tid = self.brief_card()
+        plugin.DEFAULTS["notify"]["target"] = "telegram:-100123"
+        self.assertFalse(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="agent:main:telegram:42"))["ok"])
+        self.assertTrue(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="agent:main:telegram:-100123"))["ok"])
 
     def test_a_letter_answers_with_the_option_it_stands_for(self):
         tid = self.brief_card()
@@ -299,7 +312,21 @@ class RegisterTest(unittest.TestCase):
 
 
 class SendMessageTest(unittest.TestCase):
-    def test_the_core_calls_the_function_behind_hermes_send_and_returns_its_result(self):
-        with mock.patch("tools.send_message_tool.send_message_tool", return_value='{"success": true}') as tool:
-            self.assertEqual(plugin._core.send_message("telegram:42", "hi"), {"success": True})
-        tool.assert_called_once_with({"action": "send", "target": "telegram:42", "message": "hi"})
+    def test_the_core_calls_the_hermes_send_cli_and_returns_its_json(self):
+        done = mock.Mock(returncode=0, stdout='[secrets] applied\n{\n  "success": true,\n  "chat_id": "-100"\n}')
+        with mock.patch("subprocess.run", return_value=done) as run, mock.patch.object(plugin._core.shutil, "which", return_value="/opt/hermes/bin/hermes"):
+            self.assertEqual(plugin._core.send_message("telegram:42", "hi"), {"success": True, "chat_id": "-100"})
+        self.assertEqual(run.call_args.args[0], ["/opt/hermes/bin/hermes", "send", "--to", "telegram:42", "--json", "hi"])
+
+    def test_a_cli_that_is_not_on_the_path_is_called_by_its_name(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=2, stdout="")) as run, \
+                mock.patch.object(plugin._core.shutil, "which", return_value=None):
+            with self.assertRaises(RuntimeError):
+                plugin._core.send_message("telegram", "hi")
+        self.assertEqual(run.call_args.args[0][0], "hermes")
+
+    def test_output_without_a_json_object_raises(self):
+        for stdout in ("no json here", "{not json} then {still not}"):
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=stdout)):
+                with self.assertRaises(ValueError):
+                    plugin._core.send_message("telegram", "hi")

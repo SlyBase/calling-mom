@@ -108,15 +108,16 @@ message to the user's phone. A plugin that wants to say "this card needs you" on
 The reply is the second gap: nothing connects "the person answered a plugin's message" to the plugin; today the chat agent has to
 choose to call a plugin tool.
 
-**Today.** `_core.py` `send_message` imports `tools.send_message_tool.send_message_tool` (the function behind `hermes send`) and
-calls it with `{"action": "send", "target": ..., "message": ...}`. The reply goes through the plugin tool `calling_mom_answer`,
-which the chat agent calls when the person answers the mirrored message. It is a private import, listed in `SECURITY.md`
-(rule 13); the text that leaves is redacted first.
+**Today.** `_core.py` `send_message` runs the public `hermes send` CLI as a subprocess (`hermes send --to <target> --json <text>`,
+`SEND_TIMEOUT_S` = 90 s, the JSON result parsed from the output). No Hermes module is imported for it any more. The reply goes through
+the plugin tool `calling_mom_answer`, which the chat agent calls when the person answers the mirrored message; the tool answers only in
+the session the notice went to (the notify target's platform, and its chat when the target names one). The text that leaves is redacted
+first.
 
 **Would use it.** `__init__.py` `_send_notice` and `notify_waiting` (send), `handle_answer` (reply).
 
-**Removes.** The `tools.send_message_tool` import. A `ctx.send_message(target, text, *, reply_to=None) -> {ok, id}` with the same
-target syntax as `hermes send` would be enough, and `ctx.on_reply(message_id, handler)` (called with the person's text when they
+**Removes.** The CLI subprocess (one Hermes start per notice). A `ctx.send_message(target, text, *, reply_to=None) -> {ok, id}` with the
+same target syntax as `hermes send` would be enough, and `ctx.on_reply(message_id, handler)` (called with the person's text when they
 reply to that message, authorised by the platform's own allow-list) would remove the dependency on the chat agent choosing the tool.
 
 ## 8. A public way for a dashboard route to call a tool, and to open a Kanban card
@@ -126,7 +127,9 @@ reply to that message, authorised by the platform's own allow-list) would remove
 card's detail drawer (`host.openKanbanCard(board, id)`), so after creating a card the page can only `host.navigate('/kanban')`.
 
 **Today.** `_core.py` `dispatch_tool` imports `tools.registry.registry` (the registry `ctx.dispatch_tool` calls) and runs the public
-`kanban_create` tool; the **New card** form shows the id and a plain **Open in Kanban** button. Private import, listed in `SECURITY.md`.
+`kanban_create` tool; the **New card** form shows the id and a plain **Open in Kanban** button. `desktop/plugin.js` `openCard` no
+longer reads the app's markup (it used to poll `span.font-mono` and click the tile): it navigates to the board and names the card id,
+since the SDK has no verb for the drawer. Private import, listed in `SECURITY.md`.
 
 **Would use it.** `dashboard/plugin_api.py` `create_card` (tool call), `desktop/plugin.js` `NewCardForm` (open the new card).
 
