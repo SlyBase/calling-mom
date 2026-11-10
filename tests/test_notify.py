@@ -195,21 +195,43 @@ class FailureTest(NotifyFixture, unittest.TestCase):
 
 
 class ReplyTest(NotifyFixture, unittest.TestCase):
+    def bind(self, platform, chat=""):
+        """Run as the gateway does: the session variables name the chat; the ``session_id`` is a timestamp id."""
+        env = {"HERMES_SESSION_PLATFORM": platform, "HERMES_SESSION_CHAT_ID": chat}
+        patcher = mock.patch("gateway.session_context.get_session_env", lambda name, default="": env.get(name, default))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def reply(self, **args):
-        return json.loads(plugin.handle_answer(args, session_id="agent:main:telegram:-100123"))
+        self.bind("telegram", "-100123")
+        return json.loads(plugin.handle_answer(args, session_id="20261110_101500_ab12cd"))
 
     def test_only_the_session_the_notice_went_to_may_answer(self):
         tid = self.brief_card()
-        other = json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="agent:main:discord:9"))
+        self.bind("discord", "9")
+        other = json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="20261110_101500_ab12cd"))
         self.assertIn("only in the session", other["error"])
+        self.assertEqual(self.status(tid), "blocked")
+
+    def test_a_session_without_platform_variables_is_refused(self):
+        tid = self.brief_card()
+        self.bind("", "")
         self.assertFalse(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}))["ok"])
-        self.assertEqual(self.status(tid), "blocked")  # neither one answered the card
+        self.assertEqual(self.status(tid), "blocked")
+
+    def test_a_session_context_that_fails_refuses(self):
+        tid = self.brief_card()
+        with mock.patch("gateway.session_context.get_session_env", side_effect=RuntimeError("boom")):
+            self.assertFalse(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}))["ok"])
+        self.assertEqual(self.status(tid), "blocked")
 
     def test_a_target_that_names_one_chat_binds_the_answer_to_it(self):
         tid = self.brief_card()
         plugin.DEFAULTS["notify"]["target"] = "telegram:-100123"
-        self.assertFalse(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="agent:main:telegram:42"))["ok"])
-        self.assertTrue(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}, session_id="agent:main:telegram:-100123"))["ok"])
+        self.bind("telegram", "42")
+        self.assertFalse(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}))["ok"])
+        self.bind("telegram", "-100123")
+        self.assertTrue(json.loads(plugin.handle_answer({"card_id": tid, "answer": "A"}))["ok"])
 
     def test_a_letter_answers_with_the_option_it_stands_for(self):
         tid = self.brief_card()

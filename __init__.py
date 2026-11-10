@@ -2080,26 +2080,27 @@ def _option_text(board, card_id, letter) -> str:
     return f"{letter}) {found[letter].strip(' ,;')}" if letter in found else letter
 
 
-def _target_session(session_id) -> bool:
-    """Whether this session is the one Calling Mom sends its notices to: the notify target's platform, and its chat
-    when the target names one (``telegram:42``). A bare platform target allows any chat on that platform; no session
-    id at all (a caller that passes none) is refused."""
+def _target_session() -> bool:
+    """Whether the chat this tool runs in is the one Calling Mom sends its notices to: the notify target's platform, and its chat
+    when the target names one (``telegram:42``). A bare platform target allows any chat on that platform. The gateway's
+    ``session_id`` is a ``<timestamp>_<hex>`` id that names neither, so the platform and chat come from the session variables;
+    when they are empty (no gateway chat, e.g. a CLI call) the answer is refused."""
     target = str(settings()["notify"].get("target") or "").strip().lower()
-    if not target or not session_id:
-        return False
     platform, _, chat = target.partition(":")
-    parts = [part.strip().lower() for part in str(session_id).split(":")]
-    return platform in parts and (not chat or chat in parts)
+    here = _core.session_env("HERMES_SESSION_PLATFORM")
+    if not (platform and here and here == platform.strip()):
+        return False
+    return not chat.strip() or _core.session_env("HERMES_SESSION_CHAT_ID") == chat.strip()
 
 
-def handle_answer(args, session_id=None, **_):
+def handle_answer(args, **_):
     """Tool ``calling_mom_answer``: the person replied on their phone. Goes through ``answer_card`` like the Desktop buttons.
     A single letter stands for that option of Mom's brief; ``accept`` takes her recommendation; ``allow`` runs a held command once.
     Only the session the notice went to may answer: any other chat can talk to the agent, but not for a card."""
     card, text = str((args or {}).get("card_id") or "").strip(), str((args or {}).get("answer") or "").strip()
     if not (card and text):
         return json.dumps({"ok": False, "error": "needs card_id and answer"})
-    if not _target_session(session_id):
+    if not _target_session():
         return json.dumps({"ok": False, "error": "calling_mom_answer answers only in the session Calling Mom sends its notices to"})
     try:
         board = str(args.get("board") or "").strip() or _find_board(card)

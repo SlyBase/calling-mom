@@ -443,7 +443,8 @@ of `answer_card`, turns a single letter into `A) <option>` from the Options line
 `answer_card(..., by="phone")`: precedents, comments, unblock and the `human_answer via=phone` row are exactly those of the Desktop
 buttons. Why a tool and not `register_approval_transport` / `ask_choice`: the first is for tool approvals, the second for a slash
 command waiting in one session; neither carries "a card from the board asked you something while nobody was in the chat". The tool
-takes the session it is called from (`session_id`) and answers only there: the notify target's platform, and its chat when the target
+answers only in the chat it runs in, read from Hermes' public `gateway.session_context` (`HERMES_SESSION_PLATFORM`, `HERMES_SESSION_CHAT_ID`; the
+gateway's `session_id` is a `<timestamp>_<hex>` id and names neither): the notify target's platform, and its chat when the target
 names one (`telegram:<chat>`); a reply from any other chat is refused and the card stays waiting. Without a target nothing is offered.
 
 `doctor` shows a `phone` check while a target is set (target and the last result); `status` shows `phone   : <target>|off`.

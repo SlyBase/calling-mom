@@ -233,6 +233,16 @@ def _cli_json(text: str) -> dict:
     raise ValueError("hermes send printed no JSON result")
 
 
+def session_env(name) -> str:
+    """One value of the running chat session (``HERMES_SESSION_PLATFORM`` / ``HERMES_SESSION_CHAT_ID``) through Hermes' public
+    ``gateway.session_context``; empty when it is not there or not set, so the caller refuses."""
+    try:
+        from gateway.session_context import get_session_env
+        return str(get_session_env(name, "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
 def send_message(target, text) -> dict:
     """One message through Hermes' public ``hermes send`` CLI (the documented door for scripts and cron jobs):
     target ``telegram`` = the home channel, ``telegram:<chat>`` = one chat. Returns Hermes' result (``success`` or

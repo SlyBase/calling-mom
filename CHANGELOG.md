@@ -3,6 +3,11 @@
 All notable changes to this plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.7.3] - 2026-11-10
+
+### Fixed
+- **`calling_mom_answer` works in a real gateway chat** (`__init__.py`, `tests/test_notify.py`, `docs/TECHNICAL.md`). The check for the notice's session looked for the notify target's platform and chat inside `session_id`, but the gateway's `session_id` is a `<timestamp>_<hex>` id that contains neither, so every phone reply was refused (it failed closed). The tool now compares the target with `get_session_env("HERMES_SESSION_PLATFORM")` and `get_session_env("HERMES_SESSION_CHAT_ID")` from Hermes' public `gateway.session_context`, and still refuses when they are empty. The tests bind those variables instead of passing session-key-shaped strings.
+
 ## [1.7.2] - 2026-11-09
 
 ### Fixed
